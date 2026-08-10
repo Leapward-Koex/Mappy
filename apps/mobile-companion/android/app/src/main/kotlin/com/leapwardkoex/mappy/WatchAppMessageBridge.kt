@@ -139,7 +139,11 @@ internal class WatchAppMessageBridge(
                 KEY_TOTAL_BYTES to fields[KEY_TOTAL_BYTES],
                 KEY_WORLD_X to fields[KEY_WORLD_X],
                 KEY_WORLD_Y to fields[KEY_WORLD_Y],
-                KEY_TILE_ZOOM to fields[KEY_TILE_ZOOM]
+                KEY_TILE_ZOOM to fields[KEY_TILE_ZOOM],
+                KEY_BUTTON_ID to fields[KEY_BUTTON_ID],
+                KEY_CHUNK_OFFSET to fields[KEY_CHUNK_OFFSET],
+                KEY_CHUNK_INDEX to fields[KEY_CHUNK_INDEX],
+                KEY_INSTRUCTION to fields[KEY_INSTRUCTION]
             )
         )
         scope.launch {

@@ -142,6 +142,35 @@ bash tooling/pebble-emulator-codex.sh debug-facing 45
 bash tooling/pebble-emulator-codex.sh debug-tile 0
 ```
 
+### Motion-assisted face-forward reacquisition
+
+During an active face-forward Walk route, the production watch app samples the
+accelerometer at 25 Hz in batches of five. A fixed-memory classifier recognizes
+walking followed by a stable wrist raise and temporarily accelerates bearing
+animation. It unsubscribes during menus, manual browse, non-Walk routes,
+north-up mode, and after route completion. Raw motion samples never leave the
+watch.
+
+The classifier and bearing profiles have a host test that does not require an
+emulator:
+
+```sh
+bash tooling/pebble-emulator-codex.sh test-motion-host
+```
+
+With a fixture build and active face-forward Walk route, deterministic sensor
+traces can be replayed directly through the emulator accelerometer channel:
+
+```sh
+bash tooling/pebble-emulator-codex.sh debug-motion stationary-raise
+bash tooling/pebble-emulator-codex.sh debug-motion walking-to-look
+```
+
+`test-motion-reacquire` automates the fixture route, negative stationary-raise
+case, walking-to-look transition, compass target change, 2–8 animation-tick
+assertion, log capture, and final screenshot. It exits without installing,
+wiping, or stopping anything when an emulator session is already running.
+
 For consumed-route overlay debugging, start a fixture route from the watch, then
 move the debug GPS fix along the active route:
 

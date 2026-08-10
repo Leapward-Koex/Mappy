@@ -117,6 +117,56 @@ This section defines map rotation and intentionally shares the same production
 heading source as the current-location view cone, as specified in
 `../watch/CURRENT_LOCATION_VIEW_CONE_SPEC.md`.
 
+## Motion-Assisted Bearing Reacquisition
+
+Face-forward navigation uses watch-local accelerometer data to recognize when
+the wearer transitions from walking with the watch lowered to raising and
+looking at the watch. The detector is automatic and has no user setting or
+phone dependency.
+
+Sensor lifecycle:
+
+- Subscribe to `AccelData` at 25 Hz in batches of five only while a confirmed
+  walking route is active, the stored orientation is `forward_up`, GPS-follow
+  is active, and the map is not obscured by a menu.
+- Unsubscribe and reset the detector on manual pan, menu entry, north-up
+  selection, route clear/arrival, or app teardown.
+- Ignore samples whose `did_vibrate` flag is set. Raw accelerometer axes and
+  timestamps must not be sent to the phone or retained after classification.
+
+The fixed-memory detector uses these initial responsive thresholds:
+
+1. Estimate gravity per axis with a 1/8 low-pass filter. Dynamic motion is the
+   sum of the absolute raw-minus-gravity residuals.
+2. Confirm walking after three step-like peaks of at least 180 mg, separated by
+   250–900 ms and contained within two seconds. A peak must remain aligned with
+   gravity so a wrist rotation alone cannot complete the walking cadence.
+3. Maintain a 1/16 filtered arm-down gravity baseline while walking.
+4. Start a raise candidate when filtered gravity moves at least 35 degrees from
+   that baseline during walking or within two seconds of the last walking peak.
+5. Confirm looking when the raised orientation remains at least 30 degrees from
+   baseline and within 12 degrees of a stable reference for 300 ms. Expire an
+   unconfirmed candidate after 1.5 seconds.
+6. Emit at most one watch-look event per walking episode. Another three-peak
+   walking cadence is required before a subsequent watch look can trigger.
+
+A confirmed watch look enables the fast bearing profile for 1.5 seconds. Route
+start also enables that profile for every travel mode; if heading is initially
+invalid, route start may wait up to three seconds for the first valid heading
+and then receives the full 1.5-second fast window.
+
+Bearing animation remains shortest-path and uses the shared 30 ms scheduler:
+
+| Profile | Base step per tick | Tail rule |
+| --- | --- | --- |
+| Normal | `clamp(abs_delta / 4, 4 deg, 12 deg)` | Complete when the remaining delta fits in one step. |
+| Fast reacquire | `clamp(abs_delta / 3, 8 deg, 24 deg)` | Split the final 24–48 degrees across two frames and complete the final at-most-24 degrees in one frame. |
+
+The fast profile therefore remains animated and settles a worst-case
+180-degree change within eight ticks/240 ms. Every accepted compass update in
+the window replaces the target. Invalid heading still falls back to north-up;
+it must never cause a stale or synthetic bearing to be animated.
+
 ## Watch Projection
 
 The watch keeps the same viewport center model:
@@ -408,6 +458,13 @@ Watch unit tests:
   corners.
 - Touch drag in facing-up exits follow mode and then moves north-up map content
   with the user's finger.
+- Idle, short walking, closely spaced bumps, vibration-contaminated samples,
+  and a stationary wrist raise do not emit a watch-look event.
+- Three cadence peaks followed by a stable raised pose emit exactly one
+  watch-look event; a new walking cadence rearms the detector.
+- Normal bearing smoothing retains its existing 4–12 degree profile. Fast
+  reacquisition is visibly animated, follows the shortest wraparound path,
+  accepts a changed target, and completes 180 degrees within 240 ms.
 
 Mobile tests:
 
@@ -428,6 +485,9 @@ Visual/emulator tests:
   facing-up and still represents the watch compass heading.
 - Verify no blank rotated corners remain after all requested tiles arrive.
 - Verify UI bands and menu text remain unrotated and within bounds.
+- Replay deterministic stationary-raise and walking-to-look accelerometer
+  fixtures. Only walking-to-look starts fast reacquisition, and it produces one
+  look event before requiring another walking cadence.
 
 ## Acceptance Criteria
 
@@ -442,6 +502,10 @@ Visual/emulator tests:
   compact recenter action, and does not disable panning.
 - Recenter restores GPS-follow and the selected centered-map orientation.
 - Invalid or stale heading falls back without showing stale direction.
+- Starting face-forward navigation in any travel mode accelerates initial
+  bearing acquisition. During a walking route, walking-to-look detection starts
+  one 1.5-second fast-animation window and settles the latest target within
+  240 ms without snapping.
 - Facing-up requests enough tile coverage for the rotated viewport while
   GPS-follow is active.
 - The feature works without adding a project backend, a Google Maps notification

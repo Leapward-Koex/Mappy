@@ -43,6 +43,39 @@ class WatchAppMessageBridgeTest {
     }
 
     @Test
+    fun inboundWatchLogForwardsBoundedSemanticFields() {
+        val transport = FakePebbleTransport()
+        val events = mutableListOf<Map<String, Any?>>()
+        val bridge = WatchAppMessageBridge(
+            uuid,
+            transport,
+            eventSink = { events.add(it) }
+        ) { emptyList() }
+
+        bridge.start()
+        transport.deliverWatchData(
+            43,
+            watchMessage(
+                CMD_LOG_EVENT,
+                mapOf(
+                    KEY_BUTTON_ID to 0,
+                    KEY_CHUNK_OFFSET to 10,
+                    KEY_CHUNK_INDEX to 2,
+                    KEY_INSTRUCTION to "bearing reacquire"
+                )
+            )
+        )
+
+        waitUntil { events.any { it["event"] == "watchCommand" && it["command"] == CMD_LOG_EVENT } }
+        val event = events.first { it["event"] == "watchCommand" && it["command"] == CMD_LOG_EVENT }
+        assertEquals(0, event[KEY_BUTTON_ID])
+        assertEquals(10, event[KEY_CHUNK_OFFSET])
+        assertEquals(2, event[KEY_CHUNK_INDEX])
+        assertEquals("bearing reacquire", event[KEY_INSTRUCTION])
+        assertEquals(listOf(43), transport.acks)
+    }
+
+    @Test
     fun queuedGpsIsPrioritizedAheadOfTilesAfterCurrentSendSettles() {
         val transport = FakePebbleTransport()
         val bridge = WatchAppMessageBridge(uuid, transport) { emptyList() }

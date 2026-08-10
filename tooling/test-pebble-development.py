@@ -82,6 +82,32 @@ class CredentialLoadingTest(unittest.TestCase):
 
 
 class RepositoryWorkflowTest(unittest.TestCase):
+    def test_watch_reserves_appmessage_before_opportunistic_tile_cache(self) -> None:
+        main_source = (
+            ROOT / "apps" / "pebble-watch" / "src" / "c" / "main.c"
+        ).read_text(encoding="utf-8")
+
+        app_message_open = main_source.index("app_message_open(4096, 512)")
+        tile_entries = main_source.index(
+            "calloc(TILE_CACHE_SIZE, sizeof(TileCacheEntry))"
+        )
+        tile_decode_cache = main_source.index(
+            "configure_tile_geometry(DEFAULT_TILE_W, DEFAULT_TILE_H)"
+        )
+
+        self.assertLess(app_message_open, tile_entries)
+        self.assertLess(app_message_open, tile_decode_cache)
+        self.assertIn("app_message_result != APP_MSG_OK", main_source)
+
+    def test_fixture_startup_honors_phone_ready_delay(self) -> None:
+        fixture = (
+            ROOT / "tooling" / "pebble-map-mock-pkjs.js"
+        ).read_text(encoding="utf-8")
+        self.assertIn(
+            "if (!ignoreStartupReady) setTimeout(sendReadyState, phoneReadyDelayMs);",
+            fixture,
+        )
+
     def test_shell_scripts_parse_and_help_lists_supported_commands(self) -> None:
         helper = ROOT / "tooling" / "pebble-emulator-codex.sh"
         bootstrap = ROOT / "tooling" / "bootstrap-pebble-sdk-wsl.sh"
@@ -98,7 +124,9 @@ class RepositoryWorkflowTest(unittest.TestCase):
             "doctor",
             "test-tooling",
             "test-protocol",
+            "test-motion-host",
             "test-render-performance",
+            "test-motion-reacquire",
             "build-phone",
             "capture-fixture",
             "capture-real-fixture",
@@ -106,6 +134,7 @@ class RepositoryWorkflowTest(unittest.TestCase):
             "generate-real-fixture",
             "record-fixture-animation",
             "debug-facing",
+            "debug-motion",
             "debug-route-progress",
             "kill",
         ):
@@ -114,6 +143,10 @@ class RepositoryWorkflowTest(unittest.TestCase):
         helper_text = helper.read_text(encoding="utf-8")
         self.assertIn('PEBBLE_QEMU_CAPTURE_FRAMES:-60', helper_text)
         self.assertIn('PEBBLE_QEMU_CAPTURE_INTERVAL:-0.2', helper_text)
+        for fixture_name in ("stationary-raise.csv", "walking-to-look.csv"):
+            fixture = ROOT / "tooling" / "motion-fixtures" / fixture_name
+            self.assertTrue(fixture.is_file())
+            self.assertGreater(fixture.stat().st_size, 0)
 
     def test_windows_wrapper_forwards_paths_commands_and_arguments(self) -> None:
         wrapper = (ROOT / "tooling" / "pebble-wsl.ps1").read_text(encoding="utf-8")

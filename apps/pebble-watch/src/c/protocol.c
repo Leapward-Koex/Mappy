@@ -321,6 +321,7 @@ static bool is_saved_destination_id(int slot) {
 
 void send_route_request(void) {
   int request_slot = s_selected_slot;
+  bool starting_navigation = !has_active_route();
   DictionaryIterator *iter;
   AppMessageResult result = send_message_begin(&iter, CMD_ROUTE_REQUEST);
   if (result != APP_MSG_OK) {
@@ -347,6 +348,10 @@ void send_route_request(void) {
   }
   s_state = AppStateRouteLoading;
   set_bottom_text("Finding route");
+  if (starting_navigation) {
+    arm_route_start_bearing_reacquire();
+  }
+  refresh_motion_detection_service();
   layer_mark_dirty(s_map_layer);
 }
 
@@ -596,9 +601,11 @@ static void apply_gps_fix(int32_t world_x, int32_t world_y, int32_t zoom,
   copy_bounded_text(s_gps_provider, sizeof(s_gps_provider), provider);
   s_has_gps = true;
   s_gps_received_at = time(NULL);
+  maybe_begin_pending_route_start_reacquire();
   sync_map_bearing_smoothing(true);
   s_route_gps_stale_logged = false;
   update_touch_subscription();
+  refresh_motion_detection_service();
   if (!s_manual_pan) {
     s_viewport_x = scale_world_to_zoom(s_gps_world_x, s_gps_zoom, s_viewport_zoom);
     s_viewport_y = scale_world_to_zoom(s_gps_world_y, s_gps_zoom, s_viewport_zoom);
@@ -708,6 +715,7 @@ void apply_debug_compass(DictionaryIterator *iter) {
 #endif
     s_compass_magnetic_degrees = normalize_degrees(heading);
     s_compass_heading_degrees = normalize_degrees(heading);
+    maybe_begin_pending_route_start_reacquire();
     APP_LOG(APP_LOG_LEVEL_INFO, "Debug compass heading=%ld", (long)s_compass_heading_degrees);
   }
 

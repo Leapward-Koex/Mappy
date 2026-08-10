@@ -114,6 +114,16 @@ manual release checks before the corresponding milestone is considered done.
   and provides a compact recenter action.
 - Recenter restores GPS-follow and reapplies the selected centered-map
   orientation.
+- Face-forward route start in Walk, Bike, and Drive uses the bounded fast
+  bearing profile. A 180-degree target change remains animated and completes in
+  no more than eight 30 ms ticks.
+- During an active face-forward Walk route, deterministic walking-to-watch
+  motion emits one look event and starts a 1.5-second fast-bearing window.
+  Idle, short walks, stationary raises, closely spaced bumps, and vibration
+  samples do not trigger it; another walking cadence rearms it.
+- Opening a menu, manually panning, switching north-up, clearing/finishing the
+  route, or leaving the app unsubscribes motion sensing and cancels fast
+  reacquisition.
 - Theme change clears visible tile cache and queues fresh tile requests.
 - Walking and bicycling active routes display the provider warning.
 - Walking active routes render as spaced blue dots with a white halo, including

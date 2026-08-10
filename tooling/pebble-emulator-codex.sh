@@ -17,7 +17,9 @@ Commands:
   doctor                   Verify CLI, SDK, emulator, and helper dependencies.
   test-tooling             Run deterministic Pebble development-tool tests.
   test-protocol            Check protocol constants across specs and runtimes.
+  test-motion-host         Run allocation-free motion and bearing host tests.
   test-render-performance  Run fixture bearing and mixed-animation assertions.
+  test-motion-reacquire    Replay wrist motion and assert fast bearing behavior.
   build                    Build the Pebble watch app.
   build-fixture            Build with emulator fixture PKJS bundled.
   build-real-fixture       Build with the local provider-map fixture bundled.
@@ -50,7 +52,8 @@ Commands:
                             Send emulator map tile geometry settings to the watch.
   debug-tile [index]       Synthesize a decoded visible tile on the watch.
   debug-route-progress <percent>
-                            Move debug GPS to a percent along the active route.
+                           Move debug GPS to a percent along the active route.
+  debug-motion <fixture>   Replay stationary-raise or walking-to-look accel data.
   button <action> <button> Send emulator button input, e.g. "click select".
   kill                     Kill running Pebble emulators.
 
@@ -284,10 +287,31 @@ doctor() {
 test_tooling() {
   require_pebble
   "$(pebble_tool_python)" "$ROOT_DIR/tooling/test-pebble-development.py"
+  test_motion_host
 }
 
 test_protocol() {
   python3 "$ROOT_DIR/tooling/test-protocol-consistency.py"
+}
+
+test_motion_host() {
+  local compiler="${CC:-cc}"
+  if ! command -v "$compiler" >/dev/null 2>&1; then
+    echo "C compiler was not found: $compiler" >&2
+    return 127
+  fi
+  local output
+  output="$(mktemp "${TMPDIR:-/tmp}/mappy-motion-tests.XXXXXX")"
+  trap 'rm -f "$output"' RETURN
+  "$compiler" -std=c99 -Wall -Wextra -Werror \
+    "$ROOT_DIR/tooling/test-motion-detector.c" \
+    "$WATCH_DIR/src/c/motion_detector.c" \
+    "$WATCH_DIR/src/c/bearing_smoothing.c" \
+    -o "$output"
+  cd "$ROOT_DIR"
+  "$output"
+  rm -f "$output"
+  trap - RETURN
 }
 
 generate_real_fixture() {
@@ -466,6 +490,29 @@ send_debug_route_progress() {
     --int 50=903 60="$permille"
 }
 
+send_debug_motion() {
+  require_pebble
+  if [[ $# -ne 1 ]]; then
+    echo "debug-motion requires stationary-raise or walking-to-look" >&2
+    exit 2
+  fi
+  local fixture="$1"
+  case "$fixture" in
+    stationary-raise|walking-to-look)
+      ;;
+    *)
+      echo "Unknown motion fixture: $fixture" >&2
+      exit 2
+      ;;
+  esac
+  local fixture_path="$ROOT_DIR/tooling/motion-fixtures/$fixture.csv"
+  if [[ ! -s "$fixture_path" ]]; then
+    echo "Motion fixture was not found: $fixture_path" >&2
+    return 1
+  fi
+  pebble emu-accel --emulator "$PLATFORM" custom "$fixture_path"
+}
+
 perf_summary_value() {
   local line="$1"
   local key="$2"
@@ -488,7 +535,7 @@ test_render_performance() {
   sleep 6
 
   cd "$WATCH_DIR"
-  pebble logs --emulator "$PLATFORM" >"$log_file" 2>&1 &
+  PYTHONUNBUFFERED=1 pebble logs --emulator "$PLATFORM" >"$log_file" 2>&1 &
   local log_pid=$!
   trap 'kill "$log_pid" >/dev/null 2>&1 || true' RETURN
   sleep 1
@@ -567,6 +614,121 @@ test_render_performance() {
   pebble kill >/dev/null 2>&1 || true
 }
 
+test_motion_reacquire() {
+  require_pebble
+  if pgrep -x qemu-pebble >/dev/null 2>&1; then
+    echo "Pebble emulator is already running; retry test-motion-reacquire after its owner finishes." >&2
+    return 75
+  fi
+  set_phone_mode fixture
+  mkdir -p "$OUT_DIR"
+  local log_file="$OUT_DIR/motion-reacquire.log"
+  rm -f "$log_file"
+
+  # This command owns only an emulator that it starts itself. Do not use the
+  # wipe-and-retry path because a concurrent task may acquire the emulator.
+  trap 'pebble kill >/dev/null 2>&1 || true' RETURN
+  install_app
+  sleep 6
+  cd "$WATCH_DIR"
+  PYTHONUNBUFFERED=1 pebble logs --emulator "$PLATFORM" >"$log_file" 2>&1 &
+  local log_pid=$!
+  trap 'kill "$log_pid" >/dev/null 2>&1 || true; pebble kill >/dev/null 2>&1 || true' RETURN
+  sleep 1
+
+  send_debug_facing 0
+  sleep 1
+  if ! grep -Fq 'Debug compass heading=0' "$log_file"; then
+    echo "Pebble emulator log transport did not produce the fixture probe; retry after other emulator work finishes." >&2
+    return 75
+  fi
+  send_button click select
+  sleep 0.2
+  send_button click down
+  sleep 0.2
+  send_button click select
+  sleep 0.2
+  send_button click down
+  sleep 0.2
+  send_button click select
+  sleep 0.3
+  send_button click select
+  sleep 0.2
+  send_button click select
+  sleep 0.2
+  send_button click select
+  sleep 5
+
+  send_debug_motion stationary-raise
+  # emu-accel queues samples into QEMU and returns before 25 Hz playback ends.
+  # Let the entire 55-sample negative trace finish before evaluating it.
+  sleep 2.5
+  if grep -Fq 'Motion state=looking' "$log_file"; then
+    echo "Stationary raise incorrectly triggered watch-look detection" >&2
+    return 1
+  fi
+
+  # Toggle out of face-forward mode to unsubscribe/reset the classifier, then
+  # restore the active route context for an independent positive trace.
+  cd "$WATCH_DIR"
+  pebble send-app-message --emulator "$PLATFORM" --app-uuid "$(app_uuid)" \
+    --int 50=205 60=0
+  sleep 0.3
+  send_debug_facing 0
+  sleep 0.5
+
+  send_debug_motion walking-to-look &
+  local motion_pid=$!
+  local look_ready=0
+  for _ in $(seq 1 120); do
+    if grep -Fq 'Motion state=looking' "$log_file"; then
+      look_ready=1
+      break
+    fi
+    sleep 0.05
+  done
+  if (( look_ready == 0 )); then
+    wait "$motion_pid"
+    echo "Walking trace did not produce watch-look detection; see $(windows_path "$log_file")" >&2
+    return 1
+  fi
+  send_debug_compass 180
+  wait "$motion_pid"
+  sleep 1
+
+  kill "$log_pid" >/dev/null 2>&1 || true
+  wait "$log_pid" 2>/dev/null || true
+  trap - RETURN
+
+  local look_count
+  look_count="$(grep -Fc 'Motion state=looking' "$log_file" || true)"
+  if [[ "$look_count" != "1" ]]; then
+    echo "Expected one watch-look event, found $look_count; see $(windows_path "$log_file")" >&2
+    pebble kill >/dev/null 2>&1 || true
+    return 1
+  fi
+  if ! grep -Fq 'Motion state=walking' "$log_file" ||
+      ! grep -Fq 'Bearing reacquire reason=watch_look' "$log_file"; then
+    echo "Motion state transition or watch-look reacquisition was not logged; see $(windows_path "$log_file")" >&2
+    pebble kill >/dev/null 2>&1 || true
+    return 1
+  fi
+
+  local summary steps
+  summary="$(grep 'MAPPY_PERF' "$log_file" | tail -n 1)"
+  steps="$(perf_summary_value "$summary" b)"
+  if [[ -z "$steps" ]] || (( steps < 2 || steps > 8 )); then
+    echo "Fast bearing animation did not complete in 2..8 ticks: $summary" >&2
+    pebble kill >/dev/null 2>&1 || true
+    return 1
+  fi
+
+  capture_screenshot motion-reacquire.png
+  printf 'Motion: look_events=%s bearing_ticks=%s\nLog: %s\n' \
+    "$look_count" "$steps" "$(windows_path "$log_file")"
+  pebble kill >/dev/null 2>&1 || true
+}
+
 main() {
   local command="${1:-}"
   if [[ -z "$command" || "$command" == "-h" || "$command" == "--help" ]]; then
@@ -588,8 +750,14 @@ main() {
     test-protocol)
       test_protocol
       ;;
+    test-motion-host)
+      test_motion_host
+      ;;
     test-render-performance)
       test_render_performance
+      ;;
+    test-motion-reacquire)
+      test_motion_reacquire
       ;;
     build-fixture)
       set_phone_mode fixture
@@ -680,6 +848,9 @@ main() {
       ;;
     debug-route-progress)
       send_debug_route_progress "$@"
+      ;;
+    debug-motion)
+      send_debug_motion "$@"
       ;;
     button)
       send_button "$@"

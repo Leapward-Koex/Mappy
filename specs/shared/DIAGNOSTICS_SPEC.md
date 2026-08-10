@@ -47,6 +47,9 @@ camera_mode: optional gps_follow | manual_browse
 auto_rotation_suspended: optional boolean
 heading_source: optional watch_compass | phone_course | non_compass_fallback | none
 orientation_fallback: optional string
+motion_state: optional idle | walking | raise_candidate | looking
+bearing_reacquire_reason: optional route_start | watch_look
+bearing_reacquire_active: optional boolean
 ```
 
 Implementation may add fields only if they are safe by default and documented in
@@ -74,6 +77,9 @@ Required event names:
 | `location_fix_updated` | location |
 | `location_stale` | location |
 | `map_orientation_changed` | flutter/android_bridge/watch |
+| `motion_walking_detected` | watch |
+| `motion_watch_look_detected` | watch |
+| `bearing_reacquire_started` | watch |
 | `tile_request_received` | tile_worker |
 | `tile_response_sent` | tile_worker |
 | `tile_response_dropped` | tile_worker |
@@ -89,6 +95,10 @@ Required event names:
 Watch `CMD_LOG_EVENT` records are mapped into `source = watch` with
 `command_id = CMD_LOG_EVENT` and safe numeric fields preserved according to
 `PROTOCOL_MVP.md`.
+
+Motion diagnostics record only semantic transitions and the bounded
+reacquisition reason. Raw accelerometer axes, sample timestamps, and cadence
+traces are prohibited from diagnostic storage and export.
 
 ## Ring Buffer
 

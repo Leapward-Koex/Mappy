@@ -297,7 +297,7 @@
 
   Pebble.addEventListener('ready', function() {
     console.log('[mappy-map-mock] ready');
-    if (!ignoreStartupReady) sendReadyState();
+    if (!ignoreStartupReady) setTimeout(sendReadyState, phoneReadyDelayMs);
   });
 
   Pebble.addEventListener('appmessage', function(e) {

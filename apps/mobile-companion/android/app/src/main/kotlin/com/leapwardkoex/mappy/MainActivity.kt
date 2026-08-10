@@ -1272,24 +1272,28 @@ class MainActivity : FlutterActivity() {
             val tileX = (event[KEY_WORLD_X] as? Number)?.toInt()
             val tileY = (event[KEY_WORLD_Y] as? Number)?.toInt()
             val tileZoom = (event[KEY_TILE_ZOOM] as? Number)?.toInt()
-            recordDiagnosticEntry(
-                source = "pebble",
-                level = "info",
-                eventName = when (command) {
-                    CMD_INIT -> "watch_init_received"
-                    CMD_TILE_REQUEST -> "tile_request_received"
-                    else -> "watch_command_received"
-                },
-                message = if (command == CMD_TILE_REQUEST) {
-                    "Watch requested tile x=${tileX ?: 0} y=${tileY ?: 0} z=${tileZoom ?: 0}."
-                } else {
-                    "Watch command ${command ?: 0} received."
-                },
-                commandId = command,
-                tileX = tileX,
-                tileY = tileY,
-                tileZoom = tileZoom
-            )
+            if (command == CMD_LOG_EVENT) {
+                nativeLogEvent(event)
+            } else {
+                recordDiagnosticEntry(
+                    source = "pebble",
+                    level = "info",
+                    eventName = when (command) {
+                        CMD_INIT -> "watch_init_received"
+                        CMD_TILE_REQUEST -> "tile_request_received"
+                        else -> "watch_command_received"
+                    },
+                    message = if (command == CMD_TILE_REQUEST) {
+                        "Watch requested tile x=${tileX ?: 0} y=${tileY ?: 0} z=${tileZoom ?: 0}."
+                    } else {
+                        "Watch command ${command ?: 0} received."
+                    },
+                    commandId = command,
+                    tileX = tileX,
+                    tileY = tileY,
+                    tileZoom = tileZoom
+                )
+            }
         }
         if (event["event"] == "sendResult") {
             val command = (event["command"] as? Number)?.toInt()
@@ -2154,6 +2158,9 @@ class MainActivity : FlutterActivity() {
             normalized.contains("pinch unavailable") -> "pinch_unavailable"
             normalized.contains("touch disabled") -> "touch_disabled"
             normalized.contains("zoom clamped") -> "zoom_clamped"
+            normalized.contains("walking detected") -> "motion_walking_detected"
+            normalized.contains("watch look detected") -> "motion_watch_look_detected"
+            normalized.contains("bearing reacquire") -> "bearing_reacquire_started"
             category == 0 -> "watch_log_event"
             else -> "watch_log_error"
         }

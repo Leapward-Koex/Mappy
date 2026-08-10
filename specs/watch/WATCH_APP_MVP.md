@@ -343,6 +343,13 @@ Centered map orientation:
 - Facing-up must request enough 54x63 crops to cover the inverse-rotated
   screen footprint while active. It must not leave blank rotated corners after
   all requested tiles arrive.
+- Face-forward route start uses a bounded fast bearing animation for all travel
+  modes. Active walking routes additionally use the accelerometer-only
+  walking-to-watch detector and lifecycle defined by
+  `../shared/MAP_ORIENTATION_SETTING_SPEC.md`.
+- Motion detection is allocation-free, ignores samples collected during watch
+  vibration, runs only while the face-forward walking map is visible, and does
+  not send raw motion samples to the phone.
 
 ## Input Behavior
 
