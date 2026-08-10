@@ -125,27 +125,23 @@
 #define PERSIST_MAP_ORIENTATION 5
 #define PERSIST_UNITS 6
 #define PERSIST_TILE_ANIMATION 7
-#define PERSIST_DEBUG_ROTATED_SIGNATURE 100
-
 #define TILE_ANIMATION_NONE 0
 #define TILE_ANIMATION_FADE 1
 #define TILE_ANIMATION_FADE_ZOOM 2
 #define TILE_ANIMATION_FADE_MS 480
 #define TILE_ANIMATION_FADE_ZOOM_MS 640
-#define TILE_ANIMATION_TICK_MS 30
+#define VISUAL_ANIMATION_TICK_MS 30
 #define TILE_ANIMATION_ZOOM_START_Q8 205
 #define TOUCH_TILE_ANIMATION_SUPPRESS_MS 900
 #define TILE_REQUEST_STALE_MS 8000
 #define TILE_REQUEST_WATCHDOG_MS 1000
 #define COMPASS_HEADING_FILTER_DEGREES 2
-#define MAP_BEARING_SMOOTHING_TICK_MS 30
 #define MAP_BEARING_SMOOTHING_MIN_STEP_CENTI_DEGREES 400
 #define MAP_BEARING_SMOOTHING_MAX_STEP_CENTI_DEGREES 1200
 #define MAP_BEARING_SMOOTHING_STEP_DIVISOR 4
 #define GPS_SMOOTHING_NONE 0
 #define GPS_SMOOTHING_LOCATION 1
 #define GPS_SMOOTHING_MAP 2
-#define GPS_SMOOTHING_TICK_MS 30
 #define GPS_SMOOTHING_DEFAULT_INTERVAL_MS 1000
 #define GPS_SMOOTHING_MAX_INTERVAL_MS 5000
 #define GPS_SMOOTHING_MIN_DURATION_MS 180
@@ -253,7 +249,20 @@ typedef struct {
   bool valid;
   int32_t progress_px;
   int64_t distance_sq;
+  uint16_t segment_index;
+  uint32_t segment_t_q16;
 } RouteProjection;
+
+typedef struct {
+  int32_t viewport_x;
+  int32_t viewport_y;
+  int32_t center_x;
+  int32_t center_y;
+  int32_t scale_q8;
+  int32_t bearing_centi_degrees;
+  int32_t sin_value;
+  int32_t cos_value;
+} MapRenderTransform;
 
 typedef struct {
   bool pending;
@@ -273,10 +282,6 @@ typedef enum {
 
 extern Window *s_window;
 extern Layer *s_map_layer;
-extern GPath *s_location_fan_path;
-extern GPoint s_location_fan_points[5];
-extern GPathInfo s_location_fan_info;
-
 extern TileCacheEntry *s_tiles;
 extern uint8_t *s_tile_decode_buffer;
 extern int s_tile_cache_size;
@@ -290,11 +295,8 @@ extern bool s_orientation_tile_origins_valid;
 extern bool s_outbox_busy;
 extern int32_t s_outbox_cmd;
 extern uint32_t s_access_counter;
-extern AppTimer *s_tile_animation_timer;
+extern AppTimer *s_visual_animation_timer;
 extern AppTimer *s_tile_request_watchdog_timer;
-extern AppTimer *s_map_bearing_smoothing_timer;
-extern AppTimer *s_gps_smoothing_timer;
-extern AppTimer *s_menu_highlight_timer;
 
 extern RoutePoint s_route_points[MAX_ROUTE_POINTS];
 extern RoutePoint s_route_detail_points[MAX_ROUTE_POINTS];
@@ -362,6 +364,9 @@ extern int32_t s_compass_heading_degrees;
 extern int32_t s_compass_magnetic_degrees;
 extern int32_t s_map_bearing_display_centi_degrees;
 extern int32_t s_map_bearing_target_centi_degrees;
+#ifdef MAPPY_WATCH_PHONE_MODE_FIXTURE
+extern bool s_debug_compass_override_active;
+#endif
 extern int32_t s_declination_centi_degrees;
 extern bool s_declination_valid;
 extern time_t s_gps_received_at;
@@ -460,6 +465,7 @@ int32_t corrected_compass_heading_degrees(int32_t magnetic_degrees);
 void refresh_corrected_compass_heading(void);
 bool active_facing_heading_degrees(int32_t *heading_degrees);
 bool map_orientation_active(void);
+void update_map_after_bearing_display_change(bool was_orientation_active);
 int32_t render_viewport_x(void);
 int32_t render_viewport_y(void);
 int32_t display_gps_world_x(void);
@@ -468,8 +474,9 @@ int32_t active_map_bearing_centi_degrees(void);
 int32_t active_map_bearing_degrees(void);
 int32_t active_map_bearing_angle(void);
 void cancel_map_bearing_smoothing(void);
-void sync_map_bearing_smoothing(bool animate);
-void map_bearing_smoothing_timer_callback(void *data);
+bool sync_map_bearing_smoothing(bool animate);
+bool map_bearing_smoothing_active(void);
+bool advance_map_bearing_smoothing(void);
 bool gps_smoothing_should_animate(bool had_gps, int32_t previous_world_x,
                                   int32_t previous_world_y,
                                   int32_t next_world_x,
@@ -484,13 +491,13 @@ void start_gps_smoothing(uint8_t mode, int32_t start_world_x,
                          int32_t start_viewport_y,
                          int32_t distance_px);
 void complete_gps_smoothing(void);
-void gps_smoothing_timer_callback(void *data);
+bool gps_smoothing_animation_active(void);
+bool advance_gps_smoothing(void);
 void world_delta_to_screen_delta(int32_t dx, int32_t dy,
                                         int32_t *screen_dx, int32_t *screen_dy);
 void screen_delta_to_world_delta(int32_t screen_dx, int32_t screen_dy,
                                         int32_t *world_dx, int32_t *world_dy);
 GPoint screen_point_from_viewport_world(int32_t world_x, int32_t world_y);
-GPoint screen_point_from_world(int32_t world_x, int32_t world_y, int8_t source_zoom);
 int16_t scaled_length(int16_t value);
 GPoint point_from_heading(GPoint origin, int32_t heading_degrees, int16_t length);
 void start_compass_service(void);
@@ -530,13 +537,9 @@ uint16_t tile_animation_elapsed_ms(const TileCacheEntry *entry);
 uint16_t tile_animation_progress_q8(const TileCacheEntry *entry);
 uint16_t tile_animation_eased_q8(uint16_t progress_q8);
 void complete_tile_animation(TileCacheEntry *entry);
-void finish_inactive_tile_animations(void);
 bool any_tile_animation_active(void);
-void cancel_tile_animation_timer(void);
 void complete_tile_animations(void);
-void finish_elapsed_tile_animations(void);
-void tile_animation_timer_callback(void *data);
-void schedule_tile_animation_tick(void);
+bool advance_tile_animations(void);
 void start_tile_animation(TileCacheEntry *entry, bool was_pending);
 TileCacheEntry *allocate_tile_slot_with_diagnostics(int32_t world_x, int32_t world_y,
                                                            int8_t zoom,
@@ -562,6 +565,10 @@ int32_t saturating_add_i32(int32_t a, int32_t b);
 int32_t approx_segment_length_px(int32_t dx, int32_t dy);
 int32_t compute_route_total_progress_px(void);
 RouteProjection project_route_position(int32_t world_x, int32_t world_y);
+RouteProjection project_route_points_position(const RoutePoint *points,
+                                              uint16_t point_count,
+                                              int32_t world_x,
+                                              int32_t world_y);
 void recompute_nav_step_progress(void);
 int32_t route_progress_threshold_px(uint8_t local_index, int32_t meters,
                                            int32_t fallback_px);
@@ -613,7 +620,8 @@ void cancel_menu_highlight_animation(void);
 void reset_menu_highlight_animation(void);
 void start_menu_highlight_animation(int previous_selection, int direction);
 void start_menu_value_animation(int direction);
-void menu_highlight_timer_callback(void *data);
+bool menu_highlight_animation_active(void);
+bool advance_menu_highlight_animation(void);
 bool menu_highlight_rect(GRect *rect_out);
 int menu_highlight_text_index(GRect highlight_rect, int first);
 const char *travel_mode_label(int mode);
@@ -644,10 +652,10 @@ bool draw_tiles_framebuffer_fast(GContext *ctx, const GColor *palette,
                                  uint8_t background_argb);
 void draw_tile_entry_slow(GContext *ctx, TileCacheEntry *entry, const GColor *palette);
 void draw_tiles(GContext *ctx, GColor background, bool fill_background);
-void draw_route(GContext *ctx);
-void draw_destination_marker(GContext *ctx);
+void draw_route(GContext *ctx, const MapRenderTransform *transform);
+void draw_destination_marker(GContext *ctx, const MapRenderTransform *transform);
 void draw_current_location_cone(GContext *ctx, GPoint point, int32_t display_heading);
-void draw_current_location(GContext *ctx);
+void draw_current_location(GContext *ctx, const MapRenderTransform *transform);
 void draw_card(GContext *ctx, GRect rect, GColor fill, GColor border);
 void draw_text_in_rect(GContext *ctx, GRect rect, const char *text, GFont font,
                               GColor color, GTextAlignment alignment);
@@ -661,6 +669,23 @@ void draw_status_chrome(GContext *ctx);
 void draw_arrival_dialog(GContext *ctx);
 void draw_menu(GContext *ctx);
 void map_layer_update(Layer *layer, GContext *ctx);
+bool visual_animations_active(void);
+void schedule_visual_animation_tick(void);
+void release_visual_animation_tick_if_idle(void);
+void cancel_visual_animation_timer(void);
+#ifdef MAPPY_WATCH_PHONE_MODE_FIXTURE
+void fixture_perf_begin(void);
+void fixture_perf_bearing_immediate_step(void);
+void fixture_perf_scheduler_tick(bool bearing_active, bool gps_active,
+                                 bool tile_active, bool menu_active,
+                                 bool bearing_changed);
+void fixture_perf_map_draw(void);
+void fixture_perf_map_draw_complete(void);
+void fixture_perf_route_projection_recompute(void);
+void fixture_perf_route_segment(bool submitted);
+void fixture_perf_start_mixed_sources(void);
+void fixture_perf_maybe_emit(void);
+#endif
 void window_load(Window *window);
 void window_unload(Window *window);
 void load_settings(void);

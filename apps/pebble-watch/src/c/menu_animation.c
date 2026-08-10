@@ -11,8 +11,7 @@
 #define MENU_ROW_MARGIN_X 5
 #define MENU_HIGHLIGHT_PROGRESS_MIN 0
 #define MENU_HIGHLIGHT_PROGRESS_MAX 65535
-#define MENU_HIGHLIGHT_FRAME_INTERVAL_MS 33
-#define MENU_HIGHLIGHT_DURATION_MS (MENU_HIGHLIGHT_FRAME_INTERVAL_MS * 7)
+#define MENU_HIGHLIGHT_DURATION_MS 231
 #define MENU_HIGHLIGHT_OVERSHOOT_PX 4
 #define MENU_HIGHLIGHT_STRETCH_PX 2
 
@@ -234,11 +233,8 @@ static GRect sample_menu_highlight_rect(uint32_t elapsed_ms) {
 }
 
 void cancel_menu_highlight_animation(void) {
-  if (s_menu_highlight_timer) {
-    app_timer_cancel(s_menu_highlight_timer);
-    s_menu_highlight_timer = NULL;
-  }
   s_menu_highlight_active = false;
+  release_visual_animation_tick_if_idle();
 }
 
 void reset_menu_highlight_animation(void) {
@@ -251,27 +247,18 @@ void reset_menu_highlight_animation(void) {
   s_menu_highlight_from_selection = s_menu_selection;
 }
 
-void menu_highlight_timer_callback(void *data) {
-  (void)data;
-  s_menu_highlight_timer = NULL;
-  if (s_menu_highlight_active &&
-      menu_highlight_elapsed_ms() >= MENU_HIGHLIGHT_DURATION_MS) {
-    s_menu_highlight_active = false;
-  }
-  if (s_map_layer) {
-    layer_mark_dirty(s_map_layer);
-  }
-  if (s_menu_highlight_active && s_menu_mode != MenuNone) {
-    s_menu_highlight_timer = app_timer_register(MENU_HIGHLIGHT_FRAME_INTERVAL_MS,
-                                                menu_highlight_timer_callback, NULL);
-  }
+bool menu_highlight_animation_active(void) {
+  return s_menu_highlight_active && s_menu_mode != MenuNone;
 }
 
-static void schedule_menu_highlight_tick(void) {
-  if (!s_menu_highlight_timer && s_menu_highlight_active && s_menu_mode != MenuNone) {
-    s_menu_highlight_timer = app_timer_register(MENU_HIGHLIGHT_FRAME_INTERVAL_MS,
-                                                menu_highlight_timer_callback, NULL);
+bool advance_menu_highlight_animation(void) {
+  if (!menu_highlight_animation_active()) {
+    return false;
   }
+  if (menu_highlight_elapsed_ms() >= MENU_HIGHLIGHT_DURATION_MS) {
+    s_menu_highlight_active = false;
+  }
+  return true;
 }
 
 void start_menu_highlight_animation(int previous_selection, int direction) {
@@ -301,7 +288,7 @@ void start_menu_highlight_animation(int previous_selection, int direction) {
   s_menu_highlight_from_selection = previous_selection;
   time_ms(&s_menu_highlight_started_s, &s_menu_highlight_started_ms);
   s_menu_highlight_active = true;
-  schedule_menu_highlight_tick();
+  schedule_visual_animation_tick();
   if (s_map_layer) {
     layer_mark_dirty(s_map_layer);
   }
@@ -331,7 +318,7 @@ void start_menu_value_animation(int direction) {
   s_menu_highlight_from_selection = s_menu_selection;
   time_ms(&s_menu_highlight_started_s, &s_menu_highlight_started_ms);
   s_menu_highlight_active = true;
-  schedule_menu_highlight_tick();
+  schedule_visual_animation_tick();
   if (s_map_layer) {
     layer_mark_dirty(s_map_layer);
   }

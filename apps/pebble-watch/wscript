@@ -95,6 +95,7 @@ def write_fixture_options(ctx):
         'tileDelayMs': fixture_int_env('MAPPY_FIXTURE_TILE_DELAY_MS', 0, 0, 60000),
         'tileStaggerMs': fixture_int_env('MAPPY_FIXTURE_TILE_STAGGER_MS', 0, 0, 60000),
         'tileAnimationMode': fixture_int_env('MAPPY_FIXTURE_TILE_ANIMATION_MODE', -1, -1, 2),
+        'routePointCount': fixture_int_env('MAPPY_FIXTURE_ROUTE_POINT_COUNT', 3, 3, 128),
         'txSuccessDelayMs': fixture_int_env('MAPPY_FIXTURE_TX_SUCCESS_DELAY_MS', 45, 0, 5000),
         'txFailureDelayMs': fixture_int_env('MAPPY_FIXTURE_TX_FAILURE_DELAY_MS', 180, 0, 5000),
     }

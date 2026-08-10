@@ -48,28 +48,10 @@ void complete_tile_animation(TileCacheEntry *entry) {
   entry->animation_mode = TILE_ANIMATION_NONE;
 }
 
-void finish_inactive_tile_animations(void) {
-  if (!s_tiles) {
-    return;
-  }
-  int capacity = active_tile_cache_size();
-  for (int i = 0; i < capacity; i++) {
-    TileCacheEntry *entry = &s_tiles[i];
-    if (!entry->animation_active) {
-      continue;
-    }
-    if (!entry->valid || entry->zoom != s_viewport_zoom ||
-        !tile_is_visible(entry) || tile_animation_progress_q8(entry) >= 256) {
-      complete_tile_animation(entry);
-    }
-  }
-}
-
 bool any_tile_animation_active(void) {
   if (!s_tiles) {
     return false;
   }
-  finish_inactive_tile_animations();
   int capacity = active_tile_cache_size();
   for (int i = 0; i < capacity; i++) {
     if (s_tiles[i].animation_active) {
@@ -79,46 +61,39 @@ bool any_tile_animation_active(void) {
   return false;
 }
 
-void cancel_tile_animation_timer(void) {
-  if (s_tile_animation_timer) {
-    app_timer_cancel(s_tile_animation_timer);
-    s_tile_animation_timer = NULL;
-  }
-}
-
 void complete_tile_animations(void) {
-  cancel_tile_animation_timer();
   if (!s_tiles) {
+    release_visual_animation_tick_if_idle();
     return;
   }
   int capacity = active_tile_cache_size();
   for (int i = 0; i < capacity; i++) {
     complete_tile_animation(&s_tiles[i]);
   }
+  release_visual_animation_tick_if_idle();
 }
 
-void finish_elapsed_tile_animations(void) {
-  finish_inactive_tile_animations();
-}
-
-void tile_animation_timer_callback(void *data) {
-  (void)data;
-  s_tile_animation_timer = NULL;
-  finish_elapsed_tile_animations();
-  if (s_map_layer) {
-    layer_mark_dirty(s_map_layer);
+bool advance_tile_animations(void) {
+  bool visible_changed = false;
+  if (!s_tiles) {
+    return false;
   }
-  if (any_tile_animation_active()) {
-    s_tile_animation_timer = app_timer_register(TILE_ANIMATION_TICK_MS,
-                                                tile_animation_timer_callback, NULL);
+  int capacity = active_tile_cache_size();
+  for (int i = 0; i < capacity; i++) {
+    TileCacheEntry *entry = &s_tiles[i];
+    if (!entry->animation_active) {
+      continue;
+    }
+    bool visible = entry->valid && entry->zoom == s_viewport_zoom &&
+        tile_is_visible(entry);
+    if (visible) {
+      visible_changed = true;
+    }
+    if (!visible || tile_animation_progress_q8(entry) >= 256) {
+      complete_tile_animation(entry);
+    }
   }
-}
-
-void schedule_tile_animation_tick(void) {
-  if (!s_tile_animation_timer && any_tile_animation_active()) {
-    s_tile_animation_timer = app_timer_register(TILE_ANIMATION_TICK_MS,
-                                                tile_animation_timer_callback, NULL);
-  }
+  return visible_changed;
 }
 
 void start_tile_animation(TileCacheEntry *entry, bool was_pending) {
@@ -141,5 +116,5 @@ void start_tile_animation(TileCacheEntry *entry, bool was_pending) {
   time_ms(&entry->animation_started_s, &entry->animation_started_ms);
   entry->animation_mode = (uint8_t)mode;
   entry->animation_active = true;
-  schedule_tile_animation_tick();
+  schedule_visual_animation_tick();
 }
