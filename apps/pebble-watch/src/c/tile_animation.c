@@ -89,8 +89,17 @@ bool advance_tile_animations(void) {
     if (visible) {
       visible_changed = true;
     }
-    if (!visible || tile_animation_progress_q8(entry) >= 256) {
+    if (!visible) {
       complete_tile_animation(entry);
+    } else if (tile_animation_progress_q8(entry) >= 256) {
+      // Give the render pass one event-loop turn to draw and commit the final
+      // frame. NONE while active is the zero-allocation completion sentinel;
+      // the next scheduler tick cleans up entries outside the render set.
+      if (entry->animation_mode == TILE_ANIMATION_NONE) {
+        complete_tile_animation(entry);
+      } else {
+        entry->animation_mode = TILE_ANIMATION_NONE;
+      }
     }
   }
   return visible_changed;
