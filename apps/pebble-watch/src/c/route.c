@@ -112,6 +112,10 @@ void clear_route_local(void) {
   reset_turn_haptic_alerts();
   s_last_walk_start_feedback_generation = INT32_MIN;
   s_route_clear_pending = false;
+  s_route_applied_pending = false;
+  s_route_complete_pending = false;
+  s_route_steps_expected = false;
+  s_active_route_request_id = 0;
   s_deferred_route_request_slot = DEFERRED_ROUTE_REQUEST_NONE;
   memset(s_nav_step_progress, 0, sizeof(s_nav_step_progress));
   s_instruction[0] = '\0';
@@ -126,7 +130,8 @@ void clear_route_local(void) {
 
 bool maybe_request_route_window(void) {
   if (s_route_point_count < 2 || s_viewport_zoom < ROUTE_DETAIL_MIN_ZOOM ||
-      s_screen_bounds.size.w == 0 || s_screen_bounds.size.h == 0) {
+      s_screen_bounds.size.w == 0 || s_screen_bounds.size.h == 0 ||
+      s_active_route_request_id <= 0) {
     s_route_window_request_pending = false;
     return false;
   }
@@ -178,6 +183,7 @@ bool maybe_request_route_window(void) {
   write_i32(iter, MESSAGE_KEY_width, window_w);
   write_i32(iter, MESSAGE_KEY_height, window_h);
   write_i32(iter, MESSAGE_KEY_total_bytes, s_route_generation);
+  write_i32(iter, MESSAGE_KEY_request_id, s_active_route_request_id);
   result = app_message_outbox_send();
   if (result != APP_MSG_OK) {
     s_outbox_busy = false;
@@ -488,9 +494,11 @@ static void finish_route_at_destination(void) {
   cancel_menu_highlight_animation();
   s_menu_mode = MenuNone;
   s_menu_selection = 0;
+  int32_t completed_request_id = s_active_route_request_id;
   clear_route_local();
+  s_active_route_request_id = completed_request_id;
   s_arrival_dialog_visible = true;
-  s_route_clear_pending = true;
+  s_route_complete_pending = true;
   s_route_clear_armed = false;
   copy_bounded_text(s_top_text, sizeof(s_top_text), "Map");
   set_bottom_text("");
@@ -664,7 +672,10 @@ void apply_route_points(DictionaryIterator *iter) {
   Tuple *generation_tuple = dict_find(iter, MESSAGE_KEY_total_bytes);
   Tuple *fresh_tuple = dict_find(iter, MESSAGE_KEY_button_id);
   Tuple *mode_tuple = dict_find(iter, MESSAGE_KEY_is_color);
-  if (!data_tuple || data_tuple->length < 3) {
+  Tuple *request_id_tuple = dict_find(iter, MESSAGE_KEY_request_id);
+  Tuple *steps_expected_tuple = dict_find(iter, MESSAGE_KEY_chunk_index);
+  if (!data_tuple || data_tuple->length < 3 || !request_id_tuple ||
+      request_id_tuple->value->int32 <= 0) {
     return;
   }
 
@@ -707,6 +718,9 @@ void apply_route_points(DictionaryIterator *iter) {
   }
   s_route_generation = generation_tuple ? generation_tuple->value->int32 :
       (s_route_generation + 1);
+  s_active_route_request_id = request_id_tuple ? request_id_tuple->value->int32 : 0;
+  s_route_steps_expected = steps_expected_tuple && steps_expected_tuple->value->int32 != 0;
+  s_route_applied_pending = true;
   clear_route_detail();
   s_route_zoom = route_zoom;
   for (uint16_t i = 0; i < point_count; i++) {
@@ -742,6 +756,9 @@ void apply_route_points(DictionaryIterator *iter) {
     zoom_to_max_map_level();
   }
   update_state_after_map_change();
+  if (!s_route_steps_expected) {
+    send_route_applied();
+  }
 }
 
 void apply_route_window_points(DictionaryIterator *iter) {
@@ -752,10 +769,12 @@ void apply_route_window_points(DictionaryIterator *iter) {
   Tuple *zoom_tuple = dict_find(iter, MESSAGE_KEY_tile_zoom);
   Tuple *width_tuple = dict_find(iter, MESSAGE_KEY_width);
   Tuple *height_tuple = dict_find(iter, MESSAGE_KEY_height);
+  Tuple *request_id_tuple = dict_find(iter, MESSAGE_KEY_request_id);
   s_route_window_request_inflight = false;
   s_route_window_request_pending = false;
   if (!data_tuple || data_tuple->length < 3 || !center_x_tuple ||
-      !center_y_tuple || !zoom_tuple || !width_tuple || !height_tuple) {
+      !center_y_tuple || !zoom_tuple || !width_tuple || !height_tuple ||
+      !request_id_tuple || request_id_tuple->value->int32 != s_active_route_request_id) {
     s_route_window_request_pending = true;
     send_log_event(4, 0, 0, "route window rejected");
     return;
@@ -811,7 +830,12 @@ void apply_route_window_points(DictionaryIterator *iter) {
 
 void apply_nav_steps(DictionaryIterator *iter) {
   Tuple *data_tuple = dict_find(iter, MESSAGE_KEY_chunk_data);
-  if (!data_tuple || data_tuple->length < 3) {
+  Tuple *generation_tuple = dict_find(iter, MESSAGE_KEY_total_bytes);
+  Tuple *request_id_tuple = dict_find(iter, MESSAGE_KEY_request_id);
+  if (!data_tuple || data_tuple->length < 3 || !generation_tuple ||
+      generation_tuple->value->int32 != s_route_generation ||
+      !request_id_tuple || request_id_tuple->value->int32 != s_active_route_request_id) {
+    send_log_event(5, 0, 0, "nav stale");
     return;
   }
 
@@ -871,5 +895,8 @@ void apply_nav_steps(DictionaryIterator *iter) {
   update_state_after_map_change();
   if (s_route_point_count > 1) {
     s_state = AppStateNavigating;
+  }
+  if (s_route_applied_pending) {
+    send_route_applied();
   }
 }

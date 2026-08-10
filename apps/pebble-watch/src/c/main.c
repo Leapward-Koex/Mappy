@@ -88,6 +88,8 @@ void init(void) {
 }
 
 void deinit(void) {
+  cancel_init_retry();
+  cancel_route_action_retry();
   s_menu_mode = MenuNone;
   stop_compass_service();
   update_touch_subscription();

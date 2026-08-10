@@ -124,10 +124,17 @@ void send_next_tile_request(void) {
     }
 
     s_inflight_request = request;
+    int32_t request_id = s_next_request_id++;
+    if (request_id <= 0 || s_next_request_id <= 0) {
+      request_id = 1;
+      s_next_request_id = 2;
+    }
+    entry->pending_request_id = request_id;
     write_i32(iter, MESSAGE_KEY_world_x, request.world_x);
     write_i32(iter, MESSAGE_KEY_world_y, request.world_y);
     write_i32(iter, MESSAGE_KEY_tile_zoom, request.zoom);
     write_i32(iter, MESSAGE_KEY_is_color, s_theme_mode);
+    write_i32(iter, MESSAGE_KEY_request_id, request_id);
     APP_LOG(APP_LOG_LEVEL_DEBUG, "Tile request send x=%ld y=%ld z=%d idx=%d/%d",
             (long)request.world_x, (long)request.world_y, (int)request.zoom,
             s_request_index, s_request_count);

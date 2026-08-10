@@ -10,6 +10,7 @@ void main() {
       'watchReady': true,
       'watchConnected': true,
       'watchAppActive': true,
+      'watchLaunchPending': false,
       'foregroundServiceActive': true,
       'notificationPermissionState': 'granted',
       'queueLength': 0,
@@ -31,6 +32,7 @@ void main() {
 
     expect(status.watchReady, isTrue);
     expect(status.watchAppActive, isTrue);
+    expect(status.watchLaunchPending, isFalse);
     expect(status.foregroundServiceActive, isTrue);
     expect(status.foregroundServiceLabel, 'Watch session active');
     expect(

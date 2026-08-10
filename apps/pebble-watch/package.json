@@ -48,7 +48,9 @@
       "gps_sequence": 66,
       "gps_elapsed_ms": 67,
       "gps_accuracy_cm": 68,
-      "gps_provider": 69
+      "gps_provider": 69,
+      "request_id": 70,
+      "protocol_version": 71
     },
     "resources": {
       "media": []

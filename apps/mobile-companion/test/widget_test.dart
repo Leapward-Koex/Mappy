@@ -969,13 +969,13 @@ void main() {
     await tester.ensureVisible(rerouteButton);
     await tester.tap(rerouteButton);
     await tester.pumpAndSettle();
-    expect(find.text('Route refreshed.'), findsOneWidget);
+    expect(find.text('Route refreshed and confirmed on watch.'), findsOneWidget);
 
     final clearButton = find.byKey(const ValueKey('status-clear-route'));
     await tester.ensureVisible(clearButton);
     await tester.tap(clearButton);
     await tester.pumpAndSettle();
-    expect(find.text('Route cleared.'), findsOneWidget);
+    expect(find.text('Route clear queued.'), findsOneWidget);
     expect(find.byKey(const ValueKey('status-reroute-active')), findsNothing);
   });
 
@@ -1862,23 +1862,32 @@ class RecordingWatchMessageDispatcher implements WatchMessageDispatcher {
   }
 
   @override
-  Future<List<WatchMessage>> startNavigation(
+  Future<WatchNavigationDispatchResult> startNavigation(
     WatchNavigationRequest request,
   ) async {
     routeStarts += 1;
-    return _routeMessages();
+    return WatchNavigationDispatchResult(
+      responses: _routeMessages(),
+      deliveryState: WatchNavigationDeliveryState.applied,
+    );
   }
 
   @override
-  Future<List<WatchMessage>> rerouteActiveRoute() async {
+  Future<WatchNavigationDispatchResult> rerouteActiveRoute() async {
     reroutes += 1;
-    return _routeMessages();
+    return WatchNavigationDispatchResult(
+      responses: _routeMessages(),
+      deliveryState: WatchNavigationDeliveryState.applied,
+    );
   }
 
   @override
-  Future<List<WatchMessage>> clearActiveRoute() async {
+  Future<WatchNavigationDispatchResult> clearActiveRoute() async {
     clears += 1;
-    return [WatchMessage.command(WatchCommands.routeClear)];
+    return WatchNavigationDispatchResult(
+      responses: [WatchMessage.command(WatchCommands.routeClear)],
+      deliveryState: WatchNavigationDeliveryState.applied,
+    );
   }
 
   List<WatchMessage> _routeMessages() {
