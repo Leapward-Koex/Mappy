@@ -563,24 +563,56 @@ static void draw_tile_row_unscaled(uint8_t *dst_row, const uint8_t *decoded,
   }
 }
 
+static void draw_tile_framebuffer_animated(uint8_t *framebuffer_data,
+                                           int16_t bytes_per_row,
+                                           const uint8_t *palette_argb,
+                                           const TileCacheEntry *entry,
+                                           int dst_origin_x,
+                                           int dst_origin_y,
+                                           int screen_w,
+                                           int screen_h,
+                                           uint16_t progress_q8,
+                                           uint16_t scale_q8) {
+  for (int py = 0; py < s_tile_height; py++) {
+    int dst_y = dst_origin_y + py;
+    if (scale_q8 < 256) {
+      dst_y = dst_origin_y +
+          (tile_zoomed_local_coord_q8(py, s_tile_height, scale_q8) / 256);
+    }
+    if (dst_y < 0 || dst_y >= screen_h) {
+      continue;
+    }
+
+    uint8_t *dst_row = framebuffer_data + (dst_y * bytes_per_row);
+    for (int px = 0; px < s_tile_width; px++) {
+      if (!tile_animation_draws_pixel(px, py, progress_q8)) {
+        continue;
+      }
+
+      int dst_x = dst_origin_x + px;
+      if (scale_q8 < 256) {
+        dst_x = dst_origin_x +
+            (tile_zoomed_local_coord_q8(px, s_tile_width, scale_q8) / 256);
+      }
+      if (dst_x < 0 || dst_x >= screen_w) {
+        continue;
+      }
+
+      int pixel_index = py * s_tile_width + px;
+      uint8_t packed = entry->decoded[pixel_index / 2];
+      uint8_t palette_index =
+          (pixel_index & 1) ? (packed >> 4) : (packed & 0x0f);
+      dst_row[dst_x] = palette_argb[palette_index & 0x0f];
+    }
+  }
+}
+
 bool draw_tiles_framebuffer_fast(GContext *ctx, const GColor *palette,
                                  TileCacheEntry **entries, int entry_count,
                                  uint8_t background_argb) {
   if (!ctx || !palette || !entries || entry_count <= 0 ||
       s_transient_zoom_scale_q8 != TRANSIENT_SCALE_Q8_ONE) {
     return false;
-  }
-
-  for (int i = 0; i < entry_count; i++) {
-    TileCacheEntry *entry = entries[i];
-    if (!entry || !entry->valid) {
-      continue;
-    }
-    if (entry->animation_active) {
-      if (tile_animation_progress_q8(entry) >= 256) {
-        complete_tile_animation(entry);
-      }
-    }
   }
 
   GBitmap *framebuffer = graphics_capture_frame_buffer(ctx);
@@ -629,14 +661,32 @@ bool draw_tiles_framebuffer_fast(GContext *ctx, const GColor *palette,
     if (!entry || !entry->valid) {
       continue;
     }
-    if (entry->animation_active) {
-      continue;
-    }
 
     entry->last_used = ++s_access_counter;
 
-    int dst_x = center_x + (int)(entry->world_x - render_viewport_x());
-    int dst_y = center_y + (int)(entry->world_y - render_viewport_y());
+    int dst_origin_x = center_x + (int)(entry->world_x - render_viewport_x());
+    int dst_origin_y = center_y + (int)(entry->world_y - render_viewport_y());
+    if (entry->animation_active) {
+      uint16_t progress_q8 = tile_animation_progress_q8(entry);
+      if (progress_q8 >= 256) {
+        complete_tile_animation(entry);
+      } else {
+        uint16_t scale_q8 = 256;
+        if (entry->animation_mode == TILE_ANIMATION_FADE_ZOOM) {
+          uint16_t eased_q8 = tile_animation_eased_q8(progress_q8);
+          scale_q8 = TILE_ANIMATION_ZOOM_START_Q8 +
+              (((256 - TILE_ANIMATION_ZOOM_START_Q8) * eased_q8) / 256);
+        }
+        draw_tile_framebuffer_animated(framebuffer_data, bytes_per_row,
+                                       palette_argb, entry, dst_origin_x,
+                                       dst_origin_y, screen_w, screen_h,
+                                       progress_q8, scale_q8);
+        continue;
+      }
+    }
+
+    int dst_x = dst_origin_x;
+    int dst_y = dst_origin_y;
     int src_x = 0;
     int src_y = 0;
     int draw_w = s_tile_width;
@@ -752,14 +802,6 @@ void draw_tiles(GContext *ctx, GColor background, bool fill_background) {
 
   if (draw_tiles_framebuffer_fast(ctx, palette, s_render_tile_entries,
                                   origin_count, background.argb)) {
-    if (!map_orientation_active()) {
-      for (int i = 0; i < origin_count; i++) {
-        TileCacheEntry *entry = s_render_tile_entries[i];
-        if (entry && entry->valid && entry->animation_active) {
-          draw_tile_entry_slow(ctx, entry, palette);
-        }
-      }
-    }
     return;
   }
 
