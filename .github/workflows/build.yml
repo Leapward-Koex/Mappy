@@ -1,0 +1,155 @@
+name: Build and prerelease
+
+on:
+  push:
+    branches:
+      - master
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  android:
+    name: Android
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: apps/mobile-companion
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Set up Java
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: gradle
+          cache-dependency-path: |
+            apps/mobile-companion/android/*.gradle*
+            apps/mobile-companion/android/gradle/wrapper/gradle-wrapper.properties
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          flutter-version-file: apps/mobile-companion/.fvmrc
+          cache: true
+
+      - name: Install Flutter dependencies
+        run: flutter pub get
+
+      - name: Analyze Flutter sources
+        run: flutter analyze
+
+      - name: Run Flutter tests
+        run: flutter test
+
+      - name: Run Android unit tests
+        run: bash android/gradlew --project-dir android testDebugUnitTest --no-daemon
+
+      - name: Build release APK
+        run: flutter build apk --release --no-pub
+
+      - name: Prepare Android artifact
+        run: |
+          mkdir -p dist
+          cp build/app/outputs/flutter-apk/app-release.apk dist/mappy-android.apk
+
+      - name: Upload Android artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: android-apk
+          path: apps/mobile-companion/dist/mappy-android.apk
+          if-no-files-found: error
+          retention-days: 14
+
+  pebble:
+    name: Pebble
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Install Pebble SDK
+        run: bash tooling/bootstrap-pebble-sdk-wsl.sh
+
+      - name: Test Pebble tooling
+        run: bash tooling/pebble-emulator-codex.sh test-tooling
+
+      - name: Test watch protocol
+        run: bash tooling/pebble-emulator-codex.sh test-protocol
+
+      - name: Build production PBW
+        working-directory: apps/pebble-watch
+        run: make release
+
+      - name: Upload Pebble artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: pebble-pbw
+          path: apps/pebble-watch/dist/*-phone.pbw
+          if-no-files-found: error
+          retention-days: 14
+
+  prerelease:
+    name: Publish prerelease
+    if: github.ref == 'refs/heads/master'
+    needs:
+      - android
+      - pebble
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+
+    steps:
+      - name: Check out repository history
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Download build artifacts
+        uses: actions/download-artifact@v8
+        with:
+          path: release-assets
+          merge-multiple: true
+
+      - name: Generate changelog
+        shell: bash
+        run: |
+          previous_tag="$(git tag --merged "$GITHUB_SHA" --list 'prerelease-*' --sort=-version:refname | head -n 1)"
+
+          if [[ -n "$previous_tag" ]]; then
+            commit_range="$previous_tag..$GITHUB_SHA"
+            comparison="Changes since [$previous_tag]($GITHUB_SERVER_URL/$GITHUB_REPOSITORY/compare/$previous_tag...$GITHUB_SHA):"
+          else
+            commit_range="$GITHUB_SHA"
+            comparison="Changes included in this first automated prerelease:"
+          fi
+
+          {
+            printf 'Automated build of [`%s`](%s/%s/commit/%s).\n\n' "${GITHUB_SHA::7}" "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY" "$GITHUB_SHA"
+            printf '%s\n\n' "$comparison"
+            git log "$commit_range" --pretty=format:'- %s (`%h`)'
+            printf '\n\n### Artifacts\n\n- Android release APK\n- Pebble production phone-mode PBW\n'
+          } > release-notes.md
+
+      - name: Create GitHub prerelease
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          short_sha="${GITHUB_SHA::7}"
+          tag="prerelease-${GITHUB_RUN_NUMBER}"
+          gh release create "$tag" release-assets/* \
+            --prerelease \
+            --target "$GITHUB_SHA" \
+            --title "Mappy prerelease $short_sha" \
+            --notes-file release-notes.md
