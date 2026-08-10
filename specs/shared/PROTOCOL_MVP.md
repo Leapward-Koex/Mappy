@@ -62,6 +62,8 @@ by domain so additions remain predictable and reviewable.
 | `gps_elapsed_ms` | 67 | phone -> watch | Optional platform monotonic fix timestamp for diagnostics/reconciliation. |
 | `gps_accuracy_cm` | 68 | phone -> watch | Optional horizontal accuracy in centimeters, or `-1` if unavailable. |
 | `gps_provider` | 69 | phone -> watch | Optional short provider label, for example `gps` or `network`. |
+| `request_id` | 70 | both | Positive request identity for tile and route delivery; responses must echo it. |
+| `protocol_version` | 71 | both | Mandatory protocol version; current phone and watch require version 2. |
 
 Phone and watch code use the same `world_x`, `world_y`, and `tile_zoom` names so
 wire data and internal geometry remain unambiguous.
@@ -75,6 +77,7 @@ MVP commands:
 | 101 | `CMD_INIT` | watch -> phone | Watch ready; sends persisted settings. |
 | 102 | `CMD_ERROR_STATE` | phone -> watch | Recoverable error/status message. |
 | 103 | `CMD_LOG_EVENT` | watch -> phone | Structured diagnostic event. |
+| 104 | `CMD_PHONE_READY` | phone -> watch | Confirms protocol version 2 and completes the startup handshake. |
 | 201 | `CMD_GPS` | phone -> watch | Current location as zoom-16 world pixels plus heading. |
 | 202 | `CMD_TILE_REQUEST` | watch -> phone | Request one map tile crop using the current negotiated rendered tile size. |
 | 203 | `CMD_TILE` | phone -> watch | Packed map tile crop with explicit width/height; may arrive in multiple chunks. |
@@ -89,6 +92,8 @@ MVP commands:
 | 305 | `CMD_NAV_STEPS` | both | Phone sends nav-step chunks; watch requests next chunk. |
 | 306 | `CMD_ROUTE_WINDOW_REQUEST` | watch -> phone | Request a high-detail route window around the current viewport. |
 | 307 | `CMD_ROUTE_WINDOW_POINTS` | phone -> watch | Packed high-detail route window for the active route generation. |
+| 308 | `CMD_ROUTE_APPLIED` | watch -> phone | Confirms route geometry and the first required navigation-step chunk were applied. |
+| 309 | `CMD_ROUTE_COMPLETE` | watch -> phone | Reports arrival and clears the matching persisted route request. |
 | 401 | `CMD_THEME` | both | Theme change or sync. |
 | 402 | `CMD_TRAVEL_MODE` | both | Travel mode setting. |
 | 403 | `CMD_UNITS` | phone -> watch | Display units. |
@@ -110,15 +115,22 @@ Post-MVP features continue the grouped command ranges defined here.
 
 ## Lifecycle
 
+Protocol version 2 is mandatory. `CMD_INIT` and `CMD_PHONE_READY` both carry
+`protocol_version = 2`. A missing or different value is a terminal
+synchronization error for that session: the phone records a diagnostic and the
+watch displays an update-required state. There is no legacy fallback or payload
+downgrade.
+
 Startup:
 
-1. Watch initializes AppMessage and sends `CMD_INIT`.
+1. Watch initializes AppMessage and sends `CMD_INIT` with protocol version 2.
 2. `CMD_INIT` includes persisted settings:
    - `tile_zoom`: theme mode, `0` auto, `1` day, `2` night.
    - `button_id`: travel mode, `0` walk, `1` bike, `2` drive.
    - `total_bytes`: backlight mode, `0` auto, `1` always on.
    - `chunk_offset`: centered-map orientation, `0` north up, `1` facing up.
-3. Phone worker marks the watch ready.
+3. Phone sends `CMD_PHONE_READY` with protocol version 2. Only this reply
+   completes watch initialization.
 4. Phone worker verifies that MVP prerequisites are available:
    - phone location permission,
    - configured Google API key,
@@ -135,15 +147,24 @@ Reconnect:
   route summary after reconnect.
 - Phone must not push stale theme/backlight values over watch-owned startup
   values unless the user changed them in the mobile UI after reconnect.
+- Until matching phone-ready arrives, the watch retries INIT after 1, 2, 4, and
+  8 seconds, then every 8 seconds while the app remains open. Message-begin and
+  outbox failures use the same single pending retry timer.
+- Repeated INIT is idempotent. Provider setup and active-route recovery remain
+  single-flight.
 
 ## Transport Rules
 
 - Use one AppMessage send in flight per logical phone worker.
 - GPS and control messages may be prioritized ahead of queued tile sends.
-- Tile sends are dropped after three NACK callbacks, meaning three total failed
-  send attempts.
-- Route and destination sends should fail visibly; retry only when the user
-  repeats the action or connectivity changes.
+- AppMessage attempts time out after two seconds. Control, route, destination,
+  navigation, and tile messages get three total attempts, delayed by 150 ms then
+  400 ms. GPS gets two total attempts and supersedes older queued GPS. Logs get
+  one attempt.
+- Disconnecting requeues an in-flight message without consuming an attempt;
+  sending resumes after successful version-2 synchronization.
+- The phone queue is capped at 64 entries and evicts the oldest queued tile
+  first under pressure.
 - Binary payloads are little-endian.
 - Text payloads are UTF-8 unless a command explicitly says ASCII-safe.
 - Watch-side fixed buffers must always reserve space for a null terminator after
@@ -220,6 +241,7 @@ Payload:
 | `world_y` | requested crop top-left world y |
 | `tile_zoom` | requested zoom |
 | `is_color` | optional current theme/display mode |
+| `request_id` | positive monotonic request identity |
 
 The request geometry is the current `width` and `height` most recently supplied
 by `CMD_MAP_SETTINGS`.
@@ -245,6 +267,7 @@ Payload:
 | `chunk_index` | zero-based tile chunk index |
 | `chunk_offset` | byte offset of `chunk_data` within the full packed tile |
 | `chunk_data` | tile RLE payload bytes for this chunk |
+| `request_id` | exact request identity echoed from `CMD_TILE_REQUEST` |
 
 Tile format is specified in `MAP_TILE_PIPELINE_MVP.md`.
 
@@ -256,6 +279,8 @@ Watch assembly rules:
   same world x/y/zoom/width/height.
 - The watch must buffer chunks until `total_bytes` are assembled for that tile
   key, then decode exactly one complete RLE payload.
+- The watch rejects chunks and errors whose request ID does not match the newest
+  outstanding request for that coordinate.
 
 Oversized tile rule:
 
@@ -313,6 +338,7 @@ Payload:
 | --- | --- |
 | `button_id` | saved-location ID 0..253, omitted for active-route reroute without a saved target |
 | `is_color` | requested travel mode, 0 walk, 1 bike, 2 drive |
+| `request_id` | positive stable route request identity when supplied by the watch |
 
 Behavior:
 
@@ -330,9 +356,9 @@ Behavior:
 - Phone includes the active route travel mode on `CMD_ROUTE_POINTS.is_color`
   (`0` walk, `1` bike, `2` drive). On a nonzero route response the watch uses
   that explicit mode when present; a watch-originated request can fall back to
-  its pending route mode if the optional field is absent. Phone must cancel stale route/nav replies
-  after a newer route request, so the watch does not need a separate route
-  correlation token for MVP.
+  its pending route mode if the optional field is absent. Phone must cancel
+  stale route/nav replies after a newer route request. Route and navigation
+  responses carry both the stable request ID and a newly computed generation.
 - If the active route mode is walk or bike, the watch route display must include
   the required provider warning for beta pedestrian/bicycling routes.
 - If the active route mode is walk and the successful route response is
@@ -366,6 +392,8 @@ Payload:
 | `button_id` | `1` fresh/user-visible route, `0` silent refresh |
 | `total_bytes` | active route generation for matching route-detail windows |
 | `is_color` | active route travel mode, `0` walk, `1` bike, `2` drive |
+| `request_id` | stable route request identity |
+| `chunk_index` | `1` when navigation steps are expected, otherwise `0` |
 
 Binary format:
 
@@ -404,6 +432,12 @@ Point order is route direction from start to destination and is used by the
 watch consumed-route overlay to hide only the portion at or behind the current
 on-route GPS projection.
 
+The watch sends `CMD_ROUTE_APPLIED` with the stable request ID only after route
+geometry and, when expected, the first valid nav-step chunk have been applied.
+Phone-originated navigation is not successful until this acknowledgement
+arrives. Arrival sends `CMD_ROUTE_COMPLETE` with the same request ID; the phone
+then clears the matching persisted request.
+
 ### `CMD_ROUTE_WINDOW_REQUEST = 306`
 
 Direction: watch -> phone.
@@ -418,6 +452,7 @@ Payload:
 | `width` | requested window width in zoom-16 world pixels, including prefetch margin |
 | `height` | requested window height in zoom-16 world pixels, including prefetch margin |
 | `total_bytes` | active route generation from the latest `CMD_ROUTE_POINTS` |
+| `request_id` | stable active route request identity |
 
 Behavior:
 
@@ -444,6 +479,7 @@ Payload:
 | `width` | returned window width in zoom-16 world pixels |
 | `height` | returned window height in zoom-16 world pixels |
 | `total_bytes` | active route generation |
+| `request_id` | stable active route request identity |
 | `chunk_data` | packed route polyline using the same binary format as `CMD_ROUTE_POINTS` |
 
 Behavior:
@@ -462,7 +498,8 @@ Behavior:
 
 ### `CMD_NAV_STEPS = 305`
 
-Phone -> watch payload: `chunk_data`.
+Phone -> watch payload includes `chunk_data`, `request_id` for the stable route
+request, and `total_bytes` for the current route generation.
 
 ```text
 1 byte   total_steps
@@ -486,6 +523,7 @@ Watch -> phone payload:
 | Key | Meaning |
 | --- | --- |
 | `button_id` | requested first global step index |
+| `request_id` | stable active route request identity |
 
 The phone must be able to resend a requested chunk from local route-step cache
 without making another network call.

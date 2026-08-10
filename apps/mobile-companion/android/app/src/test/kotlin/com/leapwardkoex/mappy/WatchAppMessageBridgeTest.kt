@@ -26,7 +26,10 @@ class WatchAppMessageBridgeTest {
         }
 
         bridge.start()
-        transport.deliverWatchData(42, watchMessage(CMD_INIT))
+        transport.deliverWatchData(
+            42,
+            watchMessage(CMD_INIT, mapOf(KEY_PROTOCOL_VERSION to WATCH_PROTOCOL_VERSION))
+        )
 
         waitUntil { transport.sent.size == 1 }
         assertEquals(listOf(42), transport.acks)
@@ -37,6 +40,39 @@ class WatchAppMessageBridgeTest {
         waitUntil { transport.sent.size == 2 }
         assertEquals(CMD_GPS, transport.sent.last().command)
         assertTrue(events.any { it["event"] == "sendResult" && it["result"] == "ack" && it["command"] == CMD_THEME })
+    }
+
+    @Test
+    fun inboundWatchLogForwardsBoundedSemanticFields() {
+        val transport = FakePebbleTransport()
+        val events = mutableListOf<Map<String, Any?>>()
+        val bridge = WatchAppMessageBridge(
+            uuid,
+            transport,
+            eventSink = { events.add(it) }
+        ) { emptyList() }
+
+        bridge.start()
+        transport.deliverWatchData(
+            43,
+            watchMessage(
+                CMD_LOG_EVENT,
+                mapOf(
+                    KEY_BUTTON_ID to 0,
+                    KEY_CHUNK_OFFSET to 10,
+                    KEY_CHUNK_INDEX to 2,
+                    KEY_INSTRUCTION to "bearing reacquire"
+                )
+            )
+        )
+
+        waitUntil { events.any { it["event"] == "watchCommand" && it["command"] == CMD_LOG_EVENT } }
+        val event = events.first { it["event"] == "watchCommand" && it["command"] == CMD_LOG_EVENT }
+        assertEquals(0, event[KEY_BUTTON_ID])
+        assertEquals(10, event[KEY_CHUNK_OFFSET])
+        assertEquals(2, event[KEY_CHUNK_INDEX])
+        assertEquals("bearing reacquire", event[KEY_INSTRUCTION])
+        assertEquals(listOf(43), transport.acks)
     }
 
     @Test
@@ -116,7 +152,36 @@ class WatchAppMessageBridgeTest {
 
         assertEquals(false, bridge.status()["watchReady"])
         assertEquals(0, transport.sent.size)
-        transport.deliverWatchData(2, watchMessage(CMD_INIT))
+        transport.deliverWatchData(
+            2,
+            watchMessage(CMD_INIT, mapOf(KEY_PROTOCOL_VERSION to WATCH_PROTOCOL_VERSION))
+        )
+        assertEquals(true, bridge.status()["watchReady"])
+    }
+
+    @Test
+    fun protocolMismatchIsAcknowledgedButDoesNotMarkWatchReady() {
+        val transport = FakePebbleTransport()
+        val bridge = WatchAppMessageBridge(uuid, transport) { emptyList() }
+
+        bridge.start()
+        transport.deliverWatchData(
+            9,
+            watchMessage(CMD_INIT, mapOf(KEY_PROTOCOL_VERSION to WATCH_PROTOCOL_VERSION - 1))
+        )
+
+        assertEquals(listOf(9), transport.acks)
+        assertEquals(false, bridge.status()["watchReady"])
+    }
+
+    @Test
+    fun validInboundTrafficRestoresWatchReadiness() {
+        val transport = FakePebbleTransport()
+        val bridge = WatchAppMessageBridge(uuid, transport) { emptyList() }
+
+        bridge.start()
+        transport.deliverWatchData(10, watchMessage(CMD_BUTTON, mapOf(KEY_BUTTON_ID to 1)))
+
         assertEquals(true, bridge.status()["watchReady"])
     }
 
@@ -259,12 +324,12 @@ class WatchAppMessageBridgeTest {
         bridge.enqueue(tileMessage(1))
         waitUntil { transport.sent.size == 1 }
 
-        repeat(3) {
+        repeat(3) { attempt ->
             transport.nack(transport.sent.last().transactionId)
-            waitUntil { transport.sent.size == it + 1 || transport.sent.size == it + 2 }
+            if (attempt < 2) waitUntil { transport.sent.size == attempt + 2 }
         }
 
-        Thread.sleep(50)
+        waitUntil { bridge.status()["inFlight"] == false && bridge.status()["queueLength"] == 0 }
         assertEquals(3, transport.sent.size)
         assertEquals(0, bridge.status()["queueLength"])
         assertEquals(false, bridge.status()["inFlight"])
@@ -410,7 +475,7 @@ class WatchAppMessageBridgeTest {
     }
 
     @Test
-    fun nonTileResponseReportsDeliveryFailureAfterOneNack() {
+    fun nonTileResponseReportsDeliveryFailureAfterThreeAttempts() {
         val transport = FakePebbleTransport()
         val events = mutableListOf<Map<String, Any?>>()
         val bridge = WatchAppMessageBridge(
@@ -424,10 +489,13 @@ class WatchAppMessageBridgeTest {
         bridge.enqueue(watchMessage(CMD_ROUTE_POINTS, mapOf(KEY_CHUNK_DATA to byteArrayOf(1, 2, 3))))
         waitUntil { transport.sent.size == 1 }
 
-        transport.nack(transport.sent.last().transactionId)
+        repeat(3) { attempt ->
+            transport.nack(transport.sent.last().transactionId)
+            if (attempt < 2) waitUntil { transport.sent.size == attempt + 2 }
+        }
 
-        Thread.sleep(50)
-        assertEquals(1, transport.sent.size)
+        waitUntil { bridge.status()["inFlight"] == false && bridge.status()["queueLength"] == 0 }
+        assertEquals(3, transport.sent.size)
         assertEquals(0, bridge.status()["queueLength"])
         assertEquals(false, bridge.status()["inFlight"])
         assertTrue(events.any { it["event"] == "sendResult" && it["result"] == "failed" })
@@ -442,7 +510,7 @@ class WatchAppMessageBridgeTest {
     }
 
     @Test
-    fun destinationResponseReportsDeliveryFailureWithoutRetrying() {
+    fun destinationResponseReportsDeliveryFailureAfterThreeAttempts() {
         val transport = FakePebbleTransport()
         val events = mutableListOf<Map<String, Any?>>()
         val bridge = WatchAppMessageBridge(
@@ -456,10 +524,13 @@ class WatchAppMessageBridgeTest {
         bridge.enqueue(watchMessage(CMD_DESTINATIONS, mapOf(KEY_CHUNK_DATA to byteArrayOf(1, 2, 3))))
         waitUntil { transport.sent.size == 1 }
 
-        transport.nack(transport.sent.single().transactionId)
+        repeat(3) { attempt ->
+            transport.nack(transport.sent.last().transactionId)
+            if (attempt < 2) waitUntil { transport.sent.size == attempt + 2 }
+        }
 
-        Thread.sleep(50)
-        assertEquals(1, transport.sent.size)
+        waitUntil { bridge.status()["inFlight"] == false && bridge.status()["queueLength"] == 0 }
+        assertEquals(3, transport.sent.size)
         assertEquals(false, bridge.status()["inFlight"])
         assertTrue(
             events.any {
@@ -498,7 +569,7 @@ class WatchAppMessageBridgeTest {
         val ids = WATCH_MESSAGE_KEY_IDS.values
 
         assertEquals(ids.size, ids.toSet().size)
-        assertEquals((50..69).toList(), ids.toList())
+        assertEquals((50..71).toList(), ids.toList())
     }
 
     @Test
@@ -560,6 +631,7 @@ class WatchAppMessageBridgeTest {
                 KEY_WORLD_Y to index + 1,
                 KEY_TILE_ZOOM to 16,
                 KEY_TOTAL_BYTES to 1,
+                KEY_REQUEST_ID to index.coerceAtLeast(1),
                 KEY_CHUNK_DATA to byteArrayOf(index.toByte())
             )
         )
@@ -571,7 +643,8 @@ class WatchAppMessageBridgeTest {
                 KEY_WORLD_X to index,
                 KEY_WORLD_Y to index + 1,
                 KEY_TILE_ZOOM to 16,
-                KEY_IS_COLOR to 0
+                KEY_IS_COLOR to 0,
+                KEY_REQUEST_ID to (index + 1)
             )
         )
 
@@ -598,7 +671,10 @@ class WatchAppMessageBridgeTest {
     }
 
     private fun markWatchReady(transport: FakePebbleTransport) {
-        transport.deliverWatchData(1, watchMessage(CMD_INIT))
+        transport.deliverWatchData(
+            1,
+            watchMessage(CMD_INIT, mapOf(KEY_PROTOCOL_VERSION to WATCH_PROTOCOL_VERSION))
+        )
     }
 
     private class FakePebbleTransport(

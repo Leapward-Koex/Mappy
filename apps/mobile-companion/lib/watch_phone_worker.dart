@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:collection';
 import 'dart:math' as math;
 
 import 'package:flutter/services.dart';
@@ -20,11 +21,11 @@ abstract class WatchMessageDispatcher {
 
   Future<List<WatchMessage>> replaceDestination(WatchDestinationConfig config);
 
-  Future<List<WatchMessage>> startNavigation(WatchNavigationRequest request);
+  Future<WatchNavigationDispatchResult> startNavigation(WatchNavigationRequest request);
 
-  Future<List<WatchMessage>> rerouteActiveRoute();
+  Future<WatchNavigationDispatchResult> rerouteActiveRoute();
 
-  Future<List<WatchMessage>> clearActiveRoute();
+  Future<WatchNavigationDispatchResult> clearActiveRoute();
 
   Future<WatchMapOrientation> getMapOrientation();
 
@@ -111,7 +112,7 @@ class NativeWatchMessageDispatcher implements WatchMessageDispatcher {
   }
 
   @override
-  Future<List<WatchMessage>> startNavigation(
+  Future<WatchNavigationDispatchResult> startNavigation(
     WatchNavigationRequest request,
   ) async {
     final Object? result;
@@ -123,35 +124,29 @@ class NativeWatchMessageDispatcher implements WatchMessageDispatcher {
     } finally {
       await _refreshProviderStatus();
     }
-    final messages = _messagesFromChannelResult(result);
-    await _sendReturnedPhoneMessages(messages);
-    return messages;
+    return _dispatchResultFromChannel(result);
   }
 
   @override
-  Future<List<WatchMessage>> rerouteActiveRoute() async {
+  Future<WatchNavigationDispatchResult> rerouteActiveRoute() async {
     final Object? result;
     try {
       result = await _channel.invokeMethod<Object?>('rerouteActiveRoute');
     } finally {
       await _refreshProviderStatus();
     }
-    final messages = _messagesFromChannelResult(result);
-    await _sendReturnedPhoneMessages(messages);
-    return messages;
+    return _dispatchResultFromChannel(result);
   }
 
   @override
-  Future<List<WatchMessage>> clearActiveRoute() async {
+  Future<WatchNavigationDispatchResult> clearActiveRoute() async {
     final Object? result;
     try {
       result = await _channel.invokeMethod<Object?>('clearActiveRoute');
     } finally {
       await _refreshProviderStatus();
     }
-    final messages = _messagesFromChannelResult(result);
-    await _sendReturnedPhoneMessages(messages);
-    return messages;
+    return _dispatchResultFromChannel(result);
   }
 
   Future<void> _sendReturnedPhoneMessages(List<WatchMessage> messages) async {
@@ -264,6 +259,71 @@ class NativeWatchMessageDispatcher implements WatchMessageDispatcher {
         })
         .toList(growable: false);
   }
+
+  WatchNavigationDispatchResult _dispatchResultFromChannel(Object? result) {
+    if (result is! Map) {
+      return const WatchNavigationDispatchResult(
+        responses: [],
+        deliveryState: WatchNavigationDeliveryState.deliveryFailed,
+        detail: 'Native watch delivery returned an invalid result.',
+      );
+    }
+    final rawResponses = result['responses'];
+    final responses = _messagesFromChannelResult(rawResponses);
+    return WatchNavigationDispatchResult(
+      responses: responses,
+      deliveryState: WatchNavigationDeliveryState.fromChannel(
+        result['deliveryState'] as String?,
+      ),
+      routeRequestId: asInt(result['routeRequestId']),
+      detail: result['detail'] as String?,
+    );
+  }
+}
+
+enum WatchNavigationDeliveryState {
+  applied,
+  queued,
+  launchFailed,
+  deliveryFailed,
+  timedOut,
+  protocolMismatch;
+
+  static WatchNavigationDeliveryState fromChannel(String? value) => switch (value) {
+    'applied' => applied,
+    'queued' => queued,
+    'launchFailed' => launchFailed,
+    'timedOut' => timedOut,
+    'protocolMismatch' => protocolMismatch,
+    _ => deliveryFailed,
+  };
+}
+
+class WatchNavigationDispatchResult extends ListBase<WatchMessage> {
+  const WatchNavigationDispatchResult({
+    required this.responses,
+    required this.deliveryState,
+    this.routeRequestId,
+    this.detail,
+  });
+
+  final List<WatchMessage> responses;
+  final WatchNavigationDeliveryState deliveryState;
+  final int? routeRequestId;
+  final String? detail;
+
+  @override
+  int get length => responses.length;
+
+  @override
+  set length(int value) => throw UnsupportedError('Navigation results are immutable.');
+
+  @override
+  WatchMessage operator [](int index) => responses[index];
+
+  @override
+  void operator []=(int index, WatchMessage value) =>
+      throw UnsupportedError('Navigation results are immutable.');
 }
 
 class WatchDisplaySettings {
@@ -591,6 +651,7 @@ class WatchPhoneWorker implements WatchMessageDispatcher {
   List<WorldPoint> _fullRoutePoints = const [];
   List<WatchNavStep> _routeSteps = const [];
   int _routeGeneration = 0;
+  int _routeRequestId = 0;
   WatchRouteOriginPolicy _activeRouteOriginPolicy =
       WatchRouteOriginPolicy.currentLocation;
   WatchRouteEndpoint? _activeRouteOrigin;
@@ -629,7 +690,7 @@ class WatchPhoneWorker implements WatchMessageDispatcher {
   }
 
   @override
-  Future<List<WatchMessage>> startNavigation(
+  Future<WatchNavigationDispatchResult> startNavigation(
     WatchNavigationRequest request,
   ) async {
     travelMode = request.travelMode;
@@ -638,7 +699,9 @@ class WatchPhoneWorker implements WatchMessageDispatcher {
     if (origin == null) {
       final missingExplicitOrigin =
           request.originPolicy == WatchRouteOriginPolicy.explicitPlace;
-      return [
+      return WatchNavigationDispatchResult(
+        deliveryState: WatchNavigationDeliveryState.deliveryFailed,
+        responses: [
         _errorMessage(
           category: missingExplicitOrigin ? 8 : 3,
           failedCommand: WatchCommands.routeRequest,
@@ -646,10 +709,11 @@ class WatchPhoneWorker implements WatchMessageDispatcher {
               ? 'Route origin is missing.'
               : 'Waiting for GPS.',
         ),
-      ];
+        ],
+      );
     }
 
-    return _routeResponses(
+    final responses = await _routeResponses(
       originLatitude: origin.latitude,
       originLongitude: origin.longitude,
       targetEndpoint: request.destination,
@@ -661,20 +725,35 @@ class WatchPhoneWorker implements WatchMessageDispatcher {
           ? request.origin
           : null,
     );
-  }
-
-  @override
-  Future<List<WatchMessage>> rerouteActiveRoute() {
-    return _rerouteActiveRoute(
-      requestedMode: travelMode,
-      requestSlot: _activeRouteSlot,
+    return WatchNavigationDispatchResult(
+      responses: responses,
+      deliveryState: responses.any((message) => message.command == WatchCommands.routePoints)
+          ? WatchNavigationDeliveryState.applied
+          : WatchNavigationDeliveryState.deliveryFailed,
     );
   }
 
   @override
-  Future<List<WatchMessage>> clearActiveRoute() async {
+  Future<WatchNavigationDispatchResult> rerouteActiveRoute() async {
+    final responses = await _rerouteActiveRoute(
+      requestedMode: travelMode,
+      requestSlot: _activeRouteSlot,
+    );
+    return WatchNavigationDispatchResult(
+      responses: responses,
+      deliveryState: responses.any((message) => message.command == WatchCommands.routePoints)
+          ? WatchNavigationDeliveryState.applied
+          : WatchNavigationDeliveryState.deliveryFailed,
+    );
+  }
+
+  @override
+  Future<WatchNavigationDispatchResult> clearActiveRoute() async {
     _clearActiveRoute();
-    return [WatchMessage.command(WatchCommands.routeClear)];
+    return WatchNavigationDispatchResult(
+      responses: [WatchMessage.command(WatchCommands.routeClear)],
+      deliveryState: WatchNavigationDeliveryState.applied,
+    );
   }
 
   @override
@@ -695,6 +774,13 @@ class WatchPhoneWorker implements WatchMessageDispatcher {
       case WatchCommands.routeClear:
         _clearActiveRoute();
         return [WatchMessage.command(WatchCommands.routeClear)];
+      case WatchCommands.routeApplied:
+        return const [];
+      case WatchCommands.routeComplete:
+        if (asInt(message.fields[WatchKeys.requestId]) == _routeRequestId) {
+          _clearActiveRoute();
+        }
+        return const [];
       case WatchCommands.theme:
         themeMode = WatchThemeMode.fromProtocol(
           asInt(message.fields[WatchKeys.buttonId]),
@@ -790,6 +876,16 @@ class WatchPhoneWorker implements WatchMessageDispatcher {
   }
 
   Future<List<WatchMessage>> _handleInit(WatchMessage message) async {
+    if (asInt(message.fields[WatchKeys.protocolVersion]) != watchProtocolVersion) {
+      return [
+        _errorMessage(
+          category: 9,
+          failedCommand: WatchCommands.init,
+          text: 'Update phone and watch together.',
+          extra: {WatchKeys.protocolVersion: watchProtocolVersion},
+        ),
+      ];
+    }
     themeMode = WatchThemeMode.fromProtocol(
       asInt(message.fields[WatchKeys.tileZoom]),
     );
@@ -804,6 +900,9 @@ class WatchPhoneWorker implements WatchMessageDispatcher {
     );
 
     final responses = <WatchMessage>[
+      WatchMessage.command(WatchCommands.phoneReady, {
+        WatchKeys.protocolVersion: watchProtocolVersion,
+      }),
       _themeMessage(),
       _travelModeMessage(),
       _unitsMessage(),
@@ -834,15 +933,17 @@ class WatchPhoneWorker implements WatchMessageDispatcher {
     final worldX = asInt(message.fields[WatchKeys.worldX]);
     final worldY = asInt(message.fields[WatchKeys.worldY]);
     final zoom = asInt(message.fields[WatchKeys.tileZoom]);
+    final requestId = asInt(message.fields[WatchKeys.requestId]);
     final theme =
         asInt(message.fields[WatchKeys.isColor]) ?? themeMode.protocolValue;
 
-    if (worldX == null || worldY == null || zoom == null) {
+    if (worldX == null || worldY == null || zoom == null || requestId == null) {
       return [
         _errorMessage(
           category: 5,
           failedCommand: WatchCommands.tileRequest,
           text: 'Tile request missing x, y, or zoom.',
+          extra: {WatchKeys.requestId: ?requestId},
         ),
       ];
     }
@@ -864,6 +965,7 @@ class WatchPhoneWorker implements WatchMessageDispatcher {
           worldX: worldX,
           worldY: worldY,
           zoom: zoom,
+          extra: {WatchKeys.requestId: requestId},
         ),
       ];
     }
@@ -875,6 +977,7 @@ class WatchPhoneWorker implements WatchMessageDispatcher {
         WatchKeys.tileZoom: tile.zoom ?? zoom,
         WatchKeys.totalBytes: tile.totalBytes ?? tile.chunkData!.length,
         WatchKeys.chunkData: tile.chunkData,
+        WatchKeys.requestId: requestId,
       }),
     ];
   }
@@ -1062,6 +1165,8 @@ class WatchPhoneWorker implements WatchMessageDispatcher {
             WatchKeys.buttonId: 1,
             WatchKeys.isColor: requestedMode.protocolValue,
             WatchKeys.totalBytes: _routeGeneration,
+            WatchKeys.requestId: _routeRequestId,
+            WatchKeys.chunkIndex: 0,
             WatchKeys.chunkData: encodeRoutePoints(const []),
           }),
           _errorMessage(
@@ -1135,6 +1240,8 @@ class WatchPhoneWorker implements WatchMessageDispatcher {
         WatchKeys.buttonId: 1,
         WatchKeys.isColor: requestedMode.protocolValue,
         WatchKeys.totalBytes: _routeGeneration,
+        WatchKeys.requestId: _routeRequestId,
+        WatchKeys.chunkIndex: _routeSteps.isNotEmpty ? 1 : 0,
         WatchKeys.chunkData: encodeRoutePoints(points),
       }),
     ];
@@ -1142,6 +1249,8 @@ class WatchPhoneWorker implements WatchMessageDispatcher {
       responses.add(
         WatchMessage.command(WatchCommands.navSteps, {
           WatchKeys.chunkData: encodeNavSteps(_routeSteps, 0),
+          WatchKeys.requestId: _routeRequestId,
+          WatchKeys.totalBytes: _routeGeneration,
         }),
       );
     }
@@ -1157,6 +1266,7 @@ class WatchPhoneWorker implements WatchMessageDispatcher {
   }) {
     travelMode = requestedMode;
     _routeGeneration++;
+    _routeRequestId = (_routeRequestId % 0x7ffffffe) + 1;
     _activeRouteSlot = activeRouteSlot;
     _activeRouteOriginPolicy = originPolicy;
     _activeRouteOrigin = originPolicy == WatchRouteOriginPolicy.explicitPlace
@@ -1198,6 +1308,8 @@ class WatchPhoneWorker implements WatchMessageDispatcher {
         WatchKeys.buttonId: 1,
         WatchKeys.isColor: (_activeRouteMode ?? travelMode).protocolValue,
         WatchKeys.totalBytes: _routeGeneration,
+        WatchKeys.requestId: _routeRequestId,
+        WatchKeys.chunkIndex: _routeSteps.isNotEmpty ? 1 : 0,
         WatchKeys.chunkData: encodeRoutePoints(_routePoints),
       }),
     ];
@@ -1205,6 +1317,8 @@ class WatchPhoneWorker implements WatchMessageDispatcher {
       responses.add(
         WatchMessage.command(WatchCommands.navSteps, {
           WatchKeys.chunkData: encodeNavSteps(_routeSteps, 0),
+          WatchKeys.requestId: _routeRequestId,
+          WatchKeys.totalBytes: _routeGeneration,
         }),
       );
     }
@@ -1516,6 +1630,7 @@ class WatchPhoneWorker implements WatchMessageDispatcher {
     int? worldX,
     int? worldY,
     int? zoom,
+    Map<String, Object?> extra = const {},
   }) {
     final instruction = utf8.decode(truncateUtf8Bytes(text, maxWatchTextBytes));
     final fields = <String, Object?>{
@@ -1523,6 +1638,7 @@ class WatchPhoneWorker implements WatchMessageDispatcher {
       WatchKeys.chunkIndex: failedCommand,
       WatchKeys.chunkOffset: offset,
       WatchKeys.instruction: instruction,
+      ...extra,
     };
     if (worldX != null) {
       fields[WatchKeys.worldX] = worldX;

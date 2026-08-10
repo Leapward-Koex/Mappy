@@ -1,6 +1,13 @@
 package com.leapwardkoex.mappy
 
 import java.util.UUID
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 
 internal class WatchAppMessageBridge(
     private val uuid: UUID,
@@ -9,12 +16,16 @@ internal class WatchAppMessageBridge(
     private val inFlightTimeoutMillis: Long = DEFAULT_IN_FLIGHT_TIMEOUT_MILLIS,
     private val dispatcher: (Map<*, *>) -> List<Map<String, Any?>>
 ) : PebbleTransportReceiver {
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO.limitedParallelism(4))
     private val lock = Any()
     private val queue = ArrayDeque<QueuedMessage>()
     private var inFlight: QueuedMessage? = null
     private var nextTransactionId = 1
     private var started = false
     private var watchReady = false
+    private var watchLaunchPending = false
+    private var timeoutJob: Job? = null
+    private var pumpWakeJob: Job? = null
 
     fun start() {
         synchronized(lock) {
@@ -34,12 +45,21 @@ internal class WatchAppMessageBridge(
             watchReady = false
             queue.clear()
             inFlight = null
+            timeoutJob?.cancel()
+            timeoutJob = null
+            pumpWakeJob?.cancel()
+            pumpWakeJob = null
         }
         transport.unregister()
+        scope.cancel()
         emitTransportChanged("stopped")
     }
 
     fun startWatchApp() {
+        synchronized(lock) {
+            watchLaunchPending = true
+        }
+        emitTransportChanged("launchRequested")
         transport.startWatchApp(uuid)
     }
 
@@ -91,7 +111,8 @@ internal class WatchAppMessageBridge(
                 "registered" to started,
                 "watchReady" to watchReady,
                 "queueLength" to queue.size,
-                "inFlight" to (inFlight != null)
+                "inFlight" to (inFlight != null),
+                "watchLaunchPending" to watchLaunchPending
             )
         }
         return snapshot +
@@ -100,31 +121,39 @@ internal class WatchAppMessageBridge(
     }
 
     override fun onWatchData(transactionId: Int, fields: Map<String, Any?>) {
+        val command = intValue(fields[KEY_CMD])
+        val protocolMatches = command != CMD_INIT ||
+            intValue(fields[KEY_PROTOCOL_VERSION]) == WATCH_PROTOCOL_VERSION
         synchronized(lock) {
-            val command = intValue(fields[KEY_CMD])
-            if (command == CMD_INIT) {
-                watchReady = true
-            }
+            watchReady = protocolMatches
+            watchLaunchPending = false
         }
         transport.sendAck(transactionId)
         eventSink(
             mapOf(
                 "event" to "watchCommand",
                 "transactionId" to transactionId,
-                "command" to intValue(fields[KEY_CMD]),
+                "command" to command,
+                KEY_REQUEST_ID to fields[KEY_REQUEST_ID],
+                KEY_PROTOCOL_VERSION to fields[KEY_PROTOCOL_VERSION],
+                KEY_TOTAL_BYTES to fields[KEY_TOTAL_BYTES],
                 KEY_WORLD_X to fields[KEY_WORLD_X],
                 KEY_WORLD_Y to fields[KEY_WORLD_Y],
-                KEY_TILE_ZOOM to fields[KEY_TILE_ZOOM]
+                KEY_TILE_ZOOM to fields[KEY_TILE_ZOOM],
+                KEY_BUTTON_ID to fields[KEY_BUTTON_ID],
+                KEY_CHUNK_OFFSET to fields[KEY_CHUNK_OFFSET],
+                KEY_CHUNK_INDEX to fields[KEY_CHUNK_INDEX],
+                KEY_INSTRUCTION to fields[KEY_INSTRUCTION]
             )
         )
-        Thread {
+        scope.launch {
             val responses = try {
                 dispatcher(fields)
             } catch (_: Exception) {
                 emptyList()
             }
             enqueueAll(responses)
-        }.start()
+        }
         emitTransportChanged("watchData")
         pump()
     }
@@ -134,6 +163,8 @@ internal class WatchAppMessageBridge(
             val current = inFlight
             if (current?.transactionId == transactionId) {
                 inFlight = null
+                timeoutJob?.cancel()
+                timeoutJob = null
                 current
             } else {
                 null
@@ -157,10 +188,27 @@ internal class WatchAppMessageBridge(
     override fun onWatchDisconnected() {
         val expired = synchronized(lock) {
             watchReady = false
+            watchLaunchPending = false
+            timeoutJob?.cancel()
+            timeoutJob = null
             expireInFlightLocked(result = "disconnect")
         }
         emitFailureOutcome(expired)
         emitTransportChanged("disconnected")
+    }
+
+    override fun onWatchLaunchResult(success: Boolean) {
+        synchronized(lock) {
+            if (!success) watchLaunchPending = false
+        }
+        eventSink(
+            mapOf(
+                "event" to "watchLaunchResult",
+                "success" to success,
+                "status" to status()
+            )
+        )
+        emitTransportChanged(if (success) "launchAccepted" else "launchFailed")
     }
 
     private fun enqueueLocked(message: QueuedMessage): List<DroppedMessage> {
@@ -168,7 +216,7 @@ internal class WatchAppMessageBridge(
         when (message.command) {
             CMD_GPS -> queue.removeAll { it.command == CMD_GPS }
             CMD_TILE -> dropped.addAll(dropMatchingTilesLocked(REASON_SUPERSEDED_TILE) {
-                it.tileKey != null && it.tileKey == message.tileKey
+                it.requestKey != null && it.requestKey == message.requestKey
             })
             CMD_MAP_SETTINGS -> dropped.addAll(dropQueuedTilesLocked(REASON_MAP_SETTINGS_CHANGED))
             CMD_ROUTE_CLEAR -> queue.removeAll { it.isRouteResponse }
@@ -182,12 +230,14 @@ internal class WatchAppMessageBridge(
     private fun trimQueueLocked(): List<DroppedMessage> {
         val dropped = mutableListOf<DroppedMessage>()
         while (queue.size > MAX_QUEUE_LENGTH) {
-            val tileIndex = queue.indexOfLast { it.command == CMD_TILE }
-            val removed = if (tileIndex >= 0) {
-                queue.removeAt(tileIndex)
+            val oldestTileIndex = queue.indexOfFirst { it.command == CMD_TILE }
+            val removedIndex = if (oldestTileIndex >= 0) {
+                oldestTileIndex
             } else {
-                queue.removeLast()
+                val lowestPriority = queue.maxOf { it.priority }
+                queue.indexOfFirst { it.priority == lowestPriority }
             }
+            val removed = queue.removeAt(removedIndex)
             dropped.add(DroppedMessage(removed, REASON_QUEUE_OVERFLOW))
         }
         return dropped
@@ -224,7 +274,11 @@ internal class WatchAppMessageBridge(
             if (!started || inFlight != null || !watchReady) {
                 return
             }
-            val message = removeNextLocked() ?: return
+            val message = removeNextLocked()
+            if (message == null) {
+                schedulePumpWakeLocked()
+                return
+            }
             val withTransaction = message.copy(
                 transactionId = nextTransactionId
             )
@@ -246,12 +300,9 @@ internal class WatchAppMessageBridge(
         if (inFlightTimeoutMillis <= 0) {
             return
         }
-        Thread {
-            try {
-                Thread.sleep(inFlightTimeoutMillis)
-            } catch (_: InterruptedException) {
-                return@Thread
-            }
+        timeoutJob?.cancel()
+        timeoutJob = scope.launch {
+            delay(inFlightTimeoutMillis)
             val expired = synchronized(lock) {
                 val current = inFlight
                 if (current?.transactionId == message.transactionId &&
@@ -266,10 +317,6 @@ internal class WatchAppMessageBridge(
             if (expired != null) {
                 pump()
             }
-        }.apply {
-            name = "mappy-watch-message-timeout-${message.transactionId}"
-            isDaemon = true
-            start()
         }
     }
 
@@ -291,6 +338,8 @@ internal class WatchAppMessageBridge(
     private fun expireInFlightLocked(result: String): SendFailureOutcome? {
         val current = inFlight ?: return null
         inFlight = null
+        timeoutJob?.cancel()
+        timeoutJob = null
         if (result == "disconnect") {
             val requeued = current.copy(transactionId = 0)
             queue.addFirst(requeued)
@@ -298,7 +347,8 @@ internal class WatchAppMessageBridge(
         }
         val nextAttempt = current.copy(
             transactionId = 0,
-            attempts = current.attempts + 1
+            attempts = current.attempts + 1,
+            availableAtMillis = monotonicMillis() + retryDelayMillis(current.attempts + 1)
         )
         return if (nextAttempt.shouldRetry) {
             queue.addFirst(nextAttempt)
@@ -326,15 +376,26 @@ internal class WatchAppMessageBridge(
         if (queue.isEmpty()) {
             return null
         }
-        var bestIndex = 0
-        var bestPriority = queue.first().priority
+        val now = monotonicMillis()
+        var bestIndex = -1
+        var bestPriority = Int.MAX_VALUE
         queue.forEachIndexed { index, message ->
-            if (message.priority < bestPriority) {
+            if (message.availableAtMillis <= now && message.priority < bestPriority) {
                 bestIndex = index
                 bestPriority = message.priority
             }
         }
-        return queue.removeAt(bestIndex)
+        return if (bestIndex >= 0) queue.removeAt(bestIndex) else null
+    }
+
+    private fun schedulePumpWakeLocked() {
+        val nextAt = queue.minOfOrNull { it.availableAtMillis } ?: return
+        val waitMillis = (nextAt - monotonicMillis()).coerceAtLeast(1L)
+        pumpWakeJob?.cancel()
+        pumpWakeJob = scope.launch {
+            delay(waitMillis)
+            pump()
+        }
     }
 
     private fun normalize(fields: Map<*, *>): Map<String, Any?> =
@@ -350,6 +411,7 @@ internal class WatchAppMessageBridge(
         when (intValue(fields[KEY_CMD])) {
             CMD_ERROR_STATE -> if (isRouteError(fields)) PRIORITY_ROUTE else PRIORITY_CONTROL
             CMD_ROUTE_CLEAR,
+            CMD_PHONE_READY,
             CMD_THEME,
             CMD_TRAVEL_MODE,
             CMD_UNITS,
@@ -424,6 +486,7 @@ internal class WatchAppMessageBridge(
                 "result" to result,
                 "attempts" to message.attempts,
                 "droppable" to message.isDroppable,
+                KEY_REQUEST_ID to message.fields[KEY_REQUEST_ID],
                 KEY_WORLD_X to message.fields[KEY_WORLD_X],
                 KEY_WORLD_Y to message.fields[KEY_WORLD_Y],
                 KEY_TILE_ZOOM to message.fields[KEY_TILE_ZOOM],
@@ -459,6 +522,7 @@ internal class WatchAppMessageBridge(
             KEY_TOTAL_BYTES to message.fields[KEY_TOTAL_BYTES],
             KEY_CHUNK_INDEX to message.fields[KEY_CHUNK_INDEX],
             KEY_CHUNK_OFFSET to message.fields[KEY_CHUNK_OFFSET],
+            KEY_REQUEST_ID to message.fields[KEY_REQUEST_ID],
             "tileKey" to message.tileKey,
             "requestKey" to message.requestKey
         )
@@ -468,7 +532,8 @@ internal class WatchAppMessageBridge(
         val fields: Map<String, Any?>,
         val priority: Int,
         val attempts: Int = 0,
-        val transactionId: Int = 0
+        val transactionId: Int = 0,
+        val availableAtMillis: Long = 0L
     ) {
         val command: Int? = (fields[KEY_CMD] as? Number)?.toInt()
         val failedCommand: Int? = (fields[KEY_CHUNK_INDEX] as? Number)?.toInt()
@@ -505,7 +570,12 @@ internal class WatchAppMessageBridge(
             } else {
                 null
             }
-        val shouldRetry: Boolean = isDroppable && attempts < MAX_SEND_ATTEMPTS
+        val maxAttempts: Int = when (command) {
+            CMD_LOG_EVENT -> 1
+            CMD_GPS -> 2
+            else -> 3
+        }
+        val shouldRetry: Boolean = attempts < maxAttempts
     }
 
     private data class SendFailureOutcome(
@@ -522,8 +592,7 @@ internal class WatchAppMessageBridge(
 
     private companion object {
         private const val MAX_QUEUE_LENGTH = 64
-        private const val MAX_SEND_ATTEMPTS = 3
-        private const val DEFAULT_IN_FLIGHT_TIMEOUT_MILLIS = 30_000L
+        private const val DEFAULT_IN_FLIGHT_TIMEOUT_MILLIS = 2_000L
         private const val PRIORITY_CONTROL = 0
         private const val PRIORITY_GPS = 1
         private const val PRIORITY_DESTINATIONS = 2
@@ -533,5 +602,10 @@ internal class WatchAppMessageBridge(
         private const val REASON_QUEUE_OVERFLOW = "queueOverflow"
         private const val REASON_MAP_SETTINGS_CHANGED = "mapSettingsChanged"
         private const val REASON_SUPERSEDED_TILE = "supersededTile"
+
+        private fun monotonicMillis(): Long = System.nanoTime() / 1_000_000L
+
+        private fun retryDelayMillis(attempts: Int): Long =
+            if (attempts <= 1) 150L else 400L
     }
 }

@@ -80,6 +80,7 @@ void reset_tile_chunk_assembly(void) {
   s_tile_chunk_total = 0;
   s_tile_chunk_received = 0;
   s_tile_chunk_next_index = 0;
+  s_tile_chunk_request_id = 0;
 }
 
 bool ensure_tile_chunk_buffer(int32_t required_bytes) {

@@ -31,6 +31,7 @@ class MainActivity : FlutterActivity() {
     private val mainHandler = Handler(Looper.getMainLooper())
     private lateinit var apiKeyStore: ApiKeyStore
     private lateinit var mapTilesProvider: GoogleMapTilesProvider
+    private lateinit var watchRuntime: MappyWatchRuntime
     private val nativeDestinations = mutableListOf<NativeDestination>()
     private var nativeRoutePoints: List<Map<*, *>> = emptyList()
     private var nativeFullRoutePoints: List<Map<*, *>> = emptyList()
@@ -56,6 +57,7 @@ class MainActivity : FlutterActivity() {
     private var nativeDisplaySettingsGeneration = 0
     private val nativePendingPhoneMessages = mutableListOf<Map<String, Any?>>()
     private var watchBridge: WatchAppMessageBridge? = null
+    private val runtimeEventSink: (Map<String, Any?>) -> Unit = { event -> handleWatchBridgeEvent(event) }
     private var bridgeEventSink: EventChannel.EventSink? = null
     private var lastEmittedSetupState: String? = null
     private var lastEmittedPermissionState: String? = null
@@ -69,15 +71,10 @@ class MainActivity : FlutterActivity() {
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         Log.i(LOG_TAG, "Configuring Mappy native bridge.")
-        apiKeyStore = ApiKeyStore(this)
-        mapTilesProvider = GoogleMapTilesProvider(
-            this,
-            apiKeyStore,
-            allowUnrestrictedDevelopmentKey = { isSeededDevelopmentApiKey() }
-        )
-        mapTilesProvider.setMapTileSettings(loadMapTileSettings(this), clearCaches = false)
+        watchRuntime = MappyWatchRuntime.get(applicationContext)
+        apiKeyStore = watchRuntime.apiKeyStore
+        mapTilesProvider = watchRuntime.mapTilesProvider
         loadDisplaySettings()
-        seedDevelopmentApiKeyIfPresent()
         loadNativeDestinations()
         loadDiagnosticEvents()
         recordDiagnosticEntry(
@@ -87,32 +84,8 @@ class MainActivity : FlutterActivity() {
             message = "App bridge started."
         )
         super.configureFlutterEngine(flutterEngine)
-        HeadlessWatchRuntime.stopIfRunning()
-        watchBridge = WatchAppMessageBridge(
-            uuid = WATCH_APP_UUID,
-            transport = PebbleKit2Transport(applicationContext),
-            dispatcher = { message -> dispatchWatchMessage(message) },
-            eventSink = { event -> handleWatchBridgeEvent(event) }
-        ).also { bridge ->
-            bridge.start()
-            WatchLocationStreamer.attach(
-                applicationContext,
-                bridge,
-                onStatusChanged = {
-                    emitLocationStatusEvent()
-                    emitBridgeStatus()
-                },
-                onLocationAccepted = { location -> recordLocationFixUpdated(location) },
-                onStreamError = { text ->
-                    emitDiagnosticEvent(
-                        source = "location",
-                        category = ERROR_LOCATION_UNAVAILABLE,
-                        failedCommand = CMD_GPS,
-                        detail = text
-                    )
-                }
-            )
-        }
+        watchBridge = watchRuntime.bridge
+        watchRuntime.attachUi(runtimeEventSink)
 
         MethodChannel(
             flutterEngine.dartExecutor.binaryMessenger,
@@ -121,7 +94,7 @@ class MainActivity : FlutterActivity() {
             when (call.method) {
                 "getBridgeStatus" -> result.success(bridgeStatusPayload())
                 "startWatchApp" -> {
-                    watchBridge?.startWatchApp()
+                    watchRuntime.startWatchApp()
                     emitBridgeStatus()
                     result.success(bridgeStatusPayload())
                 }
@@ -142,7 +115,7 @@ class MainActivity : FlutterActivity() {
                     result.success(exportDiagnosticsPayload())
                 }
                 "clearRouteCache" -> {
-                    clearNativeRouteCache()
+                    watchRuntime.clearActiveRoute()
                     result.success(exportDiagnosticsPayload())
                 }
                 else -> result.notImplemented()
@@ -241,7 +214,9 @@ class MainActivity : FlutterActivity() {
                         val changed = response["changed"] == true
                         val channelResponse = response + mapOf(
                             "watchMessage" to if (changed) {
-                                mapSettingsMessage(reason = mapSettingsReason(previousSettings, settings))
+                                watchRuntime.dispatcher.mapSettingsMessage(
+                                    reason = mapSettingsReason(previousSettings, settings)
+                                )
                             } else {
                                 null
                             }
@@ -257,7 +232,7 @@ class MainActivity : FlutterActivity() {
                     val response = mapTilesProvider.mapTileSettingsStatus() + mapOf(
                         "changed" to true,
                         "detail" to "Map tile caches were cleared.",
-                        "watchMessage" to mapSettingsMessage(reason = 0)
+                        "watchMessage" to watchRuntime.dispatcher.mapSettingsMessage(reason = 0)
                     )
                     recordDiagnosticEntry(
                         source = "flutter",
@@ -390,7 +365,7 @@ class MainActivity : FlutterActivity() {
                     if (message == null) {
                         result.error("missing_message", "Watch message dictionary is required.", null)
                     } else {
-                        runWatchTask(result) { handleWatchMessage(message) }
+                        runWatchTask(result) { watchRuntime.dispatcher.dispatch(message) }
                     }
                 }
                 "setDestination" -> {
@@ -398,7 +373,9 @@ class MainActivity : FlutterActivity() {
                     if (destination == null) {
                         result.error("missing_destination", "Destination dictionary is required.", null)
                     } else {
-                        runWatchTask(result) { setNativeDestination(destination) }
+                        runWatchTask(result) {
+                            watchRuntime.dispatcher.setDestination(destination).also(watchRuntime::enqueueAll)
+                        }
                     }
                 }
                 "setDestinations" -> {
@@ -406,29 +383,33 @@ class MainActivity : FlutterActivity() {
                     if (destinations == null) {
                         result.error("missing_destinations", "Destination list is required.", null)
                     } else {
-                        runWatchTask(result) { setNativeDestinations(destinations) }
+                        runWatchTask(result) {
+                            watchRuntime.dispatcher.setDestinations(destinations).also(watchRuntime::enqueueAll)
+                        }
                     }
                 }
-                "getDestinations" -> result.success(exportNativeDestinations())
+                "getDestinations" -> result.success(watchRuntime.dispatcher.exportDestinations())
                 "startNavigation" -> {
                     val request = call.arguments as? Map<*, *>
                     if (request == null) {
                         result.error("missing_navigation", "Navigation request dictionary is required.", null)
                     } else {
-                        runWatchTask(result) { startNativeNavigation(request) }
+                        watchRuntime.startNavigation(request) { response ->
+                            mainHandler.post { result.success(response) }
+                        }
                     }
                 }
-                "rerouteActiveRoute" -> runWatchTask(result) {
-                    nativeRouteRequest(emptyMap<String, Any?>())
+                "rerouteActiveRoute" -> watchRuntime.rerouteActiveRoute { response ->
+                    mainHandler.post { result.success(response) }
                 }
-                "clearActiveRoute" -> runWatchTask(result) {
-                    clearNativeRouteCache(recordDiagnostic = true)
-                    listOf(watchMessage(CMD_ROUTE_CLEAR))
+                "clearActiveRoute" -> {
+                    val response = watchRuntime.clearActiveRoute()
+                    result.success(response)
                 }
-                "getSettings" -> result.success(displaySettingsMap())
-                "getTransportStatus" -> result.success(watchStatusPayload())
+                "getSettings" -> result.success(watchRuntime.dispatcher.displaySettings())
+                "getTransportStatus" -> result.success(watchRuntime.status())
                 "startWatchApp" -> {
-                    watchBridge?.startWatchApp()
+                    watchRuntime.startWatchApp()
                     emitBridgeStatus()
                     result.success(watchStatusPayload())
                 }
@@ -437,7 +418,9 @@ class MainActivity : FlutterActivity() {
                     if (settings == null) {
                         result.error("missing_settings", "Settings dictionary is required.", null)
                     } else {
-                        runWatchTask(result) { setNativeSettings(settings) }
+                        runWatchTask(result) {
+                            watchRuntime.dispatcher.setSettings(settings).also(watchRuntime::enqueueAll)
+                        }
                     }
                 }
                 "sendPhoneMessage" -> {
@@ -445,7 +428,7 @@ class MainActivity : FlutterActivity() {
                     if (message == null) {
                         result.error("missing_message", "Phone message dictionary is required.", null)
                     } else {
-                        queueNativePhoneMessage(message)
+                        watchRuntime.enqueue(message)
                         result.success(true)
                     }
                 }
@@ -464,18 +447,8 @@ class MainActivity : FlutterActivity() {
 
     override fun cleanUpFlutterEngine(flutterEngine: FlutterEngine) {
         bridgeEventSink = null
-        if (hasActiveWatchSession()) {
-            Log.i(LOG_TAG, "Handing active Pebble session to headless bridge.")
-            WatchLocationStreamer.detachBridge(watchBridge)
-            watchBridge?.stop()
-            watchBridge = null
-            HeadlessWatchRuntime.startIfNeeded(applicationContext)
-        } else {
-            stopGpsStreaming(sendError = false)
-            WatchLocationStreamer.detachBridge(watchBridge)
-            watchBridge?.stop()
-            watchBridge = null
-        }
+        watchRuntime.detachUi(runtimeEventSink)
+        watchBridge = null
         super.cleanUpFlutterEngine(flutterEngine)
     }
 
@@ -499,7 +472,7 @@ class MainActivity : FlutterActivity() {
     }
 
     private fun hasActiveWatchSession(): Boolean =
-        watchBridge?.status()?.get("watchAppActive") == true ||
+        (::watchRuntime.isInitialized && watchRuntime.status()["watchAppActive"] == true) ||
             WatchSessionForegroundService.isActive
 
     override fun onRequestPermissionsResult(
@@ -654,26 +627,7 @@ class MainActivity : FlutterActivity() {
         WatchLocationStreamer.isRequested()
 
     private fun startGpsStreamingIfPossible() {
-        WatchLocationStreamer.attach(
-            applicationContext,
-            watchBridge,
-            onStatusChanged = {
-                emitLocationStatusEvent()
-                emitBridgeStatus()
-            },
-            onLocationAccepted = { location -> recordLocationFixUpdated(location) },
-            onStreamError = { text ->
-                emitDiagnosticEvent(
-                    source = "location",
-                    category = ERROR_LOCATION_UNAVAILABLE,
-                    failedCommand = CMD_GPS,
-                    detail = text
-                )
-            }
-        )
-        if (isGpsStreamingRequested()) {
-            WatchLocationStreamer.request(applicationContext)
-        }
+        if (isGpsStreamingRequested()) WatchLocationStreamer.request(applicationContext)
     }
 
     private fun restartGpsStreaming() {
@@ -761,10 +715,8 @@ class MainActivity : FlutterActivity() {
     }
 
     private fun runWatchTask(result: MethodChannel.Result, block: () -> List<Map<String, Any?>>) {
-        Thread {
-            val response = try {
-                block()
-            } catch (_: Exception) {
+        watchRuntime.submit(block) { outcome ->
+            val response = outcome.getOrElse {
                 listOf(
                     errorMessage(
                         category = ERROR_ROUTE_PROVIDER,
@@ -774,7 +726,7 @@ class MainActivity : FlutterActivity() {
                 )
             }
             mainHandler.post { result.success(response) }
-        }.start()
+        }
     }
 
     private fun handleIncomingShareIntent(intent: Intent?) {
@@ -795,9 +747,15 @@ class MainActivity : FlutterActivity() {
         }
 
         val sourcePackage = sourcePackageFromIntent(intent)
-        Thread {
-            processIncomingGoogleMapsShare(text, sourcePackage)
-        }.start()
+        watchRuntime.submit({ processIncomingGoogleMapsShare(text, sourcePackage) }) { outcome ->
+            if (outcome.isFailure) {
+                emitShareStatus(
+                    state = "error",
+                    detail = "Shared route processing failed.",
+                    errorCategory = ERROR_ROUTE_PROVIDER
+                )
+            }
+        }
     }
 
     private fun shareTextFromIntent(intent: Intent?): String? {
@@ -961,7 +919,7 @@ class MainActivity : FlutterActivity() {
         )
 
         clearNativeRouteCache(recordDiagnostic = true, source = "google_maps_share")
-        queueNativePhoneMessage(watchMessage(CMD_ROUTE_CLEAR))
+        watchRuntime.clearActiveRoute()
 
         emitShareStatus(
             state = "resolvingEndpoint",
@@ -985,8 +943,7 @@ class MainActivity : FlutterActivity() {
                 return
             }
 
-        val cachedOrigin: NativeRouteEndpoint?
-        val originCoordinates = if (share.explicitOrigin) {
+        val cachedOrigin: NativeRouteEndpoint? = if (share.explicitOrigin) {
             val parsedOrigin = share.origin
                 ?: run {
                     failSharedRoute(
@@ -1000,26 +957,17 @@ class MainActivity : FlutterActivity() {
                 failSharedRoute(share, origin.error)
                 return
             }
-            cachedOrigin = origin.endpoint
-            if (cachedOrigin == null) {
+            val resolvedOrigin = origin.endpoint
+            if (resolvedOrigin == null) {
                 failSharedRoute(
                     share,
                     SharedRouteFailure(ERROR_ROUTE_PROVIDER, "Shared route origin could not be resolved.")
                 )
                 return
             }
-            cachedOrigin.latitude to cachedOrigin.longitude
+            resolvedOrigin
         } else {
-            val location = latestNativeLocation(ROUTE_LOCATION_FRESH_MILLIS)
-            if (location == null) {
-                failSharedRoute(
-                    share,
-                    SharedRouteFailure(ERROR_LOCATION_UNAVAILABLE, "Waiting for GPS.")
-                )
-                return
-            }
-            cachedOrigin = null
-            location.latitude to location.longitude
+            null
         }
 
         emitShareStatus(
@@ -1030,42 +978,47 @@ class MainActivity : FlutterActivity() {
             detail = "Starting shared route."
         )
 
-        val generation = synchronized(this) {
-            beginActiveRouteRequestLocked(
-                requestedMode = requestedMode,
-                originPolicy = if (share.explicitOrigin) {
-                    ROUTE_ORIGIN_EXPLICIT_PLACE
-                } else {
-                    ROUTE_ORIGIN_CURRENT_LOCATION
-                },
-                cachedOrigin = cachedOrigin,
-                targetEndpoint = targetEndpoint,
-                activeRouteSlot = null
-            )
-        }
-        val responses = nativeRouteResponses(
-            generation = generation,
-            originLatitude = originCoordinates.first,
-            originLongitude = originCoordinates.second,
-            targetEndpoint = targetEndpoint,
-            requestedMode = requestedMode,
-            errorOffset = 0,
-            activeRouteSlot = null,
-            originPolicy = if (share.explicitOrigin) {
-                ROUTE_ORIGIN_EXPLICIT_PLACE
-            } else {
-                ROUTE_ORIGIN_CURRENT_LOCATION
-            },
-            cachedOrigin = cachedOrigin
+        val request = linkedMapOf<String, Any?>(
+            "originPolicy" to if (share.explicitOrigin) ROUTE_ORIGIN_EXPLICIT_PLACE else ROUTE_ORIGIN_CURRENT_LOCATION,
+            "destination" to nativeRouteEndpointMap(targetEndpoint),
+            "travelMode" to requestedMode
         )
-        responses.forEach { queueNativePhoneMessage(it) }
-        if (!isCurrentRouteGeneration(generation)) {
-            return
+        cachedOrigin?.let { request["origin"] = nativeRouteEndpointMap(it) }
+        watchRuntime.startNavigation(request) { outcome ->
+            val state = outcome["deliveryState"] as? String ?: "deliveryFailed"
+            val detail = outcome["detail"] as? String ?: "Shared route failed."
+            val responses = outcome["responses"] as? List<*>
+            val errorCategory = responses
+                ?.asSequence()
+                ?.mapNotNull { it as? Map<*, *> }
+                ?.firstOrNull { intValue(it, KEY_CMD) == CMD_ERROR_STATE }
+                ?.let { intValue(it, KEY_BUTTON_ID) }
+            emitShareStatus(
+                state = when (state) {
+                    "applied" -> "activeRoute"
+                    "timedOut", "queued" -> "queuedUnconfirmed"
+                    "launchFailed" -> "launchFailed"
+                    "protocolMismatch" -> "protocolMismatch"
+                    else -> if (errorCategory == ERROR_NO_ROUTE) "noRoute" else "error"
+                },
+                share = share,
+                destinationLabel = targetEndpoint.label,
+                originLabel = cachedOrigin?.label,
+                detail = detail,
+                errorCategory = errorCategory
+            )
+            emitProviderStatusEvent()
+            emitBridgeStatus()
         }
-        emitProviderStatusEvent()
-        emitBridgeStatus()
-        finishSharedRouteStatus(share, targetEndpoint, cachedOrigin)
     }
+
+    private fun nativeRouteEndpointMap(endpoint: NativeRouteEndpoint): Map<String, Any?> = mapOf(
+        "label" to endpoint.label,
+        "address" to endpoint.address,
+        "latitude" to endpoint.latitude,
+        "longitude" to endpoint.longitude,
+        "placeId" to endpoint.placeId
+    )
 
     private fun resolveSharedEndpoint(
         endpoint: GoogleMapsShareParser.Endpoint,
@@ -1319,24 +1272,28 @@ class MainActivity : FlutterActivity() {
             val tileX = (event[KEY_WORLD_X] as? Number)?.toInt()
             val tileY = (event[KEY_WORLD_Y] as? Number)?.toInt()
             val tileZoom = (event[KEY_TILE_ZOOM] as? Number)?.toInt()
-            recordDiagnosticEntry(
-                source = "pebble",
-                level = "info",
-                eventName = when (command) {
-                    CMD_INIT -> "watch_init_received"
-                    CMD_TILE_REQUEST -> "tile_request_received"
-                    else -> "watch_command_received"
-                },
-                message = if (command == CMD_TILE_REQUEST) {
-                    "Watch requested tile x=${tileX ?: 0} y=${tileY ?: 0} z=${tileZoom ?: 0}."
-                } else {
-                    "Watch command ${command ?: 0} received."
-                },
-                commandId = command,
-                tileX = tileX,
-                tileY = tileY,
-                tileZoom = tileZoom
-            )
+            if (command == CMD_LOG_EVENT) {
+                nativeLogEvent(event)
+            } else {
+                recordDiagnosticEntry(
+                    source = "pebble",
+                    level = "info",
+                    eventName = when (command) {
+                        CMD_INIT -> "watch_init_received"
+                        CMD_TILE_REQUEST -> "tile_request_received"
+                        else -> "watch_command_received"
+                    },
+                    message = if (command == CMD_TILE_REQUEST) {
+                        "Watch requested tile x=${tileX ?: 0} y=${tileY ?: 0} z=${tileZoom ?: 0}."
+                    } else {
+                        "Watch command ${command ?: 0} received."
+                    },
+                    commandId = command,
+                    tileX = tileX,
+                    tileY = tileY,
+                    tileZoom = tileZoom
+                )
+            }
         }
         if (event["event"] == "sendResult") {
             val command = (event["command"] as? Number)?.toInt()
@@ -2015,7 +1972,7 @@ class MainActivity : FlutterActivity() {
         WatchLocationStreamer.status(this, permissionState())
 
     private fun watchStatusPayload(): Map<String, Any?> =
-        watchBridge?.status() ?: mapOf(
+        if (::watchRuntime.isInitialized) watchRuntime.status() else mapOf(
             "registered" to false,
             "watchReady" to false,
             "watchConnected" to false,
@@ -2043,7 +2000,12 @@ class MainActivity : FlutterActivity() {
         when {
             providerStatus["configured"] != true -> "providerRequired"
             providerStatus["validationState"] != "valid" -> "providerRequired"
-            permission != "grantedPrecise" && permission != "grantedApproximate" -> "locationRequired"
+            permission !in setOf(
+                "grantedPrecise",
+                "grantedApproximate",
+                "grantedAlwaysPrecise",
+                "grantedAlwaysApproximate"
+            ) -> "locationRequired"
             else -> "ready"
         }
 
@@ -2209,7 +2171,7 @@ class MainActivity : FlutterActivity() {
         synchronized(this) {
             nativePendingPhoneMessages.add(fields)
         }
-        watchBridge?.enqueue(fields)
+        watchRuntime.enqueue(fields)
     }
 
     private fun stringKeyMap(message: Map<*, *>): Map<String, Any?> =

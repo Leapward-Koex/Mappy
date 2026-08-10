@@ -48,7 +48,9 @@ void apply_tile(DictionaryIterator *iter) {
   Tuple *chunk_index_tuple = dict_find(iter, MESSAGE_KEY_chunk_index);
   Tuple *chunk_offset_tuple = dict_find(iter, MESSAGE_KEY_chunk_offset);
   Tuple *data_tuple = dict_find(iter, MESSAGE_KEY_chunk_data);
-  if (!x_tuple || !y_tuple || !zoom_tuple || !total_tuple || !data_tuple) {
+  Tuple *request_id_tuple = dict_find(iter, MESSAGE_KEY_request_id);
+  if (!x_tuple || !y_tuple || !zoom_tuple || !total_tuple || !data_tuple ||
+      !request_id_tuple) {
     set_bottom_text("Tile missing data");
     return;
   }
@@ -62,6 +64,7 @@ void apply_tile(DictionaryIterator *iter) {
   int32_t chunk_index = chunk_index_tuple ? chunk_index_tuple->value->int32 : 0;
   int32_t chunk_offset = chunk_offset_tuple ? chunk_offset_tuple->value->int32 : 0;
   uint16_t payload_len = data_tuple->length;
+  int32_t request_id = request_id_tuple->value->int32;
   if (zoom < MIN_MAP_ZOOM || zoom > MAX_MAP_ZOOM ||
       width != s_tile_width || height != s_tile_height ||
       total_bytes <= 0 || total_bytes > s_tile_pixels ||
@@ -86,6 +89,15 @@ void apply_tile(DictionaryIterator *iter) {
   }
 
   TileCacheEntry *pending_entry = find_tile(world_x, world_y, zoom);
+  if (!pending_entry || !pending_entry->pending || request_id <= 0 ||
+      pending_entry->pending_request_id != request_id) {
+    APP_LOG(APP_LOG_LEVEL_DEBUG,
+            "Tile ignore x=%ld y=%ld z=%d request=%ld expected=%ld reason=staleRequest",
+            (long)world_x, (long)world_y, (int)zoom, (long)request_id,
+            (long)(pending_entry ? pending_entry->pending_request_id : 0));
+    send_next_tile_request();
+    return;
+  }
   if (!pending_entry && !tile_coordinates_visible(world_x, world_y, zoom)) {
     APP_LOG(APP_LOG_LEVEL_DEBUG,
             "Tile ignore x=%ld y=%ld z=%d reason=notPendingNotVisible total=%ld payload=%u",
@@ -104,7 +116,8 @@ void apply_tile(DictionaryIterator *iter) {
         s_tile_chunk_zoom != zoom ||
         s_tile_chunk_width != width ||
         s_tile_chunk_height != height ||
-        s_tile_chunk_total != total_bytes;
+        s_tile_chunk_total != total_bytes ||
+        s_tile_chunk_request_id != request_id;
     if (starts_new_tile) {
       if (chunk_index != 0 || chunk_offset != 0) {
         APP_LOG(APP_LOG_LEVEL_WARNING,
@@ -124,6 +137,7 @@ void apply_tile(DictionaryIterator *iter) {
       s_tile_chunk_width = width;
       s_tile_chunk_height = height;
       s_tile_chunk_total = total_bytes;
+      s_tile_chunk_request_id = request_id;
       if (!ensure_tile_chunk_buffer(total_bytes)) {
         reset_tile_chunk_assembly();
         APP_LOG(APP_LOG_LEVEL_ERROR,

@@ -296,6 +296,7 @@ class BridgeStatus {
     required this.watchReady,
     required this.watchConnected,
     required this.watchAppActive,
+    this.watchLaunchPending = false,
     required this.foregroundServiceActive,
     required this.queueLength,
     required this.inFlight,
@@ -317,6 +318,7 @@ class BridgeStatus {
       watchReady = false,
       watchConnected = false,
       watchAppActive = false,
+      watchLaunchPending = false,
       foregroundServiceActive = false,
       queueLength = 0,
       inFlight = false,
@@ -336,6 +338,7 @@ class BridgeStatus {
   final bool watchReady;
   final bool watchConnected;
   final bool watchAppActive;
+  final bool watchLaunchPending;
   final bool foregroundServiceActive;
   final int queueLength;
   final bool inFlight;
@@ -371,6 +374,9 @@ class BridgeStatus {
     if (watchConnected) {
       return 'Connected, waiting for app';
     }
+    if (watchLaunchPending) {
+      return 'Opening watch app';
+    }
     return 'No Pebble connection';
   }
 
@@ -403,6 +409,7 @@ class BridgeStatus {
     bool? watchReady,
     bool? watchConnected,
     bool? watchAppActive,
+    bool? watchLaunchPending,
     bool? foregroundServiceActive,
     int? queueLength,
     bool? inFlight,
@@ -419,6 +426,7 @@ class BridgeStatus {
       watchReady: watchReady ?? this.watchReady,
       watchConnected: watchConnected ?? this.watchConnected,
       watchAppActive: watchAppActive ?? this.watchAppActive,
+      watchLaunchPending: watchLaunchPending ?? this.watchLaunchPending,
       foregroundServiceActive:
           foregroundServiceActive ?? this.foregroundServiceActive,
       queueLength: queueLength ?? this.queueLength,
@@ -468,6 +476,10 @@ class BridgeStatus {
       watchAppActive:
           _asBool(data['watchAppActive']) ??
           _asBool(watch['watchAppActive']) ??
+          false,
+      watchLaunchPending:
+          _asBool(data['watchLaunchPending']) ??
+          _asBool(watch['watchLaunchPending']) ??
           false,
       foregroundServiceActive:
           _asBool(data['foregroundServiceActive']) ?? false,

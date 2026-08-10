@@ -10,7 +10,8 @@ param(
 $ErrorActionPreference = "Stop"
 
 $repoRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot "..")).Path
-$wslRootOutput = @(& wsl.exe --exec wslpath -a -- $repoRoot)
+$repoRootForWsl = $repoRoot -replace '\\', '/'
+$wslRootOutput = @(& wsl.exe --exec wslpath -a -- $repoRootForWsl)
 if ($LASTEXITCODE -ne 0 -or $wslRootOutput.Count -eq 0) {
     throw "Could not translate the repository path for WSL."
 }
