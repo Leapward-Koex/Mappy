@@ -18,6 +18,10 @@ class WatchSessionForegroundService : Service() {
     private val idleRunnable = Runnable { stopAfterIdle() }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        if (intent == null && !MappyWatchSessionHub.isWatchAppActive(MappyWatchSessionHub.watchAppUuid)) {
+            stopSelf(startId)
+            return START_NOT_STICKY
+        }
         when (intent?.action) {
             ACTION_STOP_AFTER_GRACE -> {
                 handler.removeCallbacks(stopRunnable)
@@ -51,8 +55,9 @@ class WatchSessionForegroundService : Service() {
         handler.removeCallbacks(stopRunnable)
         handler.removeCallbacks(idleRunnable)
         isActive = false
-        HeadlessWatchRuntime.stopIfRunning()
-        WatchLocationStreamer.stop(applicationContext, sendError = false)
+        if (!MappyWatchSessionHub.isWatchAppActive(MappyWatchSessionHub.watchAppUuid)) {
+            WatchLocationStreamer.stop(applicationContext, sendError = false)
+        }
         super.onDestroy()
     }
 
@@ -70,7 +75,6 @@ class WatchSessionForegroundService : Service() {
     }
 
     private fun stopNow() {
-        HeadlessWatchRuntime.stopIfRunning()
         WatchLocationStreamer.stop(applicationContext, sendError = false)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
             stopForeground(STOP_FOREGROUND_REMOVE)
@@ -79,6 +83,7 @@ class WatchSessionForegroundService : Service() {
             stopForeground(true)
         }
         stopSelf()
+        MappyWatchRuntime.shutdownIfIdle()
     }
 
     private fun buildNotification(): Notification {
@@ -131,7 +136,7 @@ class WatchSessionForegroundService : Service() {
         private const val NOTIFICATION_ID = 2601
         private const val STOP_GRACE_MILLIS = 20_000L
         private const val DISCONNECT_GRACE_MILLIS = 30_000L
-        private const val IDLE_WATCHDOG_MILLIS = 10 * 60_000L
+        private const val IDLE_WATCHDOG_MILLIS = 30_000L
 
         @Volatile
         var isActive: Boolean = false
@@ -141,6 +146,10 @@ class WatchSessionForegroundService : Service() {
         private var lastStartError: String? = null
 
         fun startSession(context: Context) {
+            if (isActive) {
+                noteActivity(context)
+                return
+            }
             val intent = Intent(context, WatchSessionForegroundService::class.java)
                 .setAction(ACTION_START)
             try {

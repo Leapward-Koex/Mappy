@@ -12,6 +12,7 @@
 #define CMD_INIT 101
 #define CMD_ERROR_STATE 102
 #define CMD_LOG_EVENT 103
+#define CMD_PHONE_READY 104
 #define CMD_GPS 201
 #define CMD_TILE_REQUEST 202
 #define CMD_TILE 203
@@ -26,6 +27,8 @@
 #define CMD_NAV_STEPS 305
 #define CMD_ROUTE_WINDOW_REQUEST 306
 #define CMD_ROUTE_WINDOW_POINTS 307
+#define CMD_ROUTE_APPLIED 308
+#define CMD_ROUTE_COMPLETE 309
 #define CMD_THEME 401
 #define CMD_TRAVEL_MODE 402
 #define CMD_UNITS 403
@@ -56,7 +59,11 @@
 #define MESSAGE_KEY_gps_elapsed_ms 67
 #define MESSAGE_KEY_gps_accuracy_cm 68
 #define MESSAGE_KEY_gps_provider 69
+#define MESSAGE_KEY_request_id 70
+#define MESSAGE_KEY_protocol_version 71
 #endif
+
+#define WATCH_PROTOCOL_VERSION 2
 
 #define DEFAULT_TILE_W 54
 #define DEFAULT_TILE_H 63
@@ -188,6 +195,7 @@ typedef struct {
   int8_t zoom;
   bool valid;
   bool pending;
+  int32_t pending_request_id;
   time_t pending_started_s;
   uint16_t pending_started_ms;
   bool animation_active;
@@ -333,6 +341,11 @@ extern bool s_route_projection_unavailable_logged;
 extern bool s_route_offroute_logged;
 extern bool s_route_gps_stale_logged;
 extern bool s_route_clear_pending;
+extern bool s_route_complete_pending;
+extern int32_t s_active_route_request_id;
+extern int32_t s_next_request_id;
+extern bool s_route_applied_pending;
+extern bool s_route_steps_expected;
 extern int s_deferred_route_request_slot;
 extern PendingLogEvent s_pending_log_events[LOG_EVENT_QUEUE_SIZE];
 extern uint8_t s_pending_log_head;
@@ -402,6 +415,7 @@ extern int s_tile_chunk_height;
 extern int32_t s_tile_chunk_total;
 extern int32_t s_tile_chunk_received;
 extern int32_t s_tile_chunk_next_index;
+extern int32_t s_tile_chunk_request_id;
 extern bool s_tile_chunk_active;
 extern uint8_t *s_tile_chunk_buffer;
 extern int32_t s_tile_chunk_buffer_size;
@@ -585,6 +599,10 @@ bool dequeue_log_event(PendingLogEvent *event);
 bool send_log_event(int category, int detail, int detail2, const char *text);
 AppMessageResult send_message_begin(DictionaryIterator **iter, int32_t cmd);
 void send_init(void);
+void cancel_init_retry(void);
+void cancel_route_action_retry(void);
+void send_route_applied(void);
+void send_route_complete(void);
 void send_zoom_button(int delta);
 void send_route_request(void);
 void send_route_clear(void);

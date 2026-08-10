@@ -7,8 +7,10 @@
   var KEY_WORLD_X = 63;
   var KEY_WORLD_Y = 64;
   var KEY_TILE_ZOOM = 65;
+  var KEY_REQUEST_ID = 70;
   var CMD_INIT = 101;
   var CMD_ERROR_STATE = 102;
+  var CMD_PHONE_READY = 104;
   var CMD_GPS = 201;
   var CMD_TILE_REQUEST = 202;
   var CMD_TILE = 203;
@@ -19,6 +21,8 @@
   var CMD_ROUTE_POINTS = 303;
   var CMD_ROUTE_CLEAR = 304;
   var CMD_NAV_STEPS = 305;
+  var CMD_ROUTE_APPLIED = 308;
+  var CMD_ROUTE_COMPLETE = 309;
   var CMD_THEME = 401;
   var CMD_TRAVEL_MODE = 402;
   var CMD_UNITS = 403;
@@ -39,7 +43,12 @@
   var tileStaggerMs = numberOption('tileStaggerMs', 0, 0, 60000);
   var tileAnimationMode = numberOption('tileAnimationMode', -1, -1, 2);
   var routePointCount = numberOption('routePointCount', 3, 3, 128);
+  var phoneReadyDelayMs = numberOption('phoneReadyDelayMs', 0, 0, 60000);
+  var ignoreStartupReady = fixtureOptions.ignoreStartupReady === true;
+  var ignoreFirstInit = fixtureOptions.ignoreFirstInit === true;
+  var injectStaleTileFirst = fixtureOptions.injectStaleTileFirst === true;
   var tileSequence = 0;
+  var initCount = 0;
 
   function numberOption(name, fallback, minValue, maxValue) {
     var value = Number(fixtureOptions[name]);
@@ -242,6 +251,10 @@
       return;
     }
     didSendStartupState = true;
+    enqueue('phone-ready', {
+      cmd: CMD_PHONE_READY,
+      protocol_version: 2
+    });
     enqueue('theme', { cmd: CMD_THEME, button_id: 1 });
     enqueue('units', { cmd: CMD_UNITS, button_id: 1 });
     enqueue('backlight', { cmd: CMD_BACKLIGHT, button_id: 0 });
@@ -268,10 +281,15 @@
         cmd: CMD_ROUTE_POINTS,
         button_id: 1,
         is_color: 2,
+        request_id: 1,
+        total_bytes: 1,
+        chunk_index: 1,
         chunk_data: encodeRoute()
       });
       enqueue('stress-nav', {
         cmd: CMD_NAV_STEPS,
+        request_id: 1,
+        total_bytes: 1,
         chunk_data: encodeNavSteps(0)
       });
     }
@@ -279,7 +297,7 @@
 
   Pebble.addEventListener('ready', function() {
     console.log('[mappy-map-mock] ready');
-    sendReadyState();
+    if (!ignoreStartupReady) sendReadyState();
   });
 
   Pebble.addEventListener('appmessage', function(e) {
@@ -288,7 +306,12 @@
     console.log('[mappy-map-mock] rx cmd=' + cmd + ' ' + JSON.stringify(payload));
 
     if (cmd === CMD_INIT) {
-      sendReadyState();
+      initCount++;
+      if (ignoreFirstInit && initCount === 1) {
+        console.log('[mappy-map-mock] intentionally dropped first init');
+        return;
+      }
+      setTimeout(sendReadyState, phoneReadyDelayMs);
       return;
     }
 
@@ -296,6 +319,7 @@
       var wx = Number(pick(payload, 'world_x', KEY_WORLD_X) || 0);
       var wy = Number(pick(payload, 'world_y', KEY_WORLD_Y) || 0);
       var zoom = Number(pick(payload, 'tile_zoom', KEY_TILE_ZOOM) || ROUTE_ZOOM);
+      var requestId = Number(pick(payload, 'request_id', KEY_REQUEST_ID) || 0);
       var tile = encodeTile(wx, wy);
       var tileMessage = {
         cmd: CMD_TILE,
@@ -303,10 +327,22 @@
         world_y: wy,
         tile_zoom: zoom,
         total_bytes: tile.length,
+        request_id: requestId,
         chunk_data: tile
       };
       var delayMs = tileDelayMs + tileSequence * tileStaggerMs;
       tileSequence++;
+      if (injectStaleTileFirst) {
+        var staleTileMessage = {};
+        for (var tileKey in tileMessage) {
+          if (Object.prototype.hasOwnProperty.call(tileMessage, tileKey)) {
+            staleTileMessage[tileKey] = tileMessage[tileKey];
+          }
+        }
+        staleTileMessage.request_id = Math.max(0, requestId - 1);
+        enqueueDelayed('stale-tile', staleTileMessage, delayMs);
+        delayMs += 25;
+      }
       enqueueDelayed('tile', tileMessage, delayMs);
       return;
     }
@@ -326,10 +362,15 @@
       enqueue('route', {
         cmd: CMD_ROUTE_POINTS,
         button_id: 1,
+        request_id: Number(pick(payload, 'request_id', KEY_REQUEST_ID) || 1),
+        total_bytes: 1,
+        chunk_index: 1,
         chunk_data: encodeRoute()
       });
       enqueue('nav', {
         cmd: CMD_NAV_STEPS,
+        request_id: Number(pick(payload, 'request_id', KEY_REQUEST_ID) || 1),
+        total_bytes: 1,
         chunk_data: encodeNavSteps(0)
       });
       return;
@@ -338,6 +379,8 @@
     if (cmd === CMD_NAV_STEPS) {
       enqueue('nav-request', {
         cmd: CMD_NAV_STEPS,
+        request_id: Number(pick(payload, 'request_id', KEY_REQUEST_ID) || 1),
+        total_bytes: Number(pick(payload, 'total_bytes', 56) || 1),
         chunk_data: encodeNavSteps(Number(pick(payload, 'button_id', KEY_BUTTON_ID) || 0))
       });
       return;
@@ -345,6 +388,18 @@
 
     if (cmd === CMD_ROUTE_CLEAR) {
       enqueue('route-clear', { cmd: CMD_ROUTE_CLEAR });
+      return;
+    }
+
+    if (cmd === CMD_ROUTE_APPLIED) {
+      console.log('[mappy-map-mock] route applied request=' +
+          Number(pick(payload, 'request_id', KEY_REQUEST_ID) || 0));
+      return;
+    }
+
+    if (cmd === CMD_ROUTE_COMPLETE) {
+      console.log('[mappy-map-mock] route complete request=' +
+          Number(pick(payload, 'request_id', KEY_REQUEST_ID) || 0));
       return;
     }
 

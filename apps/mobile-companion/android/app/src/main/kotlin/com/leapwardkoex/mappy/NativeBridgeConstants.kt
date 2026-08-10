@@ -30,6 +30,9 @@ internal const val MAP_TILE_SETTINGS_PREFERENCES_NAME = "mappy_map_tile_settings
 internal const val MAP_TILE_SETTING_SOURCE = "map_source"
 internal const val MAP_TILE_SETTING_SIZE = "watch_tile_size"
 internal const val DISPLAY_SETTINGS_PREFERENCES_NAME = "watch_display_settings"
+internal const val ACTIVE_ROUTE_PREFERENCES_NAME = "mappy_active_route"
+internal const val ACTIVE_ROUTE_PREFERENCES_KEY = "active_route_json"
+internal const val ACTIVE_ROUTE_TTL_MILLIS = 24 * 60 * 60 * 1000L
 internal const val THEME_MODE_SETTING = "themeMode"
 internal const val TRAVEL_MODE_SETTING = "travelMode"
 internal const val UNITS_MODE_SETTING = "unitsMode"
@@ -68,6 +71,8 @@ internal const val ERROR_TILE_PROVIDER = 5
 internal const val ERROR_ROUTE_PROVIDER = 6
 internal const val ERROR_NO_ROUTE = 7
 internal const val ERROR_DESTINATION_NOT_CONFIGURED = 8
+internal const val ERROR_PROTOCOL_MISMATCH = 9
+internal const val WATCH_PROTOCOL_VERSION = 2
 internal const val KEY_CMD = "cmd"
 internal const val KEY_WIDTH = "width"
 internal const val KEY_HEIGHT = "height"
@@ -88,10 +93,13 @@ internal const val KEY_GPS_SEQUENCE = "gps_sequence"
 internal const val KEY_GPS_ELAPSED_MS = "gps_elapsed_ms"
 internal const val KEY_GPS_ACCURACY_CM = "gps_accuracy_cm"
 internal const val KEY_GPS_PROVIDER = "gps_provider"
+internal const val KEY_REQUEST_ID = "request_id"
+internal const val KEY_PROTOCOL_VERSION = "protocol_version"
 internal const val KEY_ERROR_CATEGORY = "errorCategory"
 internal const val CMD_INIT = 101
 internal const val CMD_ERROR_STATE = 102
 internal const val CMD_LOG_EVENT = 103
+internal const val CMD_PHONE_READY = 104
 internal const val CMD_GPS = 201
 internal const val CMD_TILE_REQUEST = 202
 internal const val CMD_TILE = 203
@@ -106,6 +114,8 @@ internal const val CMD_ROUTE_CLEAR = 304
 internal const val CMD_NAV_STEPS = 305
 internal const val CMD_ROUTE_WINDOW_REQUEST = 306
 internal const val CMD_ROUTE_WINDOW_POINTS = 307
+internal const val CMD_ROUTE_APPLIED = 308
+internal const val CMD_ROUTE_COMPLETE = 309
 internal const val CMD_THEME = 401
 internal const val CMD_TRAVEL_MODE = 402
 internal const val CMD_UNITS = 403
@@ -134,7 +144,9 @@ internal val WATCH_MESSAGE_KEY_IDS: Map<String, Int> = linkedMapOf(
     KEY_GPS_SEQUENCE to 66,
     KEY_GPS_ELAPSED_MS to 67,
     KEY_GPS_ACCURACY_CM to 68,
-    KEY_GPS_PROVIDER to 69
+    KEY_GPS_PROVIDER to 69,
+    KEY_REQUEST_ID to 70,
+    KEY_PROTOCOL_VERSION to 71
 )
 internal val SHARE_FINAL_GOOGLE_MAPS_HOSTS = setOf(
     "www.google.com",

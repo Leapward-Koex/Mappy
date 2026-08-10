@@ -32,4 +32,6 @@ internal interface PebbleTransportReceiver {
     fun onWatchConnected()
 
     fun onWatchDisconnected()
+
+    fun onWatchLaunchResult(success: Boolean) {}
 }

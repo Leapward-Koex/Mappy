@@ -15,6 +15,7 @@ void clear_tile_pending(TileCacheEntry *entry) {
     return;
   }
   entry->pending = false;
+  entry->pending_request_id = 0;
   entry->pending_started_s = 0;
   entry->pending_started_ms = 0;
 }

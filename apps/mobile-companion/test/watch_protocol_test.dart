@@ -13,6 +13,7 @@ void main() {
     test('assigns a unique positive id to every command', () {
       const commandIds = {
         WatchCommands.init,
+        WatchCommands.phoneReady,
         WatchCommands.tile,
         WatchCommands.button,
         WatchCommands.gps,
@@ -34,12 +35,14 @@ void main() {
         WatchCommands.tileAnimation,
         WatchCommands.routeWindowRequest,
         WatchCommands.routeWindowPoints,
+        WatchCommands.routeApplied,
+        WatchCommands.routeComplete,
         WatchCommands.debugCompass,
         WatchCommands.debugTile,
         WatchCommands.debugRouteProgress,
       };
 
-      expect(commandIds, hasLength(25));
+      expect(commandIds, hasLength(28));
       expect(commandIds, everyElement(isPositive));
     });
 
@@ -49,11 +52,13 @@ void main() {
           WatchKeys.tileZoom: 0,
           WatchKeys.buttonId: 2,
           WatchKeys.totalBytes: 0,
+          WatchKeys.protocolVersion: watchProtocolVersion,
         }).fields,
         equals(const {
           WatchKeys.tileZoom: 0,
           WatchKeys.buttonId: 2,
           WatchKeys.totalBytes: 0,
+          WatchKeys.protocolVersion: watchProtocolVersion,
           WatchKeys.cmd: WatchCommands.init,
         }),
       );
@@ -63,12 +68,14 @@ void main() {
           WatchKeys.worldY: 456,
           WatchKeys.tileZoom: 16,
           WatchKeys.isColor: 1,
+          WatchKeys.requestId: 1,
         }).fields,
         equals(const {
           WatchKeys.worldX: 123,
           WatchKeys.worldY: 456,
           WatchKeys.tileZoom: 16,
           WatchKeys.isColor: 1,
+          WatchKeys.requestId: 1,
           WatchKeys.cmd: WatchCommands.tileRequest,
         }),
       );
@@ -353,7 +360,9 @@ void main() {
       expect(routeResponse.fields[WatchKeys.isColor], 0);
 
       final initResponses = await worker.handleWatchMessage(
-        WatchMessage.command(WatchCommands.init),
+        WatchMessage.command(WatchCommands.init, const {
+          WatchKeys.protocolVersion: watchProtocolVersion,
+        }),
       );
       final replayedRoute = initResponses.firstWhere(
         (message) => message.command == WatchCommands.routePoints,
@@ -429,7 +438,9 @@ void main() {
         );
 
         final initResponses = await worker.handleWatchMessage(
-          WatchMessage.command(WatchCommands.init),
+          WatchMessage.command(WatchCommands.init, const {
+            WatchKeys.protocolVersion: watchProtocolVersion,
+          }),
         );
         expect(
           initResponses.map((message) => message.command),

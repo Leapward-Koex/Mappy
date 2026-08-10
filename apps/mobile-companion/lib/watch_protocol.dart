@@ -25,12 +25,15 @@ abstract final class WatchKeys {
   static const gpsElapsedMs = 'gps_elapsed_ms';
   static const gpsAccuracyCm = 'gps_accuracy_cm';
   static const gpsProvider = 'gps_provider';
+  static const requestId = 'request_id';
+  static const protocolVersion = 'protocol_version';
 }
 
 abstract final class WatchCommands {
   static const init = 101;
   static const errorState = 102;
   static const logEvent = 103;
+  static const phoneReady = 104;
   static const gps = 201;
   static const tileRequest = 202;
   static const tile = 203;
@@ -45,6 +48,8 @@ abstract final class WatchCommands {
   static const navSteps = 305;
   static const routeWindowRequest = 306;
   static const routeWindowPoints = 307;
+  static const routeApplied = 308;
+  static const routeComplete = 309;
   static const theme = 401;
   static const travelMode = 402;
   static const units = 403;
@@ -54,6 +59,8 @@ abstract final class WatchCommands {
   static const debugTile = 902;
   static const debugRouteProgress = 903;
 }
+
+const watchProtocolVersion = 2;
 
 const watchTileWidth = 54;
 const watchTileHeight = 63;
@@ -380,6 +387,7 @@ Uint8List? bytesFromValue(Object? value) {
 String watchCommandName(int? command) {
   return switch (command) {
     WatchCommands.init => 'CMD_INIT',
+    WatchCommands.phoneReady => 'CMD_PHONE_READY',
     WatchCommands.tile => 'CMD_TILE',
     WatchCommands.button => 'CMD_BUTTON',
     WatchCommands.gps => 'CMD_GPS',
@@ -401,6 +409,8 @@ String watchCommandName(int? command) {
     WatchCommands.tileAnimation => 'CMD_TILE_ANIMATION',
     WatchCommands.routeWindowRequest => 'CMD_ROUTE_WINDOW_REQUEST',
     WatchCommands.routeWindowPoints => 'CMD_ROUTE_WINDOW_POINTS',
+    WatchCommands.routeApplied => 'CMD_ROUTE_APPLIED',
+    WatchCommands.routeComplete => 'CMD_ROUTE_COMPLETE',
     WatchCommands.debugCompass => 'CMD_DEBUG_COMPASS',
     WatchCommands.debugTile => 'CMD_DEBUG_TILE',
     WatchCommands.debugRouteProgress => 'CMD_DEBUG_ROUTE_PROGRESS',

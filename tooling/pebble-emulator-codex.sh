@@ -69,6 +69,14 @@ Environment:
                            Fixture startup tile animation sync: -1, 0, 1, or 2.
   MAPPY_FIXTURE_ROUTE_POINT_COUNT
                            Deterministic fixture route points: 3..128.
+  MAPPY_FIXTURE_PHONE_READY_DELAY_MS
+                           Delay version-2 phone-ready after INIT.
+  MAPPY_FIXTURE_IGNORE_STARTUP_READY
+                           Wait for INIT instead of pushing startup state.
+  MAPPY_FIXTURE_IGNORE_FIRST_INIT
+                           Drop the first INIT to exercise watch retry.
+  MAPPY_FIXTURE_INJECT_STALE_TILE_FIRST
+                           Send a stale tile request ID before the current tile.
   PEBBLE_WATCH_DIR         Watch app directory.
   PEBBLE_CODEX_OUT         Screenshot output directory.
   PEBBLE_PBW               Built .pbw path.

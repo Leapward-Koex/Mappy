@@ -332,6 +332,20 @@ class _CompanionHomeState extends State<CompanionHome> {
     }
     final status = event.status;
     setState(() {
+      switch (event.type) {
+        case 'navigationQueued':
+          _watchSessionDetail = 'Synchronizing route with watch.';
+        case 'watchLaunchRequested':
+          _watchSessionDetail = 'Opening watch app.';
+        case 'navigationApplied':
+          _watchSessionDetail = 'Route applied on watch.';
+        case 'navigationDeliveryTimeout':
+          _watchSessionDetail = 'Route queued; watch did not confirm.';
+        case 'watchLaunchFailed':
+          _watchSessionDetail = 'Watch app could not be opened.';
+        case 'protocolMismatch':
+          _watchSessionDetail = 'Update the phone and watch apps together.';
+      }
       if (status != null) {
         _bridgeStatus = status;
       }
@@ -766,11 +780,12 @@ class _CompanionHomeState extends State<CompanionHome> {
 
     setState(() {
       _isComputingRoute = true;
+      _watchSessionDetail = 'Calculating route.';
     });
 
-    late final List<WatchMessage> responses;
+    late final WatchNavigationDispatchResult dispatchResult;
     try {
-      responses = await _navigationDispatcher.startNavigation(
+      dispatchResult = await _navigationDispatcher.startNavigation(
         WatchNavigationRequest(
           originPolicy: originPolicy,
           origin: origin,
@@ -793,7 +808,7 @@ class _CompanionHomeState extends State<CompanionHome> {
     }
 
     final routeResult = _routeResultFromWatchResponses(
-      responses,
+      dispatchResult.responses,
       status: _navigationDispatcher.lastProviderStatus.configured
           ? _navigationDispatcher.lastProviderStatus
           : _providerStatus,
@@ -811,10 +826,22 @@ class _CompanionHomeState extends State<CompanionHome> {
         _activeRouteTravelMode = null;
       }
       _isComputingRoute = false;
+      _watchSessionDetail = dispatchResult.detail;
     });
-    return routeResult.ok
-        ? _navigationSentMessage(destination.label)
-        : routeResult.detail ?? 'Route failed.';
+    if (!routeResult.ok) {
+      return routeResult.detail ?? 'Route failed.';
+    }
+    return switch (dispatchResult.deliveryState) {
+      WatchNavigationDeliveryState.applied => _navigationSentMessage(destination.label),
+      WatchNavigationDeliveryState.launchFailed ||
+      WatchNavigationDeliveryState.timedOut ||
+      WatchNavigationDeliveryState.queued =>
+        dispatchResult.detail ?? 'Route ready on phone; watch did not confirm.',
+      WatchNavigationDeliveryState.protocolMismatch =>
+        dispatchResult.detail ?? 'Update the phone and watch apps together.',
+      WatchNavigationDeliveryState.deliveryFailed =>
+        dispatchResult.detail ?? 'Route delivery failed.',
+    };
   }
 
   Future<String> _rerouteActiveRoute() async {
@@ -826,11 +853,12 @@ class _CompanionHomeState extends State<CompanionHome> {
 
     setState(() {
       _isComputingRoute = true;
+      _watchSessionDetail = 'Calculating reroute.';
     });
 
-    late final List<WatchMessage> responses;
+    late final WatchNavigationDispatchResult dispatchResult;
     try {
-      responses = await _navigationDispatcher.rerouteActiveRoute();
+      dispatchResult = await _navigationDispatcher.rerouteActiveRoute();
     } catch (_) {
       if (!mounted) {
         return 'Reroute request failed.';
@@ -846,7 +874,7 @@ class _CompanionHomeState extends State<CompanionHome> {
     }
 
     final routeResult = _routeResultFromWatchResponses(
-      responses,
+      dispatchResult.responses,
       status: _navigationDispatcher.lastProviderStatus.configured
           ? _navigationDispatcher.lastProviderStatus
           : _providerStatus,
@@ -856,25 +884,29 @@ class _CompanionHomeState extends State<CompanionHome> {
     setState(() {
       _providerStatus = routeResult.status;
       if (routeResult.ok || routeResult.errorCategory == 7) {
-        _routeResult = routeResult;
+      _routeResult = routeResult;
       }
       if (routeResult.errorCategory == 7) {
         _activeRouteDestination = null;
         _activeRouteTravelMode = null;
       }
       _isComputingRoute = false;
+      _watchSessionDetail = dispatchResult.detail;
     });
-    return routeResult.ok
-        ? 'Route refreshed.'
-        : routeResult.detail ?? 'Reroute failed.';
+    if (!routeResult.ok) return routeResult.detail ?? 'Reroute failed.';
+    return dispatchResult.deliveryState == WatchNavigationDeliveryState.applied
+        ? 'Route refreshed and confirmed on watch.'
+        : dispatchResult.detail ?? 'Route refreshed; watch did not confirm.';
   }
 
   Future<String> _clearActiveRoute() async {
     setState(() {
       _isComputingRoute = true;
+      _watchSessionDetail = 'Clearing route on watch.';
     });
+    late final WatchNavigationDispatchResult dispatchResult;
     try {
-      await _navigationDispatcher.clearActiveRoute();
+      dispatchResult = await _navigationDispatcher.clearActiveRoute();
     } catch (_) {
       if (!mounted) {
         return 'Clear route failed.';
@@ -892,8 +924,9 @@ class _CompanionHomeState extends State<CompanionHome> {
       _activeRouteDestination = null;
       _activeRouteTravelMode = null;
       _isComputingRoute = false;
+      _watchSessionDetail = dispatchResult.detail;
     });
-    return 'Route cleared.';
+    return dispatchResult.detail ?? 'Route clear queued.';
   }
 
   Future<String> _saveSavedLocation(WatchDestinationConfig config) async {

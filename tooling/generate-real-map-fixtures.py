@@ -35,8 +35,10 @@ KEY_BUTTON_ID = 60
 KEY_WORLD_X = 63
 KEY_WORLD_Y = 64
 KEY_TILE_ZOOM = 65
+KEY_REQUEST_ID = 70
 CMD_INIT = 101
 CMD_ERROR_STATE = 102
+CMD_PHONE_READY = 104
 CMD_GPS = 201
 CMD_TILE_REQUEST = 202
 CMD_TILE = 203
@@ -665,7 +667,9 @@ def write_pkjs(path: Path, fixture: dict[str, Any]) -> None:
   var KEY_WORLD_X = {KEY_WORLD_X};
   var KEY_WORLD_Y = {KEY_WORLD_Y};
   var KEY_TILE_ZOOM = {KEY_TILE_ZOOM};
+  var KEY_REQUEST_ID = {KEY_REQUEST_ID};
   var CMD_INIT = {CMD_INIT};
+  var CMD_PHONE_READY = {CMD_PHONE_READY};
   var CMD_GPS = {CMD_GPS};
   var CMD_TILE_REQUEST = {CMD_TILE_REQUEST};
   var CMD_TILE = {CMD_TILE};
@@ -759,6 +763,7 @@ def write_pkjs(path: Path, fixture: dict[str, Any]) -> None:
   function sendStartupState() {{
     if (didSendStartupState) return;
     didSendStartupState = true;
+    enqueue('phone-ready', {{ cmd: CMD_PHONE_READY, protocol_version: 2 }});
     enqueue('theme', {{ cmd: CMD_THEME, button_id: 1 }});
     enqueue('units', {{ cmd: CMD_UNITS, button_id: 1 }});
     enqueue('backlight', {{ cmd: CMD_BACKLIGHT, button_id: 0 }});
@@ -842,6 +847,7 @@ def write_pkjs(path: Path, fixture: dict[str, Any]) -> None:
       var wy = Number(pick(payload, 'world_y', KEY_WORLD_Y) || 0);
       var zoom = Number(pick(payload, 'tile_zoom', KEY_TILE_ZOOM) || FIXTURE.gps.zoom);
       var theme = Number(pick(payload, 'is_color', KEY_IS_COLOR) || 1);
+      var requestId = Number(pick(payload, 'request_id', KEY_REQUEST_ID) || 0);
       var tileResult = findFixtureTile(wx, wy, zoom, theme);
       if (!tileResult) {{
         enqueue('tile-outside-fixture', {{
@@ -865,6 +871,7 @@ def write_pkjs(path: Path, fixture: dict[str, Any]) -> None:
         world_y: wy,
         tile_zoom: zoom,
         total_bytes: tileResult.data.length,
+        request_id: requestId,
         chunk_data: tileResult.data
       }});
       return;
@@ -882,8 +889,11 @@ def write_pkjs(path: Path, fixture: dict[str, Any]) -> None:
         }});
         return;
       }}
-      enqueue('route', {{ cmd: CMD_ROUTE_POINTS, button_id: 1, chunk_data: FIXTURE.routePayload }});
-      enqueue('nav', {{ cmd: CMD_NAV_STEPS, chunk_data: FIXTURE.navPayloads['0'] }});
+      var routeRequestId = Number(pick(payload, 'request_id', KEY_REQUEST_ID) || 1);
+      enqueue('route', {{ cmd: CMD_ROUTE_POINTS, button_id: 1, request_id: routeRequestId,
+        total_bytes: 1, chunk_index: 1, chunk_data: FIXTURE.routePayload }});
+      enqueue('nav', {{ cmd: CMD_NAV_STEPS, request_id: routeRequestId,
+        total_bytes: 1, chunk_data: FIXTURE.navPayloads['0'] }});
       return;
     }}
 

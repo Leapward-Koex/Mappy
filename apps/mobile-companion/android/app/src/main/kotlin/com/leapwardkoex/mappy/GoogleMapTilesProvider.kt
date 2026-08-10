@@ -77,7 +77,9 @@ class GoogleMapTilesProvider(
         allowUnrestrictedDevelopmentKey = allowUnrestrictedDevelopmentKey
     )
 
+    @Volatile
     private var cachedSession: TileSession? = null
+    private val sessionLock = Any()
     private val sourceTileCache = boundedCache<String, ByteArray>(MAX_SOURCE_TILE_CACHE_ENTRIES)
     private val encodedWatchTileCache = boundedCache<String, ByteArray>(MAX_WATCH_TILE_CACHE_ENTRIES)
     private val inFlightWatchTilesLock = ReentrantLock()
@@ -87,7 +89,7 @@ class GoogleMapTilesProvider(
     private var mapTileSettings = MapTileSettings()
 
     fun clearProviderSessions() {
-        cachedSession = null
+        synchronized(sessionLock) { cachedSession = null }
         synchronized(sourceTileCache) { sourceTileCache.clear() }
         synchronized(encodedWatchTileCache) { encodedWatchTileCache.clear() }
         inFlightWatchTilesLock.lock()
@@ -161,7 +163,7 @@ class GoogleMapTilesProvider(
 
         val tiles = validateMapTiles(key, identity)
         if (tiles != null) {
-            cachedSession = null
+            synchronized(sessionLock) { cachedSession = null }
             return tiles
         }
 
@@ -205,22 +207,17 @@ class GoogleMapTilesProvider(
         val status = keyStore.getStatus()
         val validationState = status["validationState"] as? String
         val settings = mapTileSettings
-        if (
-            validationState != ApiKeyStore.STATE_VALID ||
-            cachedSession == null ||
-            cachedSession?.settingsKey != settings.cacheKey
-        ) {
-            val validation = validateProviderSetup()
-            if (validation["validationState"] != ApiKeyStore.STATE_VALID) {
-                return mapOf(
+        if (validationState != ApiKeyStore.STATE_VALID) {
+            return mapOf(
                 "ok" to false,
-                "providerStatus" to validation,
-                "detail" to validation["validationDetail"],
-                "errorCategory" to providerStateToCategory(validation["validationState"] as? String),
-                "httpStatus" to validation["validationHttpStatus"]
+                "providerStatus" to status,
+                "detail" to status["validationDetail"],
+                "errorCategory" to providerStateToCategory(validationState),
+                "httpStatus" to status["validationHttpStatus"]
             )
         }
-        }
+
+        ensureTileSession(key, identity)?.let { return it }
 
         val session = cachedSession
             ?: return providerFailure(
@@ -288,26 +285,31 @@ class GoogleMapTilesProvider(
         val status = keyStore.getStatus()
         val validationState = status["validationState"] as? String
         val settings = mapTileSettings
-        if (
-            validationState != ApiKeyStore.STATE_VALID ||
-            cachedSession == null ||
-            cachedSession?.settingsKey != settings.cacheKey
-        ) {
-            val validation = validateProviderSetup()
-            if (validation["validationState"] != ApiKeyStore.STATE_VALID) {
-                return watchTileFailure(
-                    status = validation,
-                    detail = validation["validationDetail"] as? String ?: "Provider setup is not valid.",
-                    errorCategory = providerStateToCategory(validation["validationState"] as? String),
+        if (validationState != ApiKeyStore.STATE_VALID) {
+            return watchTileFailure(
+                    status = status,
+                    detail = status["validationDetail"] as? String ?: "Provider setup is not valid.",
+                    errorCategory = providerStateToCategory(validationState),
                     worldX = worldX,
                     worldY = worldY,
                     zoom = zoom,
-                    httpStatus = validation["validationHttpStatus"] as? Int
+                    httpStatus = status["validationHttpStatus"] as? Int
                 )
-            }
         }
 
-        val session = cachedSession ?: return watchTileFailure(
+        ensureTileSession(key, identity)?.let { failure ->
+            return watchTileFailure(
+                status = failure["providerStatus"] as? Map<String, Any?> ?: status,
+                detail = failure["detail"] as? String ?: "No Map Tiles session is available.",
+                errorCategory = intValue(failure, "errorCategory") ?: ERROR_NETWORK,
+                worldX = worldX,
+                worldY = worldY,
+                zoom = zoom,
+                httpStatus = intValue(failure, "httpStatus")
+            )
+        }
+
+        var session = cachedSession ?: return watchTileFailure(
             status = keyStore.getStatus(),
             detail = "No Map Tiles session is available.",
             errorCategory = ERROR_NETWORK,
@@ -369,7 +371,7 @@ class GoogleMapTilesProvider(
 
         try {
             for ((tileX, tileY) in sourceTileKeys) {
-                val response = fetchSourceTileBytes(
+                var response = fetchSourceTileBytes(
                     key = key,
                     identity = identity,
                     sessionToken = session.sessionToken,
@@ -382,6 +384,29 @@ class GoogleMapTilesProvider(
                         offsetY = 0.0
                     )
                 )
+                if (!response.success && response.httpStatus in setOf(400, 401, 403, 404)) {
+                    synchronized(sessionLock) {
+                        if (cachedSession?.sessionToken == session.sessionToken) cachedSession = null
+                    }
+                    if (ensureTileSession(key, identity) == null) {
+                        cachedSession?.let { replacement ->
+                            session = replacement
+                            response = fetchSourceTileBytes(
+                                key = key,
+                                identity = identity,
+                                sessionToken = replacement.sessionToken,
+                                settingsKey = settings.cacheKey,
+                                coordinate = TileCoordinate(
+                                    tileX = tileX,
+                                    tileY = tileY,
+                                    zoom = safeZoom,
+                                    offsetX = 0.0,
+                                    offsetY = 0.0
+                                )
+                            )
+                        }
+                    }
+                }
                 val bytes = response.bytes
                 if (!response.success || bytes == null) {
                     return watchTileFailure(
@@ -750,7 +775,10 @@ class GoogleMapTilesProvider(
         )
     }
 
-    private fun validateMapTiles(key: String, identity: AndroidIdentity): Map<String, Any?>? {
+    private fun validateMapTiles(
+        key: String,
+        identity: AndroidIdentity
+    ): Map<String, Any?>? = synchronized(sessionLock) {
         val correct = createSession(key, identity.packageName, identity.certSha1)
         if (!correct.success) {
             return keyStore.markValidationResult(
@@ -1010,6 +1038,38 @@ class GoogleMapTilesProvider(
             "errorCategory" to providerStateToCategory(validation["validationState"] as? String),
             "httpStatus" to validation["validationHttpStatus"]
         ).filterValues { it != null }
+    }
+
+    private fun ensureTileSession(
+        key: String,
+        identity: AndroidIdentity
+    ): Map<String, Any?>? {
+        val settingsKey = mapTileSettings.cacheKey
+        if (cachedSession?.settingsKey == settingsKey) return null
+        synchronized(sessionLock) {
+            if (cachedSession?.settingsKey == settingsKey) return null
+            val response = createSession(key, identity.packageName, identity.certSha1)
+            if (response.success && response.session != null) {
+                cachedSession = response.session
+                return null
+            }
+            cachedSession = null
+            val state = mapHttpStatusToState(response.httpStatus)
+            val providerStatus = keyStore.markValidationResult(
+                state,
+                response.safeDetail,
+                response.httpStatus,
+                identity.packageName,
+                identity.certSha1
+            )
+            return mapOf(
+                "ok" to false,
+                "providerStatus" to providerStatus,
+                "detail" to response.safeDetail,
+                "errorCategory" to providerStateToCategory(state),
+                "httpStatus" to response.httpStatus
+            ).filterValues { it != null }
+        }
     }
 
     private fun createSession(key: String, packageName: String, certSha1: String): ProviderResponse {

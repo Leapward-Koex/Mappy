@@ -10,8 +10,70 @@
 #define PENDING_SETTING_TILE_ANIMATION (1u << 5)
 
 static uint32_t s_pending_setting_mask;
+static AppTimer *s_init_retry_timer;
+static AppTimer *s_route_action_retry_timer;
+static uint8_t s_init_retry_attempt;
+static bool s_phone_ready;
+
+static bool route_action_pending(void) {
+  return s_route_clear_pending || s_route_applied_pending ||
+      s_route_complete_pending;
+}
+
+static void route_action_retry_callback(void *context) {
+  (void)context;
+  s_route_action_retry_timer = NULL;
+  if (!s_outbox_busy) {
+    send_deferred_route_action();
+  }
+  if (route_action_pending() && !s_route_action_retry_timer) {
+    s_route_action_retry_timer = app_timer_register(1000, route_action_retry_callback, NULL);
+  }
+}
+
+static void schedule_route_action_retry(void) {
+  if (!s_route_action_retry_timer) {
+    s_route_action_retry_timer = app_timer_register(1000, route_action_retry_callback, NULL);
+  }
+}
+
+void cancel_route_action_retry(void) {
+  if (s_route_action_retry_timer) {
+    app_timer_cancel(s_route_action_retry_timer);
+    s_route_action_retry_timer = NULL;
+  }
+}
 
 static bool send_scalar_setting(int32_t cmd, int32_t value);
+
+static void init_retry_callback(void *context) {
+  (void)context;
+  s_init_retry_timer = NULL;
+  if (!s_phone_ready) {
+    send_init();
+  }
+}
+
+static void schedule_init_retry(void) {
+  if (s_phone_ready || s_init_retry_timer) {
+    return;
+  }
+  static const uint16_t delays[] = {1000, 2000, 4000, 8000};
+  uint8_t index = s_init_retry_attempt < 4 ? s_init_retry_attempt : 3;
+  if (s_init_retry_attempt < UINT8_MAX) {
+    s_init_retry_attempt++;
+  }
+  s_init_retry_timer = app_timer_register(delays[index], init_retry_callback, NULL);
+}
+
+void cancel_init_retry(void) {
+  s_phone_ready = true;
+  s_init_retry_attempt = 0;
+  if (s_init_retry_timer) {
+    app_timer_cancel(s_init_retry_timer);
+    s_init_retry_timer = NULL;
+  }
+}
 
 static uint32_t pending_setting_mask_for_cmd(int32_t cmd) {
   switch (cmd) {
@@ -173,6 +235,7 @@ void send_init(void) {
   AppMessageResult result = send_message_begin(&iter, CMD_INIT);
   if (result != APP_MSG_OK) {
     APP_LOG(APP_LOG_LEVEL_WARNING, "CMD_INIT begin failed: %d", (int)result);
+    schedule_init_retry();
     return;
   }
 
@@ -180,9 +243,64 @@ void send_init(void) {
   write_i32(iter, MESSAGE_KEY_button_id, s_travel_mode);
   write_i32(iter, MESSAGE_KEY_total_bytes, s_backlight_mode);
   write_i32(iter, MESSAGE_KEY_chunk_offset, s_map_orientation);
-  app_message_outbox_send();
+  write_i32(iter, MESSAGE_KEY_protocol_version, WATCH_PROTOCOL_VERSION);
+  result = app_message_outbox_send();
+  if (result != APP_MSG_OK) {
+    s_outbox_busy = false;
+    s_outbox_cmd = 0;
+    schedule_init_retry();
+  }
   s_state = AppStateWaitingForPhone;
   set_bottom_text(MAPPY_WAITING_TEXT);
+}
+
+void send_route_applied(void) {
+  if (s_active_route_request_id <= 0) {
+    s_route_applied_pending = false;
+    return;
+  }
+  DictionaryIterator *iter;
+  AppMessageResult result = send_message_begin(&iter, CMD_ROUTE_APPLIED);
+  if (result != APP_MSG_OK) {
+    s_route_applied_pending = true;
+    schedule_route_action_retry();
+    return;
+  }
+  write_i32(iter, MESSAGE_KEY_request_id, s_active_route_request_id);
+  write_i32(iter, MESSAGE_KEY_total_bytes, s_route_generation);
+  result = app_message_outbox_send();
+  if (result != APP_MSG_OK) {
+    s_outbox_busy = false;
+    s_outbox_cmd = 0;
+    s_route_applied_pending = true;
+    schedule_route_action_retry();
+    return;
+  }
+  s_route_applied_pending = false;
+}
+
+void send_route_complete(void) {
+  if (s_active_route_request_id <= 0) {
+    s_route_complete_pending = false;
+    return;
+  }
+  DictionaryIterator *iter;
+  AppMessageResult result = send_message_begin(&iter, CMD_ROUTE_COMPLETE);
+  if (result != APP_MSG_OK) {
+    s_route_complete_pending = true;
+    schedule_route_action_retry();
+    return;
+  }
+  write_i32(iter, MESSAGE_KEY_request_id, s_active_route_request_id);
+  result = app_message_outbox_send();
+  if (result != APP_MSG_OK) {
+    s_outbox_busy = false;
+    s_outbox_cmd = 0;
+    s_route_complete_pending = true;
+    schedule_route_action_retry();
+    return;
+  }
+  s_route_complete_pending = false;
 }
 
 void send_zoom_button(int delta) {
@@ -237,6 +355,7 @@ void send_route_clear(void) {
   AppMessageResult result = send_message_begin(&iter, CMD_ROUTE_CLEAR);
   if (result != APP_MSG_OK) {
     s_route_clear_pending = true;
+    schedule_route_action_retry();
     set_bottom_text("Clear queued");
     layer_mark_dirty(s_map_layer);
     return;
@@ -246,6 +365,7 @@ void send_route_clear(void) {
     s_outbox_busy = false;
     s_outbox_cmd = 0;
     s_route_clear_pending = true;
+    schedule_route_action_retry();
     set_bottom_text("Clear queued");
     layer_mark_dirty(s_map_layer);
     return;
@@ -263,6 +383,14 @@ bool send_deferred_route_action(void) {
   if (s_route_clear_pending) {
     s_route_clear_pending = false;
     send_route_clear();
+    return true;
+  }
+  if (s_route_complete_pending) {
+    send_route_complete();
+    return true;
+  }
+  if (s_route_applied_pending) {
+    send_route_applied();
     return true;
   }
   if (s_deferred_route_request_slot != DEFERRED_ROUTE_REQUEST_NONE) {
@@ -330,6 +458,8 @@ void send_nav_steps_request(void) {
     return;
   }
   write_i32(iter, MESSAGE_KEY_button_id, s_next_nav_request_index);
+  write_i32(iter, MESSAGE_KEY_total_bytes, s_route_generation);
+  write_i32(iter, MESSAGE_KEY_request_id, s_active_route_request_id);
   result = app_message_outbox_send();
   if (result != APP_MSG_OK) {
     s_outbox_busy = false;
@@ -791,7 +921,7 @@ void apply_error(DictionaryIterator *iter) {
     }
   }
 
-  if (s_error_category == 1 || s_error_category == 2) {
+  if (s_error_category == 1 || s_error_category == 2 || s_error_category == 9) {
     s_state = AppStateSetupRequired;
     copy_bounded_text(s_top_text, sizeof(s_top_text), "Setup required");
   } else if (s_error_category == 6 || s_error_category == 7 || s_error_category == 8) {
@@ -836,6 +966,19 @@ void inbox_received(DictionaryIterator *iter, void *context) {
   int32_t cmd = cmd_tuple->value->int32;
   bool mark_dirty_after_dispatch = true;
   switch (cmd) {
+    case CMD_PHONE_READY: {
+      Tuple *version_tuple = dict_find(iter, MESSAGE_KEY_protocol_version);
+      int32_t version = version_tuple ? version_tuple->value->int32 : 0;
+      if (version != WATCH_PROTOCOL_VERSION) {
+        s_state = AppStateSetupRequired;
+        copy_bounded_text(s_top_text, sizeof(s_top_text), "Update required");
+        set_bottom_text("Phone/watch mismatch");
+      } else {
+        cancel_init_retry();
+        update_state_after_map_change();
+      }
+      break;
+    }
     case CMD_GPS:
       apply_gps(iter);
       break;
@@ -931,8 +1074,15 @@ void inbox_dropped(AppMessageResult reason, void *context) {
 }
 
 void outbox_sent(DictionaryIterator *iter, void *context) {
+  int32_t completed_cmd = s_outbox_cmd;
   s_outbox_busy = false;
   s_outbox_cmd = 0;
+  if (completed_cmd == CMD_ROUTE_COMPLETE) {
+    s_active_route_request_id = 0;
+  }
+  if (completed_cmd == CMD_INIT && !s_phone_ready) {
+    schedule_init_retry();
+  }
   if (send_deferred_route_action()) {
     return;
   }
@@ -942,7 +1092,9 @@ void outbox_sent(DictionaryIterator *iter, void *context) {
 void outbox_failed(DictionaryIterator *iter, AppMessageResult reason, void *context) {
   APP_LOG(APP_LOG_LEVEL_WARNING, "Outbox failed cmd=%ld reason=%d", (long)s_outbox_cmd, (int)reason);
   bool should_log_tile_failure = false;
-  if (s_outbox_cmd == CMD_TILE_REQUEST) {
+  if (s_outbox_cmd == CMD_INIT) {
+    schedule_init_retry();
+  } else if (s_outbox_cmd == CMD_TILE_REQUEST) {
     TileCacheEntry *entry = find_tile(s_inflight_request.world_x, s_inflight_request.world_y,
                                       s_inflight_request.zoom);
     if (entry) {
@@ -955,6 +1107,13 @@ void outbox_failed(DictionaryIterator *iter, AppMessageResult reason, void *cont
     s_nav_request_inflight = false;
   } else if (s_outbox_cmd == CMD_ROUTE_CLEAR) {
     s_route_clear_pending = true;
+    schedule_route_action_retry();
+  } else if (s_outbox_cmd == CMD_ROUTE_APPLIED) {
+    s_route_applied_pending = true;
+    schedule_route_action_retry();
+  } else if (s_outbox_cmd == CMD_ROUTE_COMPLETE) {
+    s_route_complete_pending = true;
+    schedule_route_action_retry();
   } else if (s_outbox_cmd == CMD_ROUTE_REQUEST) {
     s_deferred_route_request_slot = s_pending_route_slot;
   } else if (s_outbox_cmd == CMD_ROUTE_WINDOW_REQUEST) {

@@ -272,7 +272,7 @@ class GoogleMapTilesProviderTest {
         val sessionsAfterClear = http.requests.count { it.url.contains("createSession") }
 
         assertEquals(2, sessionsBeforeClear)
-        assertEquals(4, sessionsAfterClear)
+        assertEquals(3, sessionsAfterClear)
     }
 
     @Test
@@ -288,7 +288,7 @@ class GoogleMapTilesProviderTest {
 
         assertEquals(ApiKeyStore.STATE_NOT_VALIDATED, status["validationState"])
         assertEquals(2, sessionsBeforeClear)
-        assertEquals(4, sessionsAfterPreview)
+        assertEquals(2, sessionsAfterPreview)
     }
 
     @Test
@@ -307,7 +307,7 @@ class GoogleMapTilesProviderTest {
     }
 
     @Test
-    fun duplicateWatchTileRequestsShareFirstRender() {
+    fun twentyDuplicateWatchTileRequestsShareOneProviderRender() {
         val http = FakeGoogleHttpClient()
         val provider = GoogleMapTilesProvider(
             keyStore = FakeCredentialStore(),
@@ -321,20 +321,20 @@ class GoogleMapTilesProviderTest {
         http.requests.clear()
         http.mapTileDelayMillis = 150
 
-        var first: Map<String, Any?>? = null
-        var second: Map<String, Any?>? = null
+        val results = arrayOfNulls<Map<String, Any?>>(20)
         val firstThread = thread {
-            first = provider.watchTile(54, 63, 16, themeMode = 0)
+            results[0] = provider.watchTile(54, 63, 16, themeMode = 0)
         }
         Thread.sleep(25)
-        val secondThread = thread {
-            second = provider.watchTile(54, 63, 16, themeMode = 0)
+        val followers = (1 until results.size).map { index ->
+            thread {
+                results[index] = provider.watchTile(54, 63, 16, themeMode = 0)
+            }
         }
         firstThread.join()
-        secondThread.join()
+        followers.forEach(Thread::join)
 
-        assertEquals(true, first?.get("ok"))
-        assertEquals(true, second?.get("ok"))
+        assertTrue(results.all { it?.get("ok") == true })
         assertEquals(
             1,
             http.requests.count { it.url.contains("2dtiles") }
@@ -409,7 +409,7 @@ class GoogleMapTilesProviderTest {
         val sessionsAfterSettingsChange = http.requests.count { it.url.contains("createSession") }
 
         assertEquals(2, sessionsBeforeSettingsChange)
-        assertEquals(4, sessionsAfterSettingsChange)
+        assertEquals(3, sessionsAfterSettingsChange)
     }
 
     private fun sessionBodyForSettings(settings: GoogleMapTilesProvider.MapTileSettings): JSONObject {
@@ -439,6 +439,7 @@ class GoogleMapTilesProviderTest {
             sourceTileDecoder = FixtureSourceTileDecoder(tileDimension)
         )
         provider.setMapTileSettings(GoogleMapTilesProvider.MapTileSettings())
+        provider.validateProviderSetup()
 
         val result = provider.watchTile(worldX, worldY, zoom, themeMode = 0)
         val payload = result["chunk_data"] as? ByteArray

@@ -4,14 +4,17 @@ import android.content.Context
 import io.rebble.pebblekit2.client.DefaultPebbleSender
 import io.rebble.pebblekit2.common.model.TransmissionResult
 import java.util.UUID
-import kotlin.concurrent.thread
-import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
 
 internal class PebbleKit2Transport(
     context: Context
 ) : PebbleTransport {
     private val appContext = context.applicationContext
     private val sender = DefaultPebbleSender(appContext)
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     @Volatile
     private var receiver: PebbleTransportReceiver? = null
     @Volatile
@@ -29,27 +32,24 @@ internal class PebbleKit2Transport(
         registeredUuid = null
     }
 
-    override fun isWatchConnected(): Boolean = registeredUuid != null
+    override fun isWatchConnected(): Boolean =
+        registeredUuid?.let(MappyWatchSessionHub::isWatchConnected) == true
 
     override fun isWatchAppActive(uuid: UUID): Boolean =
         MappyWatchSessionHub.isWatchAppActive(uuid)
 
     override fun startWatchApp(uuid: UUID) {
-        thread(name = "mappy-pebble-start-watch", isDaemon = true) {
-            runCatching {
-                runBlocking { sender.startAppOnTheWatch(uuid, null) }
-            }.onSuccess { result ->
-                if (result.hasSuccess()) {
-                    MappyWatchSessionHub.noteAppOpened(appContext, uuid)
-                }
-            }
+        scope.launch {
+            val success = runCatching { sender.startAppOnTheWatch(uuid, null) }
+                .getOrNull().hasSuccess()
+            receiver?.onWatchLaunchResult(success)
         }
     }
 
     override fun stopWatchApp(uuid: UUID) {
-        thread(name = "mappy-pebble-stop-watch", isDaemon = true) {
+        scope.launch {
             runCatching {
-                runBlocking { sender.stopAppOnTheWatch(uuid, null) }
+                sender.stopAppOnTheWatch(uuid, null)
             }.onSuccess {
                 MappyWatchSessionHub.noteAppClosed(appContext, uuid)
             }
@@ -61,11 +61,11 @@ internal class PebbleKit2Transport(
         if (dictionary.isEmpty()) {
             throw IllegalArgumentException("Pebble AppMessage dictionary has no known keys.")
         }
-        thread(name = "mappy-pebble-send-$transactionId", isDaemon = true) {
+        scope.launch {
             val success = runCatching {
-                runBlocking { sender.sendDataToPebble(uuid, dictionary, null) }
+                sender.sendDataToPebble(uuid, dictionary, null)
             }.getOrNull().hasSuccess()
-            val target = receiver ?: return@thread
+            val target = receiver ?: return@launch
             if (success) {
                 target.onWatchAck(transactionId)
             } else {
