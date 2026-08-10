@@ -1,0 +1,551 @@
+#include "mappy.h"
+
+// Touch, button, menu, zoom, route action, and recenter input handling.
+
+typedef enum {
+  SettingsRowTheme,
+  SettingsRowUnits,
+  SettingsRowBacklight,
+  SettingsRowOrientation,
+  SettingsRowTileAnimation,
+  SettingsRowDiagnostics,
+  SettingsRowCount,
+} SettingsRow;
+
+void recenter_viewport(void) {
+  if (!s_has_gps) {
+    set_bottom_text("Waiting for GPS");
+    return;
+  }
+  complete_gps_smoothing();
+  bool was_orientation_active = map_orientation_active();
+  s_viewport_x = scale_world_to_zoom(s_gps_world_x, s_gps_zoom, s_viewport_zoom);
+  s_viewport_y = scale_world_to_zoom(s_gps_world_y, s_gps_zoom, s_viewport_zoom);
+  s_manual_pan = false;
+  if (!was_orientation_active && map_orientation_active()) {
+    s_map_bearing_display_centi_degrees = 0;
+  }
+  sync_map_bearing_smoothing(true);
+  update_state_after_map_change();
+  queue_visible_tiles();
+  layer_mark_dirty(s_map_layer);
+}
+
+
+#ifdef PBL_TOUCH
+void reset_touch_state(void) {
+  s_touch_active = false;
+  s_transient_zoom_scale_q8 = TRANSIENT_SCALE_Q8_ONE;
+}
+
+void mark_touch_interaction_ended(void) {
+  time_ms(&s_last_touch_ended_s, &s_last_touch_ended_ms);
+}
+
+bool touch_interaction_recent(void) {
+  if (s_touch_active) {
+    return true;
+  }
+  if (s_last_touch_ended_s == 0 && s_last_touch_ended_ms == 0) {
+    return false;
+  }
+
+  time_t now_s;
+  uint16_t now_ms;
+  time_ms(&now_s, &now_ms);
+  int32_t elapsed = (int32_t)(now_s - s_last_touch_ended_s) * 1000 +
+      (int32_t)now_ms - (int32_t)s_last_touch_ended_ms;
+  return elapsed >= 0 && elapsed < TOUCH_TILE_ANIMATION_SUPPRESS_MS;
+}
+
+void log_touch_disabled_once(void) {
+  if (!s_touch_disabled_logged) {
+    s_touch_disabled_logged = true;
+    send_log_event(0, 1, 0, "touch disabled");
+  }
+}
+
+void log_pinch_unavailable_once(void) {
+  if (!s_pinch_unavailable_logged) {
+    s_pinch_unavailable_logged = true;
+    send_log_event(0, 2, 0, "pinch unavailable");
+  }
+}
+
+void touch_handler(const TouchEvent *event, void *context) {
+  if (!event || s_menu_mode != MenuNone || !touch_service_is_enabled()) {
+    if (event && !touch_service_is_enabled()) {
+      log_touch_disabled_once();
+    }
+    return;
+  }
+
+  switch (event->type) {
+    case TouchEvent_Touchdown:
+      complete_tile_animations();
+      complete_gps_smoothing();
+      s_touch_active = true;
+      s_touch_start_x = event->x;
+      s_touch_start_y = event->y;
+      s_touch_start_viewport_x = s_viewport_x;
+      s_touch_start_viewport_y = s_viewport_y;
+      s_manual_pan = true;
+      sync_map_bearing_smoothing(false);
+      layer_mark_dirty(s_map_layer);
+      break;
+    case TouchEvent_PositionUpdate:
+      if (!s_touch_active) {
+        return;
+      }
+      int32_t world_dx;
+      int32_t world_dy;
+      screen_delta_to_world_delta(event->x - s_touch_start_x,
+                                  event->y - s_touch_start_y,
+                                  &world_dx, &world_dy);
+      int32_t next_viewport_x = s_touch_start_viewport_x - world_dx;
+      int32_t next_viewport_y = s_touch_start_viewport_y - world_dy;
+      if (next_viewport_x == s_viewport_x && next_viewport_y == s_viewport_y) {
+        return;
+      }
+      // Keep drag frames cheap; tile and route requests are finalized on liftoff.
+      s_viewport_x = next_viewport_x;
+      s_viewport_y = next_viewport_y;
+      layer_mark_dirty(s_map_layer);
+      break;
+    case TouchEvent_Liftoff:
+      if (!s_touch_active) {
+        return;
+      }
+      mark_touch_interaction_ended();
+      reset_touch_state();
+      s_manual_pan = true;
+      sync_map_bearing_smoothing(false);
+      update_state_after_map_change();
+      queue_visible_tiles();
+      layer_mark_dirty(s_map_layer);
+      break;
+  }
+}
+
+void update_touch_subscription(void) {
+  bool should_subscribe = s_menu_mode == MenuNone && s_has_gps;
+  bool touch_enabled = should_subscribe && touch_service_is_enabled();
+  if (touch_enabled && !s_touch_subscribed) {
+    touch_service_subscribe(touch_handler, NULL);
+    s_touch_subscribed = true;
+#if !MAPPY_TOUCH_PINCH_SUPPORTED
+    log_pinch_unavailable_once();
+#endif
+  } else if ((!touch_enabled || !should_subscribe) && s_touch_subscribed) {
+    touch_service_unsubscribe();
+    s_touch_subscribed = false;
+    reset_touch_state();
+  } else if (should_subscribe && !touch_enabled) {
+    log_touch_disabled_once();
+  }
+}
+#else
+void update_touch_subscription(void) {
+  s_transient_zoom_scale_q8 = TRANSIENT_SCALE_Q8_ONE;
+}
+#endif
+
+
+bool has_active_route(void) {
+  return s_route_point_count > 1 || s_state == AppStateRouteLoading;
+}
+
+void open_menu(MenuMode mode) {
+  complete_tile_animations();
+  s_menu_mode = mode;
+  s_menu_selection = 0;
+  reset_menu_highlight_animation();
+  update_touch_subscription();
+  layer_mark_dirty(s_map_layer);
+}
+
+void close_menu(void) {
+  cancel_menu_highlight_animation();
+  s_menu_mode = MenuNone;
+  s_menu_selection = 0;
+  update_touch_subscription();
+  update_state_after_map_change();
+  layer_mark_dirty(s_map_layer);
+}
+
+int menu_item_count(void) {
+  switch (s_menu_mode) {
+    case MenuDestinations:
+      return s_destination_count > 0 ? s_destination_count : 1;
+    case MenuTravelMode:
+      return 3;
+    case MenuSettings:
+      return SettingsRowCount;
+    case MenuActions:
+      return has_active_route() ? 6 : 4;
+    case MenuNone:
+      return 0;
+  }
+  return 0;
+}
+
+const char *travel_mode_label(int mode) {
+  switch (mode) {
+    case 0:
+      return "Walk";
+    case 1:
+      return "Bike";
+    default:
+      return "Drive";
+  }
+}
+
+const char *theme_label(int mode) {
+  switch (mode) {
+    case 1:
+      return "Day";
+    case 2:
+      return "Night";
+    default:
+      return "Auto";
+  }
+}
+
+const char *orientation_label(void) {
+  return s_map_orientation == 1 ? "facing" : "north";
+}
+
+const char *tile_animation_label(void) {
+  switch (s_tile_animation_mode) {
+    case TILE_ANIMATION_NONE:
+      return "none";
+    case TILE_ANIMATION_FADE_ZOOM:
+      return "fade+zoom";
+    case TILE_ANIMATION_FADE:
+    default:
+      return "fade";
+  }
+}
+
+const char *menu_title(void) {
+  switch (s_menu_mode) {
+    case MenuDestinations:
+      return "Destinations";
+    case MenuTravelMode:
+      return "Travel Mode";
+    case MenuSettings:
+      return "Settings";
+    case MenuActions:
+      return "Actions";
+    case MenuNone:
+      return "";
+  }
+  return "";
+}
+
+void menu_item_label(int index, char *buffer, size_t buffer_size) {
+  buffer[0] = '\0';
+  switch (s_menu_mode) {
+    case MenuDestinations:
+      if (s_destination_count == 0) {
+        snprintf(buffer, buffer_size, "No destinations");
+      } else if (index >= 0 && index < s_destination_count && s_destinations[index].configured) {
+        snprintf(buffer, buffer_size, "%s", s_destinations[index].label);
+      } else {
+        snprintf(buffer, buffer_size, "Destination");
+      }
+      break;
+    case MenuTravelMode: {
+      const int mode_for_index[3] = {2, 0, 1};
+      int mode = mode_for_index[index < 0 || index > 2 ? 0 : index];
+      snprintf(buffer, buffer_size, "%s%s", mode == s_travel_mode ? "* " : "", travel_mode_label(mode));
+      break;
+    }
+    case MenuSettings:
+      if (index == SettingsRowTheme) {
+        snprintf(buffer, buffer_size, "Theme %s", theme_label(s_theme_mode));
+      } else if (index == SettingsRowUnits) {
+        snprintf(buffer, buffer_size, "Units %s", s_units_mode == 1 ? "metric" : "imperial");
+      } else if (index == SettingsRowBacklight) {
+        snprintf(buffer, buffer_size, "Backlight %s", s_backlight_mode ? "on" : "auto");
+      } else if (index == SettingsRowOrientation) {
+        snprintf(buffer, buffer_size, "Orient %s", orientation_label());
+      } else if (index == SettingsRowTileAnimation) {
+        snprintf(buffer, buffer_size, "Tile anim %s", tile_animation_label());
+      } else {
+        snprintf(buffer, buffer_size, "Diagnostics local");
+      }
+      break;
+    case MenuActions:
+      if (has_active_route()) {
+        if (index == 0) {
+          snprintf(buffer, buffer_size, "Reroute");
+        } else if (index == 1) {
+          snprintf(buffer, buffer_size, "Clear route");
+        } else if (index == 2) {
+          snprintf(buffer, buffer_size, "Next steps");
+        } else if (index == 3) {
+          snprintf(buffer, buffer_size, "Travel mode");
+        } else if (index == 4) {
+          snprintf(buffer, buffer_size, "Recenter");
+        } else {
+          snprintf(buffer, buffer_size, "Settings");
+        }
+      } else {
+        if (index == 0) {
+          snprintf(buffer, buffer_size, "Destinations");
+        } else if (index == 1) {
+          snprintf(buffer, buffer_size, "Travel mode");
+        } else if (index == 2) {
+          snprintf(buffer, buffer_size, "Recenter");
+        } else {
+          snprintf(buffer, buffer_size, "Settings");
+        }
+      }
+      break;
+    case MenuNone:
+      break;
+  }
+}
+
+
+void select_menu_item(void) {
+  switch (s_menu_mode) {
+    case MenuDestinations:
+      if (s_destination_count == 0) {
+        set_bottom_text("No destinations");
+        close_menu();
+        break;
+      }
+      if (s_menu_selection >= 0 && s_menu_selection < s_destination_count) {
+        DestinationSlot *destination = &s_destinations[s_menu_selection];
+        s_selected_slot = destination->slot;
+        copy_bounded_text(s_top_text, sizeof(s_top_text), destination->label);
+        close_menu();
+        send_route_request();
+      } else {
+        set_bottom_text("Destination missing");
+        close_menu();
+      }
+      break;
+    case MenuTravelMode: {
+      const int mode_for_index[3] = {2, 0, 1};
+      int next_mode = mode_for_index[s_menu_selection < 0 || s_menu_selection > 2 ? 0 : s_menu_selection];
+      bool should_refresh_active_route =
+          has_active_route() && next_mode != s_active_route_mode;
+      s_travel_mode = next_mode;
+      persist_write_int(PERSIST_TRAVEL_MODE, s_travel_mode);
+      if (should_refresh_active_route) {
+        s_deferred_route_request_slot =
+            (s_active_route_slot >= 0) ? s_active_route_slot : -1;
+        set_bottom_text("Route queued");
+        layer_mark_dirty(s_map_layer);
+      }
+      send_travel_mode();
+      close_menu();
+      break;
+    }
+    case MenuSettings:
+      if (s_menu_selection == SettingsRowTheme) {
+        s_theme_mode = (s_theme_mode + 1) % 3;
+        persist_write_int(PERSIST_THEME, s_theme_mode);
+        invalidate_tiles_with_reason(TileInvalidateTheme);
+        queue_visible_tiles();
+        send_theme();
+      } else if (s_menu_selection == SettingsRowUnits) {
+        s_units_mode = s_units_mode == 1 ? 0 : 1;
+        persist_write_int(PERSIST_UNITS, s_units_mode);
+        send_units();
+      } else if (s_menu_selection == SettingsRowBacklight) {
+        s_backlight_mode = s_backlight_mode == 1 ? 0 : 1;
+        persist_write_int(PERSIST_BACKLIGHT, s_backlight_mode);
+        light_enable(s_backlight_mode == 1);
+        send_backlight();
+      } else if (s_menu_selection == SettingsRowOrientation) {
+        complete_gps_smoothing();
+        bool was_orientation_active = map_orientation_active();
+        s_map_orientation = s_map_orientation == 1 ? 0 : 1;
+        persist_write_int(PERSIST_MAP_ORIENTATION, s_map_orientation);
+        send_map_orientation();
+        if (!was_orientation_active && map_orientation_active()) {
+          s_map_bearing_display_centi_degrees = 0;
+        }
+        sync_map_bearing_smoothing(true);
+        if (was_orientation_active || map_orientation_active()) {
+          complete_tile_animations();
+        }
+        update_state_after_map_change();
+        if (was_orientation_active || map_orientation_active()) {
+          queue_visible_tiles();
+        }
+      } else if (s_menu_selection == SettingsRowTileAnimation) {
+        s_tile_animation_mode = (s_tile_animation_mode + 1) % 3;
+        persist_write_int(PERSIST_TILE_ANIMATION, s_tile_animation_mode);
+        if (s_tile_animation_mode == TILE_ANIMATION_NONE) {
+          complete_tile_animations();
+        }
+        send_tile_animation();
+      } else if (s_menu_selection == SettingsRowDiagnostics) {
+        send_log_event(4, 0, 0, "diagnostics menu");
+      }
+      start_menu_value_animation(1);
+      layer_mark_dirty(s_map_layer);
+      break;
+    case MenuActions:
+      if (has_active_route()) {
+        if (s_menu_selection == 0) {
+          close_menu();
+          if (s_active_route_slot >= 0) {
+            s_selected_slot = s_active_route_slot;
+          } else {
+            s_selected_slot = -1;
+          }
+          send_route_request();
+        } else if (s_menu_selection == 1) {
+          close_menu();
+          send_route_clear();
+        } else if (s_menu_selection == 2) {
+          close_menu();
+          send_nav_steps_request();
+        } else if (s_menu_selection == 3) {
+          open_menu(MenuTravelMode);
+        } else if (s_menu_selection == 4) {
+          close_menu();
+          recenter_viewport();
+        } else {
+          open_menu(MenuSettings);
+        }
+      } else {
+        if (s_menu_selection == 0) {
+          open_menu(MenuDestinations);
+        } else if (s_menu_selection == 1) {
+          open_menu(MenuTravelMode);
+        } else if (s_menu_selection == 2) {
+          close_menu();
+          recenter_viewport();
+        } else {
+          open_menu(MenuSettings);
+        }
+      }
+      break;
+    case MenuNone:
+      break;
+  }
+}
+
+
+bool set_viewport_zoom(int next_zoom, int notification_delta) {
+  complete_gps_smoothing();
+  s_transient_zoom_scale_q8 = TRANSIENT_SCALE_Q8_ONE;
+  if (next_zoom < MIN_MAP_ZOOM) {
+    next_zoom = MIN_MAP_ZOOM;
+  } else if (next_zoom > MAX_MAP_ZOOM) {
+    next_zoom = MAX_MAP_ZOOM;
+  }
+  if (next_zoom == s_viewport_zoom) {
+    return false;
+  }
+
+  int previous_zoom = s_viewport_zoom;
+  s_viewport_x = scale_world_to_zoom(s_viewport_x, s_viewport_zoom, next_zoom);
+  s_viewport_y = scale_world_to_zoom(s_viewport_y, s_viewport_zoom, next_zoom);
+  s_viewport_zoom = next_zoom;
+  persist_write_int(PERSIST_ZOOM, s_viewport_zoom);
+  invalidate_tiles_with_reason(TileInvalidateZoom);
+  update_state_after_map_change();
+  if (notification_delta != 0) {
+    send_zoom_button(notification_delta > 0 ? 1 : -1);
+  } else {
+    int delta = s_viewport_zoom - previous_zoom;
+    if (delta != 0) {
+      send_zoom_button(delta > 0 ? 1 : -1);
+    }
+  }
+  queue_visible_tiles();
+  layer_mark_dirty(s_map_layer);
+  return true;
+}
+
+void zoom_to_max_map_level(void) {
+  set_viewport_zoom(MAX_MAP_ZOOM, 1);
+}
+
+void change_zoom(int delta) {
+  if (!set_viewport_zoom(s_viewport_zoom + delta, delta)) {
+    send_log_event(0, s_viewport_zoom, delta, "zoom clamped");
+  }
+}
+
+void up_click_handler(ClickRecognizerRef recognizer, void *context) {
+  if (dismiss_arrival_dialog()) {
+    return;
+  }
+  if (s_menu_mode != MenuNone) {
+    int count = menu_item_count();
+    if (count > 0) {
+      int previous_selection = s_menu_selection;
+      s_menu_selection = (s_menu_selection + count - 1) % count;
+      start_menu_highlight_animation(previous_selection, -1);
+    }
+    return;
+  }
+  s_route_clear_armed = false;
+  change_zoom(1);
+}
+
+void down_click_handler(ClickRecognizerRef recognizer, void *context) {
+  if (dismiss_arrival_dialog()) {
+    return;
+  }
+  if (s_menu_mode != MenuNone) {
+    int count = menu_item_count();
+    if (count > 0) {
+      int previous_selection = s_menu_selection;
+      s_menu_selection = (s_menu_selection + 1) % count;
+      start_menu_highlight_animation(previous_selection, 1);
+    }
+    return;
+  }
+  s_route_clear_armed = false;
+  change_zoom(-1);
+}
+
+void select_click_handler(ClickRecognizerRef recognizer, void *context) {
+  if (dismiss_arrival_dialog()) {
+    return;
+  }
+  s_route_clear_armed = false;
+  if (s_menu_mode != MenuNone) {
+    select_menu_item();
+    return;
+  }
+  open_menu(MenuActions);
+}
+
+void back_click_handler(ClickRecognizerRef recognizer, void *context) {
+  if (dismiss_arrival_dialog()) {
+    return;
+  }
+  if (s_menu_mode != MenuNone) {
+    close_menu();
+    return;
+  }
+  if (s_route_point_count > 0 || s_state == AppStateRouteError || s_state == AppStateRouteLoading) {
+    if (!s_route_clear_armed) {
+      s_route_clear_armed = true;
+      set_bottom_text("Back again clears route");
+      layer_mark_dirty(s_map_layer);
+      return;
+    }
+    send_route_clear();
+    return;
+  }
+  window_stack_pop(true);
+}
+
+void click_config_provider(void *context) {
+  window_single_click_subscribe(BUTTON_ID_UP, up_click_handler);
+  window_single_click_subscribe(BUTTON_ID_DOWN, down_click_handler);
+  window_single_click_subscribe(BUTTON_ID_SELECT, select_click_handler);
+  window_single_click_subscribe(BUTTON_ID_BACK, back_click_handler);
+}

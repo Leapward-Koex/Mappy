@@ -1,0 +1,50 @@
+# Local credentials and signing material
+**/local.properties
+**/key.properties
+**/*.keystore
+**/*.jks
+.env
+.env.*
+!.env.example
+
+# Repository skill plus local assistants, telemetry, IDEs, and logs
+.agents/*
+!.agents/skills/
+.agents/skills/*
+!.agents/skills/pebble-emulator/
+!.agents/skills/pebble-emulator/**
+.codex/
+.dart-appdata/
+logs/
+**/.idea/
+**/*.iml
+**/.gradle/
+**/.kotlin/
+**/__pycache__/
+*.py[cod]
+*.log
+
+# Pebble SDK output
+apps/pebble-watch/build/
+apps/pebble-watch/dist/
+apps/pebble-watch/codex-emulator/
+apps/pebble-watch/.pebble/
+apps/pebble-watch/.lock-waf_*
+apps/pebble-watch/src/pkjs/fixture-options.generated.js
+
+# Keep provider-derived fixtures local unless their redistribution terms have
+# been reviewed for the intended publication.
+tooling/real-map-fixtures/generated/
+
+# Flutter output
+apps/mobile-companion/.dart_tool/
+apps/mobile-companion/.flutter-plugins
+apps/mobile-companion/.flutter-plugins-dependencies
+apps/mobile-companion/build/
+apps/mobile-companion/ios/Flutter/ephemeral/
+apps/mobile-companion/ios/Flutter/Generated.xcconfig
+apps/mobile-companion/ios/Flutter/flutter_export_environment.sh
+
+# Local editor and OS files
+.DS_Store
+Thumbs.db

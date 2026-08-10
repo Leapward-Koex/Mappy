@@ -1,0 +1,25 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "mobile-companion",
+      "cwd": "${workspaceFolder}/apps/mobile-companion",
+      "request": "launch",
+      "type": "dart"
+    },
+    {
+      "name": "mobile-companion (profile mode)",
+      "cwd": "${workspaceFolder}/apps/mobile-companion",
+      "request": "launch",
+      "type": "dart",
+      "flutterMode": "profile"
+    },
+    {
+      "name": "mobile-companion (release mode)",
+      "cwd": "${workspaceFolder}/apps/mobile-companion",
+      "request": "launch",
+      "type": "dart",
+      "flutterMode": "release"
+    }
+  ]
+}

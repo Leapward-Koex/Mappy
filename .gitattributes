@@ -1,0 +1,15 @@
+* text=auto
+
+*.sh text eol=lf
+Makefile text eol=lf
+wscript text eol=lf
+*.bat text eol=crlf
+*.ps1 text eol=crlf
+
+*.gif binary
+*.jar binary
+*.jpeg binary
+*.jpg binary
+*.png binary
+*.pbw binary
+*.ttf binary

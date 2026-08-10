@@ -1,0 +1,4 @@
+interface:
+  display_name: "Pebble Emulator"
+  short_description: "Build and test Mappy on Pebble emulators"
+  default_prompt: "Use $pebble-emulator to build Mappy and verify it on the Emery emulator."

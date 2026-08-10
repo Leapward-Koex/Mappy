@@ -1,0 +1,30 @@
+plugins {
+    id 'com.android.library'
+}
+
+group 'in.jvapps.disable_battery_optimization'
+version '1.0'
+
+android {
+    namespace 'in.jvapps.disable_battery_optimization'
+    compileSdk 36
+
+    defaultConfig {
+        minSdk 21
+        targetSdk 36
+        testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
+    }
+    lint {
+        disable += 'InvalidPackage'
+    }
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+}
+
+dependencies {
+    //implementation files('localLib/flutter.jar')
+    implementation 'androidx.annotation:annotation:1.3.0'
+    implementation 'androidx.appcompat:appcompat:1.4.1'
+}

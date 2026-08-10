@@ -1,0 +1,574 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+WATCH_DIR="${PEBBLE_WATCH_DIR:-"$ROOT_DIR/apps/pebble-watch"}"
+PLATFORM="${PEBBLE_PLATFORM:-emery}"
+OUT_DIR="${PEBBLE_CODEX_OUT:-"$WATCH_DIR/codex-emulator"}"
+PBW_PATH="${PEBBLE_PBW:-"$WATCH_DIR/build/pebble-watch.pbw"}"
+PHONE_MODE="${MAPPY_WATCH_PHONE_MODE:-${PEBBLE_PHONE_MODE:-phone}}"
+CAPTURE_DELAY_SECONDS="${PEBBLE_CAPTURE_DELAY_SECONDS:-0}"
+
+usage() {
+  cat <<EOF
+Usage: $(basename "$0") <command> [args]
+
+Commands:
+  doctor                   Verify CLI, SDK, emulator, and helper dependencies.
+  test-tooling             Run deterministic Pebble development-tool tests.
+  test-protocol            Check protocol constants across specs and runtimes.
+  build                    Build the Pebble watch app.
+  build-fixture            Build with emulator fixture PKJS bundled.
+  build-real-fixture       Build with the local provider-map fixture bundled.
+  build-fixture-animation  Build fixture mode with delayed animated tile loads.
+  build-phone              Build with production phone/native mode bundled.
+  install                  Build, launch the emulator, and install the app.
+  install-fixture          Build/install with emulator fixture PKJS bundled.
+  install-real-fixture     Build/install with the local provider-map fixture.
+  install-fixture-animation
+                           Build/install fixture mode with delayed animated tiles.
+  install-phone            Build/install with production phone/native mode.
+  wipe                     Wipe Pebble emulator data for the active SDK.
+  screenshot [filename]    Capture emulator output as PNG.
+  capture                  Build, install, then write latest.png.
+  capture-fixture          Build/install/capture with emulator fixture PKJS.
+  capture-real-fixture     Build/install/capture with the local provider-map fixture.
+  capture-fixture-animation
+                           Build/install/capture delayed animated tile fixture.
+  record-fixture-animation [out-dir]
+                           Build/install delayed fixture, relaunch, capture QEMU frames.
+  capture-phone            Build/install/capture with production phone/native mode.
+  smoke-fixture            Build/install/capture fixture mode, verify output, then stop.
+  generate-real-fixture    Generate ignored provider-map fixture files using the
+                           Pebble Tool Python environment.
+  debug-compass <degrees|clear>
+                           Inject a watch-side compass heading for emulator rotation tests.
+  debug-facing <degrees|clear>
+                           Enable face-forward orientation, then inject a debug compass heading.
+  debug-map-settings <width> <height>
+                            Send emulator map tile geometry settings to the watch.
+  debug-tile [index]       Synthesize a decoded visible tile on the watch.
+  debug-route-progress <percent>
+                            Move debug GPS to a percent along the active route.
+  button <action> <button> Send emulator button input, e.g. "click select".
+  kill                     Kill running Pebble emulators.
+
+Environment:
+  PEBBLE_PLATFORM          Pebble platform to emulate (default: emery).
+  MAPPY_WATCH_PHONE_MODE   phone, fixture, or real-fixture (default: phone).
+  PEBBLE_PHONE_MODE        Alias for MAPPY_WATCH_PHONE_MODE.
+  PEBBLE_CAPTURE_DELAY_SECONDS
+                           Delay before capture after install (default: 0,
+                           capture-fixture default: 6).
+  MAPPY_FIXTURE_TILE_DELAY_MS
+                           Fixture-only tile response hold before first tile.
+  MAPPY_FIXTURE_TILE_STAGGER_MS
+                           Fixture-only extra delay per requested tile.
+  MAPPY_FIXTURE_TILE_ANIMATION_MODE
+                           Fixture startup tile animation sync: -1, 0, 1, or 2.
+  PEBBLE_WATCH_DIR         Watch app directory.
+  PEBBLE_CODEX_OUT         Screenshot output directory.
+  PEBBLE_PBW               Built .pbw path.
+  PEBBLE_QEMU_CAPTURE_FRAMES
+                           QEMU frames for record-fixture-animation (default: 60).
+  PEBBLE_QEMU_CAPTURE_INTERVAL
+                           QEMU frame interval in seconds (default: 0.2).
+  PEBBLE_TOOL_PYTHON       Python interpreter from the Pebble Tool environment.
+EOF
+}
+
+require_pebble() {
+  if ! command -v pebble >/dev/null 2>&1; then
+    echo "pebble CLI was not found on PATH" >&2
+    exit 127
+  fi
+}
+
+windows_path() {
+  if command -v wslpath >/dev/null 2>&1; then
+    wslpath -w "$1"
+  else
+    echo "$1"
+  fi
+}
+
+normalize_phone_mode() {
+  local value
+  value="$(printf '%s' "$1" | tr '[:upper:]_' '[:lower:]-')"
+  case "$value" in
+    phone|native|android|production|prod)
+      printf 'phone'
+      ;;
+    fixture|fixtures|emulator-fixture|emulator-fixtures|test-fixture|test-fixtures)
+      printf 'fixture'
+      ;;
+    real-fixture|real-fixtures|real-map-fixture|provider-fixture)
+      printf 'real-fixture'
+      ;;
+    *)
+      echo "Unsupported MAPPY_WATCH_PHONE_MODE '$1'. Use 'phone', 'fixture', or 'real-fixture'." >&2
+      exit 2
+      ;;
+  esac
+}
+
+set_phone_mode() {
+  PHONE_MODE="$(normalize_phone_mode "$1")"
+}
+
+set_animation_fixture_defaults() {
+  set_phone_mode fixture
+  export MAPPY_FIXTURE_TILE_DELAY_MS="${MAPPY_FIXTURE_TILE_DELAY_MS:-900}"
+  export MAPPY_FIXTURE_TILE_STAGGER_MS="${MAPPY_FIXTURE_TILE_STAGGER_MS:-80}"
+  export MAPPY_FIXTURE_TILE_ANIMATION_MODE="${MAPPY_FIXTURE_TILE_ANIMATION_MODE:-2}"
+  export PEBBLE_CAPTURE_DELAY_SECONDS="${PEBBLE_CAPTURE_DELAY_SECONDS:-4}"
+  CAPTURE_DELAY_SECONDS="$PEBBLE_CAPTURE_DELAY_SECONDS"
+}
+
+build_app() {
+  require_pebble
+  cd "$WATCH_DIR" || return
+  export MAPPY_WATCH_PHONE_MODE
+  MAPPY_WATCH_PHONE_MODE="$(normalize_phone_mode "$PHONE_MODE")"
+  echo "Building Pebble watch app with MAPPY_WATCH_PHONE_MODE=$MAPPY_WATCH_PHONE_MODE"
+  pebble build
+}
+
+install_app() {
+  build_app || return
+  cd "$WATCH_DIR" || return
+  pebble install --emulator "$PLATFORM" --force "$PBW_PATH"
+}
+
+wipe_emulator() {
+  require_pebble
+  pebble wipe
+}
+
+install_app_with_recovery() {
+  if install_app; then
+    return 0
+  fi
+
+  echo "Install failed; wiping Pebble emulator data and retrying once..." >&2
+  wipe_emulator
+  install_app
+}
+
+capture_after_install() {
+  install_app_with_recovery || return
+  if [[ "$CAPTURE_DELAY_SECONDS" != "0" ]]; then
+    sleep "$CAPTURE_DELAY_SECONDS"
+  fi
+  capture_screenshot latest.png
+}
+
+capture_screenshot() {
+  require_pebble
+  mkdir -p "$OUT_DIR"
+
+  local filename="${1:-latest.png}"
+  local output_path="$filename"
+  if [[ "$output_path" != /* ]]; then
+    output_path="$OUT_DIR/$output_path"
+  fi
+
+  cd "$WATCH_DIR" || return
+  pebble screenshot --emulator "$PLATFORM" --no-open "$output_path"
+  echo "Screenshot: $(windows_path "$output_path")"
+}
+
+app_uuid() {
+  python3 -c 'import json; print(json.load(open("package.json"))["pebble"]["uuid"])'
+}
+
+pebble_tool_python() {
+  if [[ -n "${PEBBLE_TOOL_PYTHON:-}" ]]; then
+    printf '%s\n' "$PEBBLE_TOOL_PYTHON"
+    return
+  fi
+
+  local pebble_path candidate shebang
+  pebble_path="$(command -v pebble)"
+  shebang="$(head -n 1 "$pebble_path")"
+  candidate="${shebang#\#!}"
+  if [[ -x "$candidate" ]]; then
+    printf '%s\n' "$candidate"
+    return
+  fi
+
+  candidate="$(dirname "$(readlink -f "$pebble_path")")/python3"
+  if [[ -x "$candidate" ]]; then
+    printf '%s\n' "$candidate"
+    return
+  fi
+
+  candidate="$(dirname "$(readlink -f "$pebble_path")")/python"
+  if [[ -x "$candidate" ]]; then
+    printf '%s\n' "$candidate"
+    return
+  fi
+
+  if python3 -c 'import libpebble2' >/dev/null 2>&1; then
+    command -v python3
+    return
+  fi
+
+  echo "Pebble Tool Python was not found; set PEBBLE_TOOL_PYTHON." >&2
+  return 1
+}
+
+doctor() {
+  require_pebble
+
+  local required version_output sdk_inventory active_sdk include_path sdk_root qemu_path tool_python
+  for required in python3 node npm; do
+    if ! command -v "$required" >/dev/null 2>&1; then
+      echo "Required command was not found: $required" >&2
+      return 1
+    fi
+  done
+
+  version_output="$(pebble --version 2>&1)"
+  sdk_inventory="$(pebble sdk list 2>&1)"
+  printf '%s\n%s\n' "$version_output" "$sdk_inventory"
+
+  if grep -Fq "A new pebble-tool is available" <<<"$sdk_inventory"; then
+    echo "Pebble Tool is not current; run tooling/bootstrap-pebble-sdk-wsl.sh." >&2
+    return 1
+  fi
+  if grep -Fq "A new SDK is available" <<<"$sdk_inventory"; then
+    echo "The active Pebble SDK is not current; run tooling/bootstrap-pebble-sdk-wsl.sh." >&2
+    return 1
+  fi
+
+  active_sdk="$(sed -nE 's/.*active SDK: v([^)]*).*/\1/p' <<<"$version_output")"
+  if [[ -z "$active_sdk" ]]; then
+    echo "Pebble Tool did not report an active SDK." >&2
+    return 1
+  fi
+
+  include_path="$(pebble sdk include-path "$PLATFORM")"
+  if [[ ! -d "$include_path" ]]; then
+    echo "SDK include path does not exist for $PLATFORM: $include_path" >&2
+    return 1
+  fi
+  sdk_root="$(cd "$include_path/../../../.." && pwd)"
+  qemu_path="$sdk_root/toolchain/bin/qemu-pebble"
+  if [[ ! -x "$qemu_path" ]]; then
+    echo "Pebble QEMU executable was not found: $qemu_path" >&2
+    return 1
+  fi
+
+  tool_python="$(pebble_tool_python)"
+  "$tool_python" -c 'import libpebble2; from PIL import Image' >/dev/null
+  bash -n "$ROOT_DIR/tooling/bootstrap-pebble-sdk-wsl.sh"
+  bash -n "$ROOT_DIR/tooling/pebble-emulator-codex.sh"
+
+  printf 'Platform: %s\nSDK include: %s\n' "$PLATFORM" "$include_path"
+  "$qemu_path" --version | head -n 1
+  printf 'Pebble development environment is ready.\n'
+}
+
+test_tooling() {
+  require_pebble
+  "$(pebble_tool_python)" "$ROOT_DIR/tooling/test-pebble-development.py"
+}
+
+test_protocol() {
+  python3 "$ROOT_DIR/tooling/test-protocol-consistency.py"
+}
+
+generate_real_fixture() {
+  require_pebble
+  cd "$ROOT_DIR" || return
+  "$(pebble_tool_python)" "$ROOT_DIR/tooling/generate-real-map-fixtures.py" "$@"
+}
+
+smoke_fixture() {
+  set_phone_mode fixture
+  if [[ -z "${PEBBLE_CAPTURE_DELAY_SECONDS:-}" ]]; then
+    CAPTURE_DELAY_SECONDS=6
+  fi
+  local status=0
+  if capture_after_install; then
+    if [[ ! -s "$OUT_DIR/latest.png" ]]; then
+      echo "Fixture screenshot was not created or is empty: $OUT_DIR/latest.png" >&2
+      status=1
+    else
+      echo "Fixture smoke screenshot: $(windows_path "$OUT_DIR/latest.png")"
+    fi
+  else
+    status=$?
+  fi
+  pebble kill >/dev/null 2>&1 || true
+  return "$status"
+}
+
+record_fixture_animation() {
+  set_animation_fixture_defaults
+  pebble kill >/dev/null 2>&1 || true
+  install_app_with_recovery
+
+  local output_path="${1:-}"
+  if [[ -z "$output_path" ]]; then
+    output_path="$OUT_DIR/tile-video/fixture-animation-$(date +%Y%m%d-%H%M%S)"
+  fi
+  if [[ "$output_path" != /* ]]; then
+    output_path="$OUT_DIR/$output_path"
+  fi
+
+  local frames="${PEBBLE_QEMU_CAPTURE_FRAMES:-60}"
+  local interval="${PEBBLE_QEMU_CAPTURE_INTERVAL:-0.2}"
+  cd "$WATCH_DIR"
+  "$(pebble_tool_python)" \
+    "$ROOT_DIR/tooling/pebble-qemu-capture.py" \
+    --platform "$PLATFORM" \
+    --out-dir "$output_path" \
+    --frames "$frames" \
+    --interval-seconds "$interval"
+  echo "Frames: $(windows_path "$output_path")"
+}
+
+send_button() {
+  require_pebble
+  if [[ $# -lt 2 ]]; then
+    echo "button requires an action and at least one button" >&2
+    echo "Example: $(basename "$0") button click select" >&2
+    exit 2
+  fi
+  pebble emu-button --emulator "$PLATFORM" "$@"
+}
+
+debug_compass_value() {
+  local raw="${1:-}"
+  case "$raw" in
+    clear|invalid|off|none|-1)
+      printf '%s' "-1"
+      ;;
+    ''|*[!0-9]*)
+      echo "debug compass requires degrees 0..359 or 'clear'" >&2
+      exit 2
+      ;;
+    *)
+      local value=$((10#$raw))
+      if (( value < 0 || value > 359 )); then
+        echo "debug compass degrees must be 0..359" >&2
+        exit 2
+      fi
+      printf '%s' "$value"
+      ;;
+  esac
+}
+
+send_debug_compass() {
+  require_pebble
+  if [[ $# -ne 1 ]]; then
+    echo "debug-compass requires degrees 0..359 or 'clear'" >&2
+    exit 2
+  fi
+  local heading
+  heading="$(debug_compass_value "$1")"
+  cd "$WATCH_DIR"
+  pebble send-app-message --emulator "$PLATFORM" --app-uuid "$(app_uuid)" \
+    --int 50=901 60="$heading"
+}
+
+send_debug_facing() {
+  require_pebble
+  if [[ $# -ne 1 ]]; then
+    echo "debug-facing requires degrees 0..359 or 'clear'" >&2
+    exit 2
+  fi
+  cd "$WATCH_DIR"
+  pebble send-app-message --emulator "$PLATFORM" --app-uuid "$(app_uuid)" \
+    --int 50=205 60=1
+  sleep 0.15
+  send_debug_compass "$1"
+}
+
+send_debug_map_settings() {
+  require_pebble
+  if [[ $# -ne 2 ]]; then
+    echo "debug-map-settings requires width and height" >&2
+    exit 2
+  fi
+  local width="$1"
+  local height="$2"
+  case "$width:$height" in
+    54:63|72:84|108:126)
+      ;;
+    *)
+      echo "debug-map-settings supports 54x63, 72x84, or 108x126" >&2
+      exit 2
+      ;;
+  esac
+  cd "$WATCH_DIR"
+  pebble send-app-message --emulator "$PLATFORM" --app-uuid "$(app_uuid)" \
+    --int 50=204 51="$width" 52="$height" 54=1
+}
+
+send_debug_tile() {
+  require_pebble
+  local index="${1:-0}"
+  case "$index" in
+    ''|*[!0-9]*)
+      echo "debug-tile index must be a non-negative integer" >&2
+      exit 2
+      ;;
+  esac
+  cd "$WATCH_DIR"
+  pebble send-app-message --emulator "$PLATFORM" --app-uuid "$(app_uuid)" \
+    --int 50=902 60="$((10#$index))"
+}
+
+send_debug_route_progress() {
+  require_pebble
+  if [[ $# -ne 1 ]]; then
+    echo "debug-route-progress requires a percent from 0 to 100" >&2
+    exit 2
+  fi
+  local raw="${1%\%}"
+  case "$raw" in
+    ''|*[!0-9]*)
+      echo "debug-route-progress percent must be an integer from 0 to 100" >&2
+      exit 2
+      ;;
+  esac
+  local percent=$((10#$raw))
+  if (( percent < 0 || percent > 100 )); then
+    echo "debug-route-progress percent must be 0..100" >&2
+    exit 2
+  fi
+  local permille=$((percent * 10))
+  cd "$WATCH_DIR"
+  pebble send-app-message --emulator "$PLATFORM" --app-uuid "$(app_uuid)" \
+    --int 50=903 60="$permille"
+}
+
+main() {
+  local command="${1:-}"
+  if [[ -z "$command" || "$command" == "-h" || "$command" == "--help" ]]; then
+    usage
+    exit 0
+  fi
+  shift
+
+  case "$command" in
+    build)
+      build_app
+      ;;
+    doctor)
+      doctor
+      ;;
+    test-tooling)
+      test_tooling
+      ;;
+    test-protocol)
+      test_protocol
+      ;;
+    build-fixture)
+      set_phone_mode fixture
+      build_app
+      ;;
+    build-real-fixture)
+      set_phone_mode real-fixture
+      build_app
+      ;;
+    build-fixture-animation)
+      set_animation_fixture_defaults
+      build_app
+      ;;
+    build-phone)
+      set_phone_mode phone
+      build_app
+      ;;
+    install)
+      install_app
+      ;;
+    install-fixture)
+      set_phone_mode fixture
+      install_app
+      ;;
+    install-real-fixture)
+      set_phone_mode real-fixture
+      install_app
+      ;;
+    install-fixture-animation)
+      set_animation_fixture_defaults
+      install_app
+      ;;
+    install-phone)
+      set_phone_mode phone
+      install_app
+      ;;
+    wipe)
+      wipe_emulator
+      ;;
+    screenshot)
+      capture_screenshot "$@"
+      ;;
+    capture)
+      capture_after_install
+      ;;
+    capture-fixture)
+      set_phone_mode fixture
+      if [[ -z "${PEBBLE_CAPTURE_DELAY_SECONDS:-}" ]]; then
+        CAPTURE_DELAY_SECONDS=6
+      fi
+      capture_after_install
+      ;;
+    capture-real-fixture)
+      set_phone_mode real-fixture
+      if [[ -z "${PEBBLE_CAPTURE_DELAY_SECONDS:-}" ]]; then
+        CAPTURE_DELAY_SECONDS=6
+      fi
+      capture_after_install
+      ;;
+    capture-fixture-animation)
+      set_animation_fixture_defaults
+      capture_after_install
+      ;;
+    record-fixture-animation)
+      record_fixture_animation "$@"
+      ;;
+    capture-phone)
+      set_phone_mode phone
+      capture_after_install
+      ;;
+    smoke-fixture)
+      smoke_fixture
+      ;;
+    generate-real-fixture)
+      generate_real_fixture "$@"
+      ;;
+    debug-compass)
+      send_debug_compass "$@"
+      ;;
+    debug-facing)
+      send_debug_facing "$@"
+      ;;
+    debug-map-settings)
+      send_debug_map_settings "$@"
+      ;;
+    debug-tile)
+      send_debug_tile "$@"
+      ;;
+    debug-route-progress)
+      send_debug_route_progress "$@"
+      ;;
+    button)
+      send_button "$@"
+      ;;
+    kill)
+      require_pebble
+      pebble kill
+      ;;
+    *)
+      usage >&2
+      exit 2
+      ;;
+  esac
+}
+
+main "$@"

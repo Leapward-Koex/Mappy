@@ -1,0 +1,25 @@
+name: mappy
+description: Open-source phone companion for the Mappy Pebble navigation app.
+publish_to: "none"
+version: 0.1.0+1
+
+environment:
+  sdk: ^3.12.1
+
+dependencies:
+  disable_battery_optimization:
+    path: third_party/disable_battery_optimization
+  flutter:
+    sdk: flutter
+  google_maps_flutter: ^2.17.1
+  introduction_screen: ^4.0.0
+  shared_preferences: ^2.5.5
+  showcaseview: ^5.1.0
+
+dev_dependencies:
+  flutter_lints: ^6.0.0
+  flutter_test:
+    sdk: flutter
+
+flutter:
+  uses-material-design: true
