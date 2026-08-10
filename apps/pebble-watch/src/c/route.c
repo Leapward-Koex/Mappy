@@ -121,6 +121,7 @@ void clear_route_local(void) {
   s_active_route_mode = s_travel_mode;
   s_route_clear_armed = false;
   update_state_after_map_change();
+  refresh_motion_detection_service();
 }
 
 
@@ -660,6 +661,7 @@ void apply_route_clear(void) {
 }
 
 void apply_route_points(DictionaryIterator *iter) {
+  bool had_active_navigation = has_active_route();
   Tuple *data_tuple = dict_find(iter, MESSAGE_KEY_chunk_data);
   Tuple *generation_tuple = dict_find(iter, MESSAGE_KEY_total_bytes);
   Tuple *fresh_tuple = dict_find(iter, MESSAGE_KEY_button_id);
@@ -742,6 +744,10 @@ void apply_route_points(DictionaryIterator *iter) {
     zoom_to_max_map_level();
   }
   update_state_after_map_change();
+  if (!had_active_navigation) {
+    arm_route_start_bearing_reacquire();
+  }
+  refresh_motion_detection_service();
 }
 
 void apply_route_window_points(DictionaryIterator *iter) {

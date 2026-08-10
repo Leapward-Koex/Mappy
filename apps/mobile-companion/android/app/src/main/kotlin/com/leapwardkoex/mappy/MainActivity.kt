@@ -2196,6 +2196,9 @@ class MainActivity : FlutterActivity() {
             normalized.contains("pinch unavailable") -> "pinch_unavailable"
             normalized.contains("touch disabled") -> "touch_disabled"
             normalized.contains("zoom clamped") -> "zoom_clamped"
+            normalized.contains("walking detected") -> "motion_walking_detected"
+            normalized.contains("watch look detected") -> "motion_watch_look_detected"
+            normalized.contains("bearing reacquire") -> "bearing_reacquire_started"
             category == 0 -> "watch_log_event"
             else -> "watch_log_error"
         }

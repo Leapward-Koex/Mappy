@@ -65,6 +65,7 @@ void apply_map_orientation(DictionaryIterator *iter) {
     if (was_orientation_active || map_orientation_active()) {
       queue_visible_tiles();
     }
+    refresh_motion_detection_service();
     if (s_map_layer) {
       layer_mark_dirty(s_map_layer);
     }

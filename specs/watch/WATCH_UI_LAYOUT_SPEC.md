@@ -136,6 +136,11 @@ Centered map orientation:
   to avoid blank corners after all requested tiles arrive.
 - GPS movement smoothing is display-only. It must not delay route progress,
   tile requests, destination arrival checks, or stale GPS rejection.
+- Starting navigation and a detected walking-to-watch transition temporarily
+  accelerate face-forward bearing animation without snapping. This changes no
+  map chrome, text, route state, or user-visible setting.
+- Continuous accelerometer detection is limited to active Walk routes and is
+  suspended by a menu or manual browse until eligible GPS-follow resumes.
 
 ## Startup And Setup States
 

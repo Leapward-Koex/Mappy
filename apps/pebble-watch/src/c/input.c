@@ -28,6 +28,7 @@ void recenter_viewport(void) {
   sync_map_bearing_smoothing(true);
   update_state_after_map_change();
   queue_visible_tiles();
+  refresh_motion_detection_service();
   layer_mark_dirty(s_map_layer);
 }
 
@@ -90,6 +91,7 @@ void touch_handler(const TouchEvent *event, void *context) {
       s_touch_start_viewport_x = s_viewport_x;
       s_touch_start_viewport_y = s_viewport_y;
       s_manual_pan = true;
+      refresh_motion_detection_service();
       sync_map_bearing_smoothing(false);
       layer_mark_dirty(s_map_layer);
       break;
@@ -122,6 +124,7 @@ void touch_handler(const TouchEvent *event, void *context) {
       sync_map_bearing_smoothing(false);
       update_state_after_map_change();
       queue_visible_tiles();
+      refresh_motion_detection_service();
       layer_mark_dirty(s_map_layer);
       break;
   }
@@ -161,6 +164,7 @@ void open_menu(MenuMode mode) {
   s_menu_selection = 0;
   reset_menu_highlight_animation();
   update_touch_subscription();
+  refresh_motion_detection_service();
   layer_mark_dirty(s_map_layer);
 }
 
@@ -170,6 +174,7 @@ void close_menu(void) {
   s_menu_selection = 0;
   update_touch_subscription();
   update_state_after_map_change();
+  refresh_motion_detection_service();
   layer_mark_dirty(s_map_layer);
 }
 
@@ -378,6 +383,7 @@ void select_menu_item(void) {
         if (was_orientation_active || map_orientation_active()) {
           queue_visible_tiles();
         }
+        refresh_motion_detection_service();
       } else if (s_menu_selection == SettingsRowTileAnimation) {
         s_tile_animation_mode = (s_tile_animation_mode + 1) % 3;
         persist_write_int(PERSIST_TILE_ANIMATION, s_tile_animation_mode);

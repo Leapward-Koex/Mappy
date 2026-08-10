@@ -13,6 +13,7 @@ void window_load(Window *window) {
 
 void window_unload(Window *window) {
   s_menu_mode = MenuNone;
+  stop_motion_detection_service();
   update_touch_subscription();
   cancel_menu_highlight_animation();
   complete_tile_animations();
@@ -89,6 +90,7 @@ void init(void) {
 
 void deinit(void) {
   s_menu_mode = MenuNone;
+  stop_motion_detection_service();
   stop_compass_service();
   update_touch_subscription();
   cancel_menu_highlight_animation();

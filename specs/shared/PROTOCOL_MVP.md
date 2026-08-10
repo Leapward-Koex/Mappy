@@ -636,6 +636,12 @@ MVP payload:
 | `chunk_index` | optional second numeric detail |
 | `instruction` | optional short text detail |
 
+Informational motion diagnostics keep `button_id = 0`. `chunk_offset` values 8,
+9, and 10 mean walking detected, watch look detected, and bearing reacquisition
+started respectively. For reacquisition, `chunk_index` is `1` for route start
+or `2` for watch look. These are semantic events only; raw accelerometer data
+must never be placed in AppMessage payloads.
+
 The phone stores logs locally in a bounded ring buffer. Logs must not be sent to
 any external server by MVP code.
 

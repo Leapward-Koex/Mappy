@@ -9,6 +9,9 @@
 #include <limits.h>
 #include <string.h>
 
+#include "bearing_smoothing.h"
+#include "motion_detector.h"
+
 #define CMD_INIT 101
 #define CMD_ERROR_STATE 102
 #define CMD_LOG_EVENT 103
@@ -136,9 +139,6 @@
 #define TILE_REQUEST_STALE_MS 8000
 #define TILE_REQUEST_WATCHDOG_MS 1000
 #define COMPASS_HEADING_FILTER_DEGREES 2
-#define MAP_BEARING_SMOOTHING_MIN_STEP_CENTI_DEGREES 400
-#define MAP_BEARING_SMOOTHING_MAX_STEP_CENTI_DEGREES 1200
-#define MAP_BEARING_SMOOTHING_STEP_DIVISOR 4
 #define GPS_SMOOTHING_NONE 0
 #define GPS_SMOOTHING_LOCATION 1
 #define GPS_SMOOTHING_MAP 2
@@ -279,6 +279,12 @@ typedef enum {
   MenuTravelMode,
   MenuSettings,
 } MenuMode;
+
+typedef enum {
+  BearingReacquireNone,
+  BearingReacquireRouteStart,
+  BearingReacquireWatchLook,
+} BearingReacquireReason;
 
 extern Window *s_window;
 extern Layer *s_map_layer;
@@ -477,6 +483,14 @@ void cancel_map_bearing_smoothing(void);
 bool sync_map_bearing_smoothing(bool animate);
 bool map_bearing_smoothing_active(void);
 bool advance_map_bearing_smoothing(void);
+bool bearing_reacquire_active(void);
+void begin_bearing_reacquire(BearingReacquireReason reason);
+void arm_route_start_bearing_reacquire(void);
+void maybe_begin_pending_route_start_reacquire(void);
+void cancel_bearing_reacquire(void);
+const char *bearing_reacquire_reason_label(BearingReacquireReason reason);
+void refresh_motion_detection_service(void);
+void stop_motion_detection_service(void);
 bool gps_smoothing_should_animate(bool had_gps, int32_t previous_world_x,
                                   int32_t previous_world_y,
                                   int32_t next_world_x,

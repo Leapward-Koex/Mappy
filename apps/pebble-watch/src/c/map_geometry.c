@@ -51,14 +51,6 @@ static int32_t rounded_degrees_from_centi(int32_t centi_degrees) {
   return ((normalize_centi_degrees(centi_degrees) + 50) / 100) % 360;
 }
 
-static int32_t shortest_centi_delta(int32_t from_centi, int32_t to_centi) {
-  int32_t delta = normalize_centi_degrees(to_centi - from_centi);
-  if (delta > 18000) {
-    delta -= 36000;
-  }
-  return delta;
-}
-
 static int32_t target_map_bearing_centi_degrees(void) {
 #if defined(PBL_COMPASS)
   if (compass_heading_is_valid()) {
@@ -89,17 +81,6 @@ void update_map_after_bearing_display_change(bool was_orientation_active) {
       send_next_tile_request();
     }
   }
-}
-
-static int32_t map_bearing_smoothing_step_centi_degrees(int32_t abs_delta) {
-  int32_t step = abs_delta / MAP_BEARING_SMOOTHING_STEP_DIVISOR;
-  if (step < MAP_BEARING_SMOOTHING_MIN_STEP_CENTI_DEGREES) {
-    step = MAP_BEARING_SMOOTHING_MIN_STEP_CENTI_DEGREES;
-  }
-  if (step > MAP_BEARING_SMOOTHING_MAX_STEP_CENTI_DEGREES) {
-    step = MAP_BEARING_SMOOTHING_MAX_STEP_CENTI_DEGREES;
-  }
-  return step;
 }
 
 static int32_t trig_angle_from_centi_degrees(int32_t centi_degrees) {
@@ -485,8 +466,8 @@ void cancel_map_bearing_smoothing(void) {
 bool map_bearing_smoothing_active(void) {
   return s_map_bearing_target_centi_degrees >= 0 &&
       s_map_bearing_display_centi_degrees >= 0 &&
-      shortest_centi_delta(s_map_bearing_display_centi_degrees,
-                           s_map_bearing_target_centi_degrees) != 0;
+      bearing_smoothing_shortest_delta(s_map_bearing_display_centi_degrees,
+                                       s_map_bearing_target_centi_degrees) != 0;
 }
 
 bool sync_map_bearing_smoothing(bool animate) {
@@ -510,7 +491,8 @@ bool sync_map_bearing_smoothing(bool animate) {
     return previous_display != s_map_bearing_display_centi_degrees;
   }
 
-  if (shortest_centi_delta(s_map_bearing_display_centi_degrees, target) == 0) {
+  if (bearing_smoothing_shortest_delta(
+          s_map_bearing_display_centi_degrees, target) == 0) {
     s_map_bearing_display_centi_degrees = target;
     release_visual_animation_tick_if_idle();
     return previous_display != s_map_bearing_display_centi_degrees;
@@ -526,23 +508,16 @@ bool advance_map_bearing_smoothing(void) {
     return false;
   }
 
-  int32_t delta = shortest_centi_delta(s_map_bearing_display_centi_degrees,
-                                       s_map_bearing_target_centi_degrees);
+  int32_t delta = bearing_smoothing_shortest_delta(
+      s_map_bearing_display_centi_degrees,
+      s_map_bearing_target_centi_degrees);
   if (delta == 0) {
     return false;
   }
-  int32_t abs_delta = delta < 0 ? -delta : delta;
-  int32_t step = map_bearing_smoothing_step_centi_degrees(abs_delta);
-  if (abs_delta <= step) {
-    s_map_bearing_display_centi_degrees =
-        normalize_centi_degrees(s_map_bearing_target_centi_degrees);
-  } else if (delta > 0) {
-    s_map_bearing_display_centi_degrees = normalize_centi_degrees(
-        s_map_bearing_display_centi_degrees + step);
-  } else {
-    s_map_bearing_display_centi_degrees = normalize_centi_degrees(
-        s_map_bearing_display_centi_degrees - step);
-  }
+  s_map_bearing_display_centi_degrees = bearing_smoothing_advance(
+      s_map_bearing_display_centi_degrees,
+      s_map_bearing_target_centi_degrees,
+      bearing_reacquire_active());
 
   update_map_after_bearing_display_change(true);
   return true;
@@ -641,6 +616,7 @@ void update_compass_heading(CompassHeadingData heading_data) {
 
   s_compass_magnetic_degrees = next_magnetic_heading;
   s_compass_heading_degrees = next_heading;
+  maybe_begin_pending_route_start_reacquire();
   bool display_changed = sync_map_bearing_smoothing(true);
   if (display_changed) {
     update_map_after_bearing_display_change(false);

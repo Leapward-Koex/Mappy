@@ -98,7 +98,9 @@ class RepositoryWorkflowTest(unittest.TestCase):
             "doctor",
             "test-tooling",
             "test-protocol",
+            "test-motion-host",
             "test-render-performance",
+            "test-motion-reacquire",
             "build-phone",
             "capture-fixture",
             "capture-real-fixture",
@@ -106,6 +108,7 @@ class RepositoryWorkflowTest(unittest.TestCase):
             "generate-real-fixture",
             "record-fixture-animation",
             "debug-facing",
+            "debug-motion",
             "debug-route-progress",
             "kill",
         ):
@@ -114,6 +117,10 @@ class RepositoryWorkflowTest(unittest.TestCase):
         helper_text = helper.read_text(encoding="utf-8")
         self.assertIn('PEBBLE_QEMU_CAPTURE_FRAMES:-60', helper_text)
         self.assertIn('PEBBLE_QEMU_CAPTURE_INTERVAL:-0.2', helper_text)
+        for fixture_name in ("stationary-raise.csv", "walking-to-look.csv"):
+            fixture = ROOT / "tooling" / "motion-fixtures" / fixture_name
+            self.assertTrue(fixture.is_file())
+            self.assertGreater(fixture.stat().st_size, 0)
 
     def test_windows_wrapper_forwards_paths_commands_and_arguments(self) -> None:
         wrapper = (ROOT / "tooling" / "pebble-wsl.ps1").read_text(encoding="utf-8")

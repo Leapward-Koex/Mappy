@@ -43,6 +43,7 @@ From Windows PowerShell, run:
 ```powershell
 .\tooling\pebble-wsl.ps1 test-tooling
 .\tooling\pebble-wsl.ps1 test-protocol
+.\tooling\pebble-wsl.ps1 test-motion-host
 .\tooling\pebble-wsl.ps1 build-phone
 .\tooling\pebble-wsl.ps1 smoke-fixture
 ```
@@ -83,9 +84,17 @@ debug-compass <degrees|clear>
 debug-map-settings <width> <height>
 debug-tile [index]
 debug-route-progress <percent>
+debug-motion <stationary-raise|walking-to-look>
 ```
 
 Capture a screenshot after state changes that affect rendering. If a debug command fails, collect the command output and `pebble logs --emulator emery`; do not assume the message reached the watch.
+
+For motion-assisted face-forward work, run `test-motion-host` before using the
+emulator. Use `test-motion-reacquire` for the owned fixture-emulator sequence;
+it replays both deterministic accelerometer traces, asserts one watch-look
+event and a 2–8 tick fast bearing animation, and captures the final state. The
+command refuses to run while another QEMU session exists and does not use the
+wipe-and-retry path.
 
 ## Work with provider-backed fixtures safely
 
