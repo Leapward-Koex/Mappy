@@ -98,6 +98,7 @@ class RepositoryWorkflowTest(unittest.TestCase):
             "doctor",
             "test-tooling",
             "test-protocol",
+            "test-render-performance",
             "build-phone",
             "capture-fixture",
             "capture-real-fixture",

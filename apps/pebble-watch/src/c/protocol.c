@@ -542,16 +542,11 @@ void apply_declination(DictionaryIterator *iter) {
   bool was_orientation_active = map_orientation_active();
   refresh_corrected_compass_heading();
   if (previous_heading != s_compass_heading_degrees) {
-    sync_map_bearing_smoothing(true);
-    if (was_orientation_active || map_orientation_active()) {
-      if (orientation_tile_coverage_changed()) {
-        update_state_after_map_change();
-        queue_visible_tiles();
-      } else {
-        send_next_tile_request();
-      }
+    bool display_changed = sync_map_bearing_smoothing(true);
+    if (display_changed) {
+      update_map_after_bearing_display_change(was_orientation_active);
     }
-    if (s_map_layer) {
+    if (display_changed && s_map_layer) {
       layer_mark_dirty(s_map_layer);
     }
   }
@@ -565,28 +560,47 @@ void apply_debug_compass(DictionaryIterator *iter) {
 
   bool was_orientation_active = map_orientation_active();
   int32_t heading = heading_tuple->value->int32;
+#ifdef MAPPY_WATCH_PHONE_MODE_FIXTURE
+  if (heading >= 0) {
+    fixture_perf_begin();
+  }
+#endif
   if (heading < 0) {
+#ifdef MAPPY_WATCH_PHONE_MODE_FIXTURE
+    s_debug_compass_override_active = false;
+#endif
     s_compass_magnetic_degrees = -1;
     s_compass_heading_degrees = -1;
     APP_LOG(APP_LOG_LEVEL_INFO, "Debug compass cleared");
   } else {
+#ifdef MAPPY_WATCH_PHONE_MODE_FIXTURE
+    s_debug_compass_override_active = true;
+#endif
     s_compass_magnetic_degrees = normalize_degrees(heading);
     s_compass_heading_degrees = normalize_degrees(heading);
     APP_LOG(APP_LOG_LEVEL_INFO, "Debug compass heading=%ld", (long)s_compass_heading_degrees);
   }
 
-  sync_map_bearing_smoothing(true);
-  if (was_orientation_active || map_orientation_active()) {
-    if (orientation_tile_coverage_changed()) {
-      update_state_after_map_change();
-      queue_visible_tiles();
-    } else {
-      send_next_tile_request();
-    }
+  bool display_changed = sync_map_bearing_smoothing(true);
+#ifdef MAPPY_WATCH_PHONE_MODE_FIXTURE
+  if (heading >= 0 && display_changed) {
+    fixture_perf_bearing_immediate_step();
   }
-  if (s_map_layer) {
+  if (heading >= 0 && dict_find(iter, MESSAGE_KEY_width)) {
+    fixture_perf_start_mixed_sources();
+  }
+#endif
+  if (display_changed) {
+    update_map_after_bearing_display_change(was_orientation_active);
+  }
+  if (display_changed && s_map_layer) {
     layer_mark_dirty(s_map_layer);
   }
+#ifdef MAPPY_WATCH_PHONE_MODE_FIXTURE
+  if (heading >= 0 && !display_changed) {
+    fixture_perf_maybe_emit();
+  }
+#endif
 }
 
 void apply_debug_tile(DictionaryIterator *iter) {
@@ -820,6 +834,7 @@ void inbox_received(DictionaryIterator *iter, void *context) {
   }
 
   int32_t cmd = cmd_tuple->value->int32;
+  bool mark_dirty_after_dispatch = true;
   switch (cmd) {
     case CMD_GPS:
       apply_gps(iter);
@@ -875,9 +890,11 @@ void inbox_received(DictionaryIterator *iter, void *context) {
       apply_route_clear();
       break;
     case CMD_DECLINATION:
+      mark_dirty_after_dispatch = false;
       apply_declination(iter);
       break;
     case CMD_DEBUG_COMPASS:
+      mark_dirty_after_dispatch = false;
       apply_debug_compass(iter);
       break;
     case CMD_DEBUG_TILE:
@@ -902,7 +919,9 @@ void inbox_received(DictionaryIterator *iter, void *context) {
       break;
   }
 
-  layer_mark_dirty(s_map_layer);
+  if (mark_dirty_after_dispatch && s_map_layer) {
+    layer_mark_dirty(s_map_layer);
+  }
 }
 
 void inbox_dropped(AppMessageResult reason, void *context) {

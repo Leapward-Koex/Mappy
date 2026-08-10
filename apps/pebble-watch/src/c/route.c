@@ -224,18 +224,27 @@ int32_t compute_route_total_progress_px(void) {
   return total_px;
 }
 
-RouteProjection project_route_position(int32_t world_x, int32_t world_y) {
-  RouteProjection best = {.valid = false, .progress_px = 0, .distance_sq = INT64_MAX};
-  if (s_route_point_count < 2) {
+RouteProjection project_route_points_position(const RoutePoint *points,
+                                              uint16_t point_count,
+                                              int32_t world_x,
+                                              int32_t world_y) {
+  RouteProjection best = {
+    .valid = false,
+    .progress_px = 0,
+    .distance_sq = INT64_MAX,
+    .segment_index = 0,
+    .segment_t_q16 = 0,
+  };
+  if (!points || point_count < 2) {
     return best;
   }
 
   int32_t cumulative_px = 0;
-  for (uint16_t i = 1; i < s_route_point_count; i++) {
-    int64_t ax = s_route_points[i - 1].world_x;
-    int64_t ay = s_route_points[i - 1].world_y;
-    int64_t dx = (int64_t)s_route_points[i].world_x - ax;
-    int64_t dy = (int64_t)s_route_points[i].world_y - ay;
+  for (uint16_t i = 1; i < point_count; i++) {
+    int64_t ax = points[i - 1].world_x;
+    int64_t ay = points[i - 1].world_y;
+    int64_t dx = (int64_t)points[i].world_x - ax;
+    int64_t dy = (int64_t)points[i].world_y - ay;
     int64_t len_sq = dx * dx + dy * dy;
     int32_t segment_px = approx_segment_length_px((int32_t)dx, (int32_t)dy);
     if (len_sq <= 0 || segment_px <= 0) {
@@ -264,10 +273,17 @@ RouteProjection project_route_position(int32_t world_x, int32_t world_y) {
       best.valid = true;
       best.progress_px = progress_px;
       best.distance_sq = distance_sq;
+      best.segment_index = i - 1;
+      best.segment_t_q16 = (uint32_t)t_q16;
     }
     cumulative_px = saturating_add_i32(cumulative_px, segment_px);
   }
   return best;
+}
+
+RouteProjection project_route_position(int32_t world_x, int32_t world_y) {
+  return project_route_points_position(s_route_points, s_route_point_count,
+                                       world_x, world_y);
 }
 
 void recompute_nav_step_progress(void) {

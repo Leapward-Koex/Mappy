@@ -4,6 +4,7 @@
 
 static TileRequest s_render_tile_origins[TILE_CACHE_SIZE];
 static TileCacheEntry *s_render_tile_entries[TILE_CACHE_SIZE];
+#ifdef MAPPY_WATCH_PHONE_MODE_FIXTURE
 static int s_last_rotated_log_entry_count = -1;
 static int s_last_rotated_log_cols = -1;
 static int s_last_rotated_log_rows = -1;
@@ -22,6 +23,7 @@ static int rotated_tile_geometry_code(void) {
   }
   return 0;
 }
+#endif
 
 GColor chrome_bg(void) {
   return s_theme_mode == 2 ? GColorFromHEX(0x12181E) : GColorWhite;
@@ -297,6 +299,7 @@ static bool prepare_rotated_tile_lookup(TileCacheEntry **entries, int entry_coun
   return true;
 }
 
+#ifdef MAPPY_WATCH_PHONE_MODE_FIXTURE
 static void log_rotated_render_signature(int entry_count,
                                          const RotatedTileLookup *lookup) {
   if (!lookup) {
@@ -320,12 +323,12 @@ static void log_rotated_render_signature(int entry_count,
       ((lookup->rows & 0x3f) << 12) |
       ((rotated_tile_geometry_code() & 0x0f) << 18) |
       ((active_tile_cache_size() & 0x3f) << 22);
-  persist_write_int(PERSIST_DEBUG_ROTATED_SIGNATURE, signature);
   APP_LOG(APP_LOG_LEVEL_INFO,
           "Rotated render entries=%d lookup=%dx%d tile=%dx%d cache=%d bearing=%ld sig=%d",
           entry_count, lookup->cols, lookup->rows, s_tile_width, s_tile_height,
           active_tile_cache_size(), (long)active_map_bearing_degrees(), signature);
 }
+#endif
 
 static inline bool sample_rotated_tile_lookup_palette_index(
     const RotatedTileLookup *lookup, int col, int row, int local_x,
@@ -488,7 +491,9 @@ static void draw_rotated_tiles_framebuffer_sampled(uint8_t *framebuffer_data,
                                           sin_value, cos_value);
     return;
   }
+#ifdef MAPPY_WATCH_PHONE_MODE_FIXTURE
   log_rotated_render_signature(entry_count, lookup);
+#endif
   if (lookup->cols <= 0 || lookup->rows <= 0) {
     for (int screen_y = 0; screen_y < screen_h; screen_y++) {
       memset(framebuffer_data + (screen_y * bytes_per_row), background_argb,
@@ -770,6 +775,123 @@ void draw_tiles(GContext *ctx, GColor background, bool fill_background) {
   }
 }
 
+static int32_t render_trig_ratio_to_int(int64_t value) {
+#if TRIG_MAX_RATIO == (1 << TRIG_RATIO_SHIFT)
+  if (value >= 0) {
+    return (int32_t)(value >> TRIG_RATIO_SHIFT);
+  }
+  return -(int32_t)((-value) >> TRIG_RATIO_SHIFT);
+#else
+  return (int32_t)(value / TRIG_MAX_RATIO);
+#endif
+}
+
+static void build_map_render_transform(MapRenderTransform *transform) {
+  transform->viewport_x = render_viewport_x();
+  transform->viewport_y = render_viewport_y();
+  transform->center_x = s_screen_bounds.size.w / 2;
+  transform->center_y = s_screen_bounds.size.h / 2;
+  transform->scale_q8 = s_transient_zoom_scale_q8;
+  transform->bearing_centi_degrees = active_map_bearing_centi_degrees();
+  if (transform->bearing_centi_degrees == 0) {
+    transform->sin_value = 0;
+    transform->cos_value = TRIG_MAX_RATIO;
+  } else {
+    int32_t angle = active_map_bearing_angle();
+    transform->sin_value = sin_lookup(angle);
+    transform->cos_value = cos_lookup(angle);
+  }
+}
+
+static GPoint map_transform_point(const MapRenderTransform *transform,
+                                  int32_t world_x, int32_t world_y,
+                                  int8_t source_zoom) {
+  int32_t dx = scale_world_to_zoom(world_x, source_zoom, s_viewport_zoom) -
+      transform->viewport_x;
+  int32_t dy = scale_world_to_zoom(world_y, source_zoom, s_viewport_zoom) -
+      transform->viewport_y;
+  int32_t screen_dx = dx;
+  int32_t screen_dy = dy;
+  if (transform->bearing_centi_degrees != 0) {
+    screen_dx = render_trig_ratio_to_int(
+        (int64_t)dx * transform->cos_value +
+        (int64_t)dy * transform->sin_value);
+    screen_dy = render_trig_ratio_to_int(
+        -(int64_t)dx * transform->sin_value +
+        (int64_t)dy * transform->cos_value);
+  }
+  screen_dx = screen_dx * transform->scale_q8 / TRANSIENT_SCALE_Q8_ONE;
+  screen_dy = screen_dy * transform->scale_q8 / TRANSIENT_SCALE_Q8_ONE;
+  return GPoint((int16_t)clamp_i32_to_i16(transform->center_x + screen_dx),
+                (int16_t)clamp_i32_to_i16(transform->center_y + screen_dy));
+}
+
+typedef struct {
+  int32_t active_generation;
+  int32_t detail_center_x;
+  int32_t detail_center_y;
+  int32_t gps_world_x;
+  int32_t gps_world_y;
+  uint32_t context;
+} RouteProjectionCacheKey;
+
+typedef struct {
+  bool initialized;
+  RouteProjectionCacheKey key;
+  RouteProjection projection;
+} RouteProjectionCache;
+
+static RouteProjectionCache s_route_projection_cache;
+
+static RouteProjection cached_route_projection(const RoutePoint *points,
+                                               uint16_t point_count,
+                                               int8_t route_zoom,
+                                               bool detail_route) {
+  bool gps_fresh = gps_fresh_for_progress();
+  int32_t gps_world_x = display_gps_world_x();
+  int32_t gps_world_y = display_gps_world_y();
+  RouteProjectionCacheKey key = {
+    .active_generation = detail_route ? s_route_detail_generation :
+        s_route_generation,
+    .detail_center_x = detail_route ? s_route_detail_center_x : 0,
+    .detail_center_y = detail_route ? s_route_detail_center_y : 0,
+    .gps_world_x = gps_world_x,
+    .gps_world_y = gps_world_y,
+    .context = point_count |
+        ((uint32_t)(uint8_t)route_zoom << 8) |
+        ((uint32_t)(uint8_t)s_viewport_zoom << 15) |
+        ((uint32_t)(uint8_t)s_gps_zoom << 20) |
+        ((uint32_t)(gps_fresh ? 1 : 0) << 25) |
+        ((uint32_t)(detail_route ? 1 : 0) << 26),
+  };
+  if (s_route_projection_cache.initialized &&
+      memcmp(&s_route_projection_cache.key, &key, sizeof(key)) == 0) {
+    return s_route_projection_cache.projection;
+  }
+
+  s_route_projection_cache.initialized = true;
+  s_route_projection_cache.key = key;
+  s_route_projection_cache.projection = (RouteProjection) {
+    .valid = false,
+    .progress_px = 0,
+    .distance_sq = INT64_MAX,
+    .segment_index = 0,
+    .segment_t_q16 = 0,
+  };
+  if (gps_fresh) {
+    int32_t route_gps_x = scale_world_to_zoom(gps_world_x, s_gps_zoom,
+                                              route_zoom);
+    int32_t route_gps_y = scale_world_to_zoom(gps_world_y, s_gps_zoom,
+                                              route_zoom);
+    s_route_projection_cache.projection = project_route_points_position(
+        points, point_count, route_gps_x, route_gps_y);
+#ifdef MAPPY_WATCH_PHONE_MODE_FIXTURE
+    fixture_perf_route_projection_recompute();
+#endif
+  }
+  return s_route_projection_cache.projection;
+}
+
 static bool route_clip_edge_q16(int32_t p, int32_t q,
                                 int32_t *t0_q16, int32_t *t1_q16) {
   if (p == 0) {
@@ -796,15 +918,15 @@ static bool route_clip_edge_q16(int32_t p, int32_t q,
   return true;
 }
 
-static bool clip_route_segment_to_screen_q16(GPoint start, GPoint end,
-                                             int32_t *t0_q16,
-                                             int32_t *t1_q16) {
+static bool __attribute__((noinline)) clip_route_segment_to_screen_q16(
+    GPoint start, GPoint end, int32_t padding,
+    int32_t *t0_q16, int32_t *t1_q16) {
   int32_t dx = end.x - start.x;
   int32_t dy = end.y - start.y;
-  int32_t min_x = -WALK_ROUTE_DOT_HALO_RADIUS;
-  int32_t min_y = -WALK_ROUTE_DOT_HALO_RADIUS;
-  int32_t max_x = s_screen_bounds.size.w + WALK_ROUTE_DOT_HALO_RADIUS;
-  int32_t max_y = s_screen_bounds.size.h + WALK_ROUTE_DOT_HALO_RADIUS;
+  int32_t min_x = -padding;
+  int32_t min_y = -padding;
+  int32_t max_x = s_screen_bounds.size.w + padding;
+  int32_t max_y = s_screen_bounds.size.h + padding;
 
   *t0_q16 = 0;
   *t1_q16 = 65536;
@@ -832,61 +954,62 @@ static void draw_walking_route_dot(GContext *ctx, GPoint point) {
   graphics_fill_circle(ctx, point, WALK_ROUTE_DOT_RADIUS);
 }
 
-static bool route_visual_cutoff_px(const GPoint *route_points, uint16_t point_count,
-                                   int32_t *cutoff_px) {
-  if (!gps_fresh_for_progress() || point_count < 2) {
+static GPoint __attribute__((noinline)) route_point_at_fraction(
+    GPoint start, GPoint end, int32_t t_q16) {
+  int32_t x = start.x +
+      (int32_t)(((int64_t)(end.x - start.x) * t_q16) / 65536);
+  int32_t y = start.y +
+      (int32_t)(((int64_t)(end.y - start.y) * t_q16) / 65536);
+  return GPoint((int16_t)clamp_i32_to_i16(x),
+                (int16_t)clamp_i32_to_i16(y));
+}
+
+static bool route_visual_projection_on_route(
+    const GPoint *route_points, uint16_t point_count,
+    RouteProjection projection, const MapRenderTransform *transform) {
+  if (!projection.valid || point_count < 2 ||
+      projection.segment_index >= point_count - 1) {
     return false;
   }
 
-  GPoint gps_point = screen_point_from_world(display_gps_world_x(),
-                                             display_gps_world_y(),
-                                             s_gps_zoom);
-  bool valid = false;
-  int64_t best_distance_sq = INT64_MAX;
-  int32_t best_progress = 0;
+  GPoint gps_point = map_transform_point(transform, display_gps_world_x(),
+                                         display_gps_world_y(), s_gps_zoom);
+  GPoint projected_point = route_point_at_fraction(
+      route_points[projection.segment_index],
+      route_points[projection.segment_index + 1],
+      (int32_t)projection.segment_t_q16);
+  int64_t off_x = (int64_t)gps_point.x - projected_point.x;
+  int64_t off_y = (int64_t)gps_point.y - projected_point.y;
+  int64_t distance_sq = off_x * off_x + off_y * off_y;
+  int64_t threshold_sq =
+      (int64_t)ROUTE_VISUAL_OFF_ROUTE_PX * ROUTE_VISUAL_OFF_ROUTE_PX;
+  if (distance_sq > threshold_sq) {
+    return false;
+  }
+
+  return true;
+}
+
+static int32_t route_visual_cutoff_px(const GPoint *route_points,
+                                      RouteProjection projection) {
   int32_t cumulative_distance = 0;
-  for (uint16_t i = 1; i < point_count; i++) {
+  for (uint16_t i = 1; i <= projection.segment_index + 1; i++) {
     GPoint start = route_points[i - 1];
     GPoint end = route_points[i];
     int32_t dx = end.x - start.x;
     int32_t dy = end.y - start.y;
-    int64_t len_sq = (int64_t)dx * dx + (int64_t)dy * dy;
     int32_t segment_len = approx_segment_length_px(dx, dy);
-    if (len_sq <= 0 || segment_len <= 0) {
+    if (segment_len <= 0) {
       continue;
     }
-
-    int64_t px = (int64_t)gps_point.x - start.x;
-    int64_t py = (int64_t)gps_point.y - start.y;
-    int64_t dot = px * dx + py * dy;
-    int64_t t_q16 = 0;
-    if (dot >= len_sq) {
-      t_q16 = 65536;
-    } else if (dot > 0) {
-      t_q16 = (dot * 65536) / len_sq;
-    }
-
-    int64_t projected_x = start.x + ((int64_t)dx * t_q16) / 65536;
-    int64_t projected_y = start.y + ((int64_t)dy * t_q16) / 65536;
-    int64_t off_x = (int64_t)gps_point.x - projected_x;
-    int64_t off_y = (int64_t)gps_point.y - projected_y;
-    int64_t distance_sq = off_x * off_x + off_y * off_y;
-    int32_t segment_progress = (int32_t)(((int64_t)segment_len * t_q16) / 65536);
-    int32_t progress = saturating_add_i32(cumulative_distance, segment_progress);
-    if (!valid || distance_sq < best_distance_sq) {
-      valid = true;
-      best_distance_sq = distance_sq;
-      best_progress = progress;
+    if (i - 1 == projection.segment_index) {
+      int32_t segment_progress = (int32_t)(
+          ((int64_t)segment_len * projection.segment_t_q16) / 65536);
+      return saturating_add_i32(cumulative_distance, segment_progress);
     }
     cumulative_distance = saturating_add_i32(cumulative_distance, segment_len);
   }
-
-  int64_t threshold_sq = (int64_t)ROUTE_VISUAL_OFF_ROUTE_PX * ROUTE_VISUAL_OFF_ROUTE_PX;
-  if (!valid || best_distance_sq > threshold_sq) {
-    return false;
-  }
-  *cutoff_px = best_progress;
-  return true;
+  return cumulative_distance;
 }
 
 static void draw_walking_route_dots(GContext *ctx, const GPoint *route_points,
@@ -911,7 +1034,11 @@ static void draw_walking_route_dots(GContext *ctx, const GPoint *route_points,
     int32_t visible_end = segment_end;
     int32_t t0_q16;
     int32_t t1_q16;
-    bool visible = clip_route_segment_to_screen_q16(start, end, &t0_q16, &t1_q16);
+    bool visible = clip_route_segment_to_screen_q16(
+        start, end, WALK_ROUTE_DOT_HALO_RADIUS, &t0_q16, &t1_q16);
+#ifdef MAPPY_WATCH_PHONE_MODE_FIXTURE
+    fixture_perf_route_segment(visible);
+#endif
     if (visible) {
       visible_start += (int32_t)(((int64_t)segment_len * t0_q16) / 65536);
       visible_end = segment_start +
@@ -938,48 +1065,48 @@ static void draw_walking_route_dots(GContext *ctx, const GPoint *route_points,
   }
 }
 
-static GPoint route_point_at_distance(GPoint start, GPoint end,
-                                      int32_t segment_len,
-                                      int32_t local_distance) {
-  int32_t dx = end.x - start.x;
-  int32_t dy = end.y - start.y;
-  int32_t t_q16 = (int32_t)(((int64_t)local_distance * 65536) / segment_len);
-  int32_t x = start.x + (int32_t)(((int64_t)dx * t_q16) / 65536);
-  int32_t y = start.y + (int32_t)(((int64_t)dy * t_q16) / 65536);
-  return GPoint((int16_t)clamp_i32_to_i16(x), (int16_t)clamp_i32_to_i16(y));
-}
-
-static void draw_route_lines(GContext *ctx, const GPoint *route_points,
-                             uint16_t point_count, bool has_cutoff,
-                             int32_t cutoff_px) {
-  int32_t cumulative_distance = 0;
+static void __attribute__((noinline)) draw_route_lines(
+    GContext *ctx, const GPoint *route_points, uint16_t point_count,
+    bool has_cutoff, RouteProjection projection, bool count_segments) {
   for (uint16_t i = 1; i < point_count; i++) {
     GPoint start = route_points[i - 1];
     GPoint end = route_points[i];
-    int32_t dx = end.x - start.x;
-    int32_t dy = end.y - start.y;
-    int32_t segment_len = approx_segment_length_px(dx, dy);
-    if (segment_len <= 0) {
+    uint16_t segment_index = i - 1;
+    if (has_cutoff && segment_index < projection.segment_index) {
       continue;
     }
-
-    int32_t segment_start = cumulative_distance;
-    int32_t segment_end = saturating_add_i32(cumulative_distance, segment_len);
-    cumulative_distance = segment_end;
-    if (has_cutoff && segment_end <= cutoff_px) {
-      continue;
-    }
-    if (has_cutoff && cutoff_px > segment_start) {
-      int32_t local_distance = cutoff_px - segment_start;
-      if (local_distance > 0 && local_distance < segment_len) {
-        start = route_point_at_distance(start, end, segment_len, local_distance);
+    if (has_cutoff && segment_index == projection.segment_index) {
+      if (projection.segment_t_q16 >= 65536) {
+        continue;
+      }
+      if (projection.segment_t_q16 > 0) {
+        start = route_point_at_fraction(
+            start, end, (int32_t)projection.segment_t_q16);
       }
     }
-    graphics_draw_line(ctx, start, end);
+    int32_t t0_q16;
+    int32_t t1_q16;
+    if (!clip_route_segment_to_screen_q16(
+            start, end, WALK_ROUTE_DOT_HALO_RADIUS, &t0_q16, &t1_q16)) {
+#ifdef MAPPY_WATCH_PHONE_MODE_FIXTURE
+      if (count_segments) {
+        fixture_perf_route_segment(false);
+      }
+#endif
+      continue;
+    }
+#ifdef MAPPY_WATCH_PHONE_MODE_FIXTURE
+    if (count_segments) {
+      fixture_perf_route_segment(true);
+    }
+#endif
+    GPoint clipped_start = route_point_at_fraction(start, end, t0_q16);
+    GPoint clipped_end = route_point_at_fraction(start, end, t1_q16);
+    graphics_draw_line(ctx, clipped_start, clipped_end);
   }
 }
 
-void draw_route(GContext *ctx) {
+void draw_route(GContext *ctx, const MapRenderTransform *transform) {
   if (s_route_point_count < 2) {
     return;
   }
@@ -987,7 +1114,8 @@ void draw_route(GContext *ctx) {
   const RoutePoint *points = s_route_points;
   uint16_t point_count = s_route_point_count;
   int8_t route_zoom = s_route_zoom;
-  if (route_detail_available_for_draw()) {
+  bool detail_route = route_detail_available_for_draw();
+  if (detail_route) {
     points = s_route_detail_points;
     point_count = s_route_detail_point_count;
     route_zoom = s_route_detail_zoom;
@@ -995,35 +1123,39 @@ void draw_route(GContext *ctx) {
 
   GPoint route_points[MAX_ROUTE_POINTS];
   for (uint16_t i = 0; i < point_count; i++) {
-    route_points[i] = screen_point_from_world(points[i].world_x,
-                                              points[i].world_y,
-                                              route_zoom);
+    route_points[i] = map_transform_point(transform, points[i].world_x,
+                                          points[i].world_y, route_zoom);
   }
 
-  int32_t cutoff_px = 0;
-  bool has_cutoff = route_visual_cutoff_px(route_points, point_count, &cutoff_px);
+  RouteProjection projection = cached_route_projection(
+      points, point_count, route_zoom, detail_route);
+  bool has_cutoff = route_visual_projection_on_route(
+      route_points, point_count, projection, transform);
   if (s_active_route_mode == TRAVEL_MODE_WALK) {
+    int32_t cutoff_px = has_cutoff ?
+        route_visual_cutoff_px(route_points, projection) : 0;
     draw_walking_route_dots(ctx, route_points, point_count, has_cutoff, cutoff_px);
     return;
   }
 
   graphics_context_set_stroke_color(ctx, GColorWhite);
   graphics_context_set_stroke_width(ctx, 6);
-  draw_route_lines(ctx, route_points, point_count, has_cutoff, cutoff_px);
+  draw_route_lines(ctx, route_points, point_count, has_cutoff, projection, true);
   graphics_context_set_stroke_color(ctx, GColorFromHEX(0x1A73E8));
   graphics_context_set_stroke_width(ctx, 3);
-  draw_route_lines(ctx, route_points, point_count, has_cutoff, cutoff_px);
+  draw_route_lines(ctx, route_points, point_count, has_cutoff, projection, false);
   graphics_context_set_stroke_width(ctx, 1);
 }
 
-void draw_destination_marker(GContext *ctx) {
+void draw_destination_marker(GContext *ctx,
+                             const MapRenderTransform *transform) {
   if (s_route_point_count < 2) {
     return;
   }
 
   RoutePoint destination = s_route_points[s_route_point_count - 1];
-  GPoint point = screen_point_from_world(destination.world_x, destination.world_y,
-                                        s_route_zoom);
+  GPoint point = map_transform_point(transform, destination.world_x,
+                                     destination.world_y, s_route_zoom);
   graphics_context_set_stroke_color(ctx, GColorWhite);
   graphics_context_set_stroke_width(ctx, 3);
   graphics_draw_circle(ctx, point, 8);
@@ -1034,24 +1166,42 @@ void draw_destination_marker(GContext *ctx) {
   graphics_draw_circle(ctx, point, 5);
 }
 
-static void draw_current_location_sector_outline(GContext *ctx, GPoint point,
-                                                 int32_t display_heading,
-                                                 GColor color, uint8_t width) {
+static int32_t s_location_cone_cached_heading = INT32_MIN;
+static GPoint s_location_cone_relative_points[LOCATION_CONE_OUTLINE_SEGMENTS + 1];
+
+static void cache_current_location_cone(int32_t display_heading) {
+  if (s_location_cone_cached_heading == display_heading) {
+    return;
+  }
+  s_location_cone_cached_heading = display_heading;
   int32_t start_heading = display_heading - LOCATION_CONE_HALF_ANGLE_DEGREES;
   int32_t step_degrees =
       (LOCATION_CONE_HALF_ANGLE_DEGREES * 2) / LOCATION_CONE_OUTLINE_SEGMENTS;
-  GPoint start = point_from_heading(point, start_heading, LOCATION_CONE_LENGTH);
+  for (int i = 0; i <= LOCATION_CONE_OUTLINE_SEGMENTS; i++) {
+    int32_t heading = start_heading + step_degrees * i;
+    if (i == LOCATION_CONE_OUTLINE_SEGMENTS) {
+      heading = display_heading + LOCATION_CONE_HALF_ANGLE_DEGREES;
+    }
+    s_location_cone_relative_points[i] = point_from_heading(
+        GPoint(0, 0), heading, LOCATION_CONE_LENGTH);
+  }
+}
+
+static GPoint translated_cone_point(GPoint origin, GPoint relative) {
+  return GPoint((int16_t)clamp_i32_to_i16(origin.x + relative.x),
+                (int16_t)clamp_i32_to_i16(origin.y + relative.y));
+}
+
+static void draw_current_location_sector_outline(GContext *ctx, GPoint point,
+                                                 GColor color, uint8_t width) {
+  GPoint start = translated_cone_point(point, s_location_cone_relative_points[0]);
   GPoint previous = start;
 
   graphics_context_set_stroke_color(ctx, color);
   graphics_context_set_stroke_width(ctx, width);
   graphics_draw_line(ctx, point, start);
   for (int i = 1; i <= LOCATION_CONE_OUTLINE_SEGMENTS; i++) {
-    int32_t heading = start_heading + step_degrees * i;
-    if (i == LOCATION_CONE_OUTLINE_SEGMENTS) {
-      heading = display_heading + LOCATION_CONE_HALF_ANGLE_DEGREES;
-    }
-    GPoint next = point_from_heading(point, heading, LOCATION_CONE_LENGTH);
+    GPoint next = translated_cone_point(point, s_location_cone_relative_points[i]);
     graphics_draw_line(ctx, previous, next);
     previous = next;
   }
@@ -1059,22 +1209,23 @@ static void draw_current_location_sector_outline(GContext *ctx, GPoint point,
 }
 
 void draw_current_location_cone(GContext *ctx, GPoint point, int32_t display_heading) {
-  draw_current_location_sector_outline(ctx, point, display_heading, GColorWhite,
+  cache_current_location_cone(display_heading);
+  draw_current_location_sector_outline(ctx, point, GColorWhite,
                                        LOCATION_CONE_OUTLINE_HALO_WIDTH);
-  draw_current_location_sector_outline(ctx, point, display_heading,
+  draw_current_location_sector_outline(ctx, point,
                                        GColorFromHEX(LOCATION_BLUE_HEX),
                                        LOCATION_CONE_OUTLINE_WIDTH);
   graphics_context_set_stroke_width(ctx, 1);
 }
 
-void draw_current_location(GContext *ctx) {
+void draw_current_location(GContext *ctx,
+                           const MapRenderTransform *transform) {
   if (!s_has_gps) {
     return;
   }
 
-  GPoint point = screen_point_from_world(display_gps_world_x(),
-                                         display_gps_world_y(),
-                                         s_gps_zoom);
+  GPoint point = map_transform_point(transform, display_gps_world_x(),
+                                     display_gps_world_y(), s_gps_zoom);
   int32_t facing_heading;
   if (active_facing_heading_degrees(&facing_heading)) {
     int32_t display_heading = normalize_degrees(
@@ -1309,6 +1460,9 @@ void draw_menu(GContext *ctx) {
 
 
 void map_layer_update(Layer *layer, GContext *ctx) {
+#ifdef MAPPY_WATCH_PHONE_MODE_FIXTURE
+  fixture_perf_map_draw();
+#endif
   GColor background = s_theme_mode == 2 ? GColorFromHEX(0x101418) : GColorFromHEX(0xE8EEE8);
   bool fill_background_in_tiles = map_orientation_active();
   if (!fill_background_in_tiles) {
@@ -1317,13 +1471,19 @@ void map_layer_update(Layer *layer, GContext *ctx) {
 
   draw_tile_placeholders(ctx);
   draw_tiles(ctx, background, fill_background_in_tiles);
-  draw_route(ctx);
-  draw_destination_marker(ctx);
-  draw_current_location(ctx);
+  MapRenderTransform transform;
+  build_map_render_transform(&transform);
+  draw_route(ctx, &transform);
+  draw_destination_marker(ctx, &transform);
+  draw_current_location(ctx, &transform);
 
   if (s_menu_mode == MenuNone) {
     draw_status_chrome(ctx);
   }
   draw_menu(ctx);
   draw_arrival_dialog(ctx);
+#ifdef MAPPY_WATCH_PHONE_MODE_FIXTURE
+  fixture_perf_map_draw_complete();
+  fixture_perf_maybe_emit();
+#endif
 }

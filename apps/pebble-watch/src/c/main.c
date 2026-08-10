@@ -18,6 +18,7 @@ void window_unload(Window *window) {
   complete_tile_animations();
   complete_gps_smoothing();
   cancel_map_bearing_smoothing();
+  cancel_visual_animation_timer();
   layer_destroy(s_map_layer);
   s_map_layer = NULL;
 }
@@ -57,10 +58,6 @@ void load_settings(void) {
 
 void init(void) {
   APP_LOG(APP_LOG_LEVEL_INFO, "Mappy watch init mode=%s", MAPPY_PHONE_MODE_LABEL);
-  if (persist_exists(PERSIST_DEBUG_ROTATED_SIGNATURE)) {
-    APP_LOG(APP_LOG_LEVEL_INFO, "Last rotated render signature=%ld",
-            (long)persist_read_int(PERSIST_DEBUG_ROTATED_SIGNATURE));
-  }
   load_settings();
   s_tiles = calloc(TILE_CACHE_SIZE, sizeof(TileCacheEntry));
   if (!s_tiles) {
@@ -98,13 +95,10 @@ void deinit(void) {
   complete_tile_animations();
   complete_gps_smoothing();
   cancel_map_bearing_smoothing();
+  cancel_visual_animation_timer();
   reset_tile_chunk_assembly();
   if (s_window) {
     window_destroy(s_window);
-  }
-  if (s_location_fan_path) {
-    gpath_destroy(s_location_fan_path);
-    s_location_fan_path = NULL;
   }
   if (s_tiles) {
     free(s_tiles);

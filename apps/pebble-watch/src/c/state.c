@@ -4,13 +4,6 @@
 
 Window *s_window;
 Layer *s_map_layer;
-GPath *s_location_fan_path;
-GPoint s_location_fan_points[5];
-GPathInfo s_location_fan_info = {
-  .num_points = 5,
-  .points = s_location_fan_points,
-};
-
 TileCacheEntry *s_tiles;
 uint8_t *s_tile_decode_buffer;
 int s_tile_cache_size = TILE_CACHE_SIZE;
@@ -24,11 +17,8 @@ bool s_orientation_tile_origins_valid;
 bool s_outbox_busy;
 int32_t s_outbox_cmd;
 uint32_t s_access_counter;
-AppTimer *s_tile_animation_timer;
+AppTimer *s_visual_animation_timer;
 AppTimer *s_tile_request_watchdog_timer;
-AppTimer *s_map_bearing_smoothing_timer;
-AppTimer *s_gps_smoothing_timer;
-AppTimer *s_menu_highlight_timer;
 
 RoutePoint s_route_points[MAX_ROUTE_POINTS];
 RoutePoint s_route_detail_points[MAX_ROUTE_POINTS];
@@ -96,6 +86,9 @@ int32_t s_compass_heading_degrees = -1;
 int32_t s_compass_magnetic_degrees = -1;
 int32_t s_map_bearing_display_centi_degrees = -1;
 int32_t s_map_bearing_target_centi_degrees = -1;
+#ifdef MAPPY_WATCH_PHONE_MODE_FIXTURE
+bool s_debug_compass_override_active;
+#endif
 int32_t s_declination_centi_degrees;
 bool s_declination_valid;
 time_t s_gps_received_at;

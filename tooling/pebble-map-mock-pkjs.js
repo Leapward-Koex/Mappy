@@ -38,6 +38,7 @@
   var tileDelayMs = numberOption('tileDelayMs', 0, 0, 60000);
   var tileStaggerMs = numberOption('tileStaggerMs', 0, 0, 60000);
   var tileAnimationMode = numberOption('tileAnimationMode', -1, -1, 2);
+  var routePointCount = numberOption('routePointCount', 3, 3, 128);
   var tileSequence = 0;
 
   function numberOption(name, fallback, minValue, maxValue) {
@@ -168,11 +169,27 @@
   }
 
   function encodeRoute() {
-    var points = [
-      { x: gpsWorldX - 78, y: gpsWorldY + 76 },
-      { x: gpsWorldX - 22, y: gpsWorldY + 18 },
-      { x: gpsWorldX + 64, y: gpsWorldY - 68 }
-    ];
+    var points;
+    if (routePointCount === 3) {
+      points = [
+        { x: gpsWorldX - 78, y: gpsWorldY + 76 },
+        { x: gpsWorldX - 22, y: gpsWorldY + 18 },
+        { x: gpsWorldX + 64, y: gpsWorldY - 68 }
+      ];
+    } else {
+      points = [];
+      var midpoint = Math.floor((routePointCount - 1) / 2);
+      for (var pointIndex = 0; pointIndex < routePointCount; pointIndex++) {
+        var x = gpsWorldX - 900 +
+            Math.round(1800 * pointIndex / (routePointCount - 1));
+        var y = gpsWorldY + ((pointIndex * 37) % 41 - 20) * 3;
+        if (pointIndex === midpoint) {
+          x = gpsWorldX;
+          y = gpsWorldY;
+        }
+        points.push({ x: x, y: y });
+      }
+    }
     var bytes = [points.length & 0xff, (points.length >> 8) & 0xff, ROUTE_ZOOM];
     for (var i = 0; i < points.length; i++) {
       i32le(bytes, points[i].x);
@@ -246,6 +263,18 @@
       tile_zoom: ROUTE_ZOOM,
       button_id: 35
     });
+    if (routePointCount > 3) {
+      enqueue('stress-route', {
+        cmd: CMD_ROUTE_POINTS,
+        button_id: 1,
+        is_color: 2,
+        chunk_data: encodeRoute()
+      });
+      enqueue('stress-nav', {
+        cmd: CMD_NAV_STEPS,
+        chunk_data: encodeNavSteps(0)
+      });
+    }
   }
 
   Pebble.addEventListener('ready', function() {

@@ -17,6 +17,7 @@ Commands:
   doctor                   Verify CLI, SDK, emulator, and helper dependencies.
   test-tooling             Run deterministic Pebble development-tool tests.
   test-protocol            Check protocol constants across specs and runtimes.
+  test-render-performance  Run fixture bearing and mixed-animation assertions.
   build                    Build the Pebble watch app.
   build-fixture            Build with emulator fixture PKJS bundled.
   build-real-fixture       Build with the local provider-map fixture bundled.
@@ -66,6 +67,8 @@ Environment:
                            Fixture-only extra delay per requested tile.
   MAPPY_FIXTURE_TILE_ANIMATION_MODE
                            Fixture startup tile animation sync: -1, 0, 1, or 2.
+  MAPPY_FIXTURE_ROUTE_POINT_COUNT
+                           Deterministic fixture route points: 3..128.
   PEBBLE_WATCH_DIR         Watch app directory.
   PEBBLE_CODEX_OUT         Screenshot output directory.
   PEBBLE_PBW               Built .pbw path.
@@ -374,6 +377,15 @@ send_debug_compass() {
     --int 50=901 60="$heading"
 }
 
+send_debug_compass_mixed() {
+  require_pebble
+  local heading
+  heading="$(debug_compass_value "$1")"
+  cd "$WATCH_DIR"
+  pebble send-app-message --emulator "$PLATFORM" --app-uuid "$(app_uuid)" \
+    --int 50=901 51=1 60="$heading"
+}
+
 send_debug_facing() {
   require_pebble
   if [[ $# -ne 1 ]]; then
@@ -446,6 +458,107 @@ send_debug_route_progress() {
     --int 50=903 60="$permille"
 }
 
+perf_summary_value() {
+  local line="$1"
+  local key="$2"
+  sed -nE "s/.*(^|[[:space:]])${key}=([0-9]+).*/\\2/p" <<<"$line"
+}
+
+test_render_performance() {
+  require_pebble
+  set_phone_mode fixture
+  export MAPPY_FIXTURE_ROUTE_POINT_COUNT=128
+  export MAPPY_FIXTURE_TILE_ANIMATION_MODE=1
+  export MAPPY_FIXTURE_TILE_DELAY_MS=0
+  export MAPPY_FIXTURE_TILE_STAGGER_MS=0
+  mkdir -p "$OUT_DIR"
+  local log_file="$OUT_DIR/render-performance.log"
+  rm -f "$log_file"
+
+  pebble kill >/dev/null 2>&1 || true
+  install_app_with_recovery
+  sleep 6
+
+  cd "$WATCH_DIR"
+  pebble logs --emulator "$PLATFORM" >"$log_file" 2>&1 &
+  local log_pid=$!
+  trap 'kill "$log_pid" >/dev/null 2>&1 || true' RETURN
+  sleep 1
+
+  send_debug_facing 0
+  sleep 3
+  # Warm both small-angle tile envelopes before the isolated measurement.
+  send_debug_compass 4
+  sleep 3
+  send_debug_compass 0
+  sleep 3
+  send_debug_compass 4
+  sleep 2
+
+  send_debug_compass_mixed 200
+  sleep 3
+
+  kill "$log_pid" >/dev/null 2>&1 || true
+  wait "$log_pid" 2>/dev/null || true
+  trap - RETURN
+
+  mapfile -t summaries < <(grep 'MAPPY_PERF' "$log_file")
+  if (( ${#summaries[@]} < 5 )); then
+    echo "Expected at least five MAPPY_PERF summaries; see $(windows_path "$log_file")" >&2
+    return 1
+  fi
+  local isolated="${summaries[${#summaries[@]}-2]}"
+  local mixed="${summaries[${#summaries[@]}-1]}"
+  local isolated_draws isolated_steps isolated_projections
+  local mixed_multi mixed_ticks mixed_draws mixed_gps mixed_tiles mixed_menu
+  local mixed_clipped mixed_errors
+  isolated_draws="$(perf_summary_value "$isolated" d)"
+  isolated_steps="$(perf_summary_value "$isolated" b)"
+  isolated_projections="$(perf_summary_value "$isolated" p)"
+  mixed_multi="$(perf_summary_value "$mixed" x)"
+  mixed_ticks="$(perf_summary_value "$mixed" t)"
+  mixed_draws="$(perf_summary_value "$mixed" d)"
+  mixed_gps="$(perf_summary_value "$mixed" g)"
+  mixed_tiles="$(perf_summary_value "$mixed" l)"
+  mixed_menu="$(perf_summary_value "$mixed" m)"
+  mixed_clipped="$(perf_summary_value "$mixed" c)"
+  mixed_errors="$(perf_summary_value "$mixed" e)"
+
+  if [[ -z "$isolated_draws" || "$isolated_draws" != "$isolated_steps" ]]; then
+    echo "Bearing redraw assertion failed: $isolated" >&2
+    return 1
+  fi
+  if [[ -z "$isolated_projections" ]] || (( isolated_projections > 1 )); then
+    echo "Bearing projection-cache assertion failed: $isolated" >&2
+    return 1
+  fi
+  if [[ -z "$mixed_multi" ]] || (( mixed_multi < 1 )); then
+    echo "Mixed scheduler assertion failed: $mixed" >&2
+    return 1
+  fi
+  if [[ -z "$mixed_gps" || -z "$mixed_tiles" || -z "$mixed_menu" ]] ||
+      (( mixed_gps < 1 || mixed_tiles < 1 || mixed_menu < 1 )); then
+    echo "Mixed source-advance assertion failed: $mixed" >&2
+    return 1
+  fi
+  if [[ -z "$mixed_ticks" || -z "$mixed_draws" ]] || (( mixed_draws < mixed_ticks )); then
+    echo "Mixed redraw assertion failed: $mixed" >&2
+    return 1
+  fi
+  if [[ -z "$mixed_clipped" ]] || (( mixed_clipped < 1 )); then
+    echo "Offscreen clipping assertion failed: $mixed" >&2
+    return 1
+  fi
+  if [[ -z "$mixed_errors" || "$mixed_errors" != "0" ]]; then
+    echo "Fixture performance errors reported: $mixed" >&2
+    return 1
+  fi
+
+  printf 'Isolated: %s\nMixed: %s\nPerformance log: %s\n' \
+    "$isolated" "$mixed" "$(windows_path "$log_file")"
+  pebble kill >/dev/null 2>&1 || true
+}
+
 main() {
   local command="${1:-}"
   if [[ -z "$command" || "$command" == "-h" || "$command" == "--help" ]]; then
@@ -466,6 +579,9 @@ main() {
       ;;
     test-protocol)
       test_protocol
+      ;;
+    test-render-performance)
+      test_render_performance
       ;;
     build-fixture)
       set_phone_mode fixture
