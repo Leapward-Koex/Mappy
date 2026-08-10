@@ -82,6 +82,32 @@ class CredentialLoadingTest(unittest.TestCase):
 
 
 class RepositoryWorkflowTest(unittest.TestCase):
+    def test_watch_reserves_appmessage_before_opportunistic_tile_cache(self) -> None:
+        main_source = (
+            ROOT / "apps" / "pebble-watch" / "src" / "c" / "main.c"
+        ).read_text(encoding="utf-8")
+
+        app_message_open = main_source.index("app_message_open(4096, 512)")
+        tile_entries = main_source.index(
+            "calloc(TILE_CACHE_SIZE, sizeof(TileCacheEntry))"
+        )
+        tile_decode_cache = main_source.index(
+            "configure_tile_geometry(DEFAULT_TILE_W, DEFAULT_TILE_H)"
+        )
+
+        self.assertLess(app_message_open, tile_entries)
+        self.assertLess(app_message_open, tile_decode_cache)
+        self.assertIn("app_message_result != APP_MSG_OK", main_source)
+
+    def test_fixture_startup_honors_phone_ready_delay(self) -> None:
+        fixture = (
+            ROOT / "tooling" / "pebble-map-mock-pkjs.js"
+        ).read_text(encoding="utf-8")
+        self.assertIn(
+            "if (!ignoreStartupReady) setTimeout(sendReadyState, phoneReadyDelayMs);",
+            fixture,
+        )
+
     def test_shell_scripts_parse_and_help_lists_supported_commands(self) -> None:
         helper = ROOT / "tooling" / "pebble-emulator-codex.sh"
         bootstrap = ROOT / "tooling" / "bootstrap-pebble-sdk-wsl.sh"

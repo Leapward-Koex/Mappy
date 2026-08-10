@@ -60,17 +60,24 @@ void load_settings(void) {
 void init(void) {
   APP_LOG(APP_LOG_LEVEL_INFO, "Mappy watch init mode=%s", MAPPY_PHONE_MODE_LABEL);
   load_settings();
+  app_message_register_inbox_received(inbox_received);
+  app_message_register_inbox_dropped(inbox_dropped);
+  app_message_register_outbox_sent(outbox_sent);
+  app_message_register_outbox_failed(outbox_failed);
+  AppMessageResult app_message_result = app_message_open(4096, 512);
+  if (app_message_result != APP_MSG_OK) {
+    APP_LOG(APP_LOG_LEVEL_ERROR, "AppMessage open failed: %d", (int)app_message_result);
+  }
+
+  // AppMessage owns fixed inbox/outbox buffers for the lifetime of the app.
+  // Reserve them before the opportunistic tile cache so navigation can always
+  // cold-start; configure_tile_geometry() reduces cache capacity if necessary.
   s_tiles = calloc(TILE_CACHE_SIZE, sizeof(TileCacheEntry));
   if (!s_tiles) {
     APP_LOG(APP_LOG_LEVEL_ERROR, "Tile cache allocation failed");
   } else if (!configure_tile_geometry(DEFAULT_TILE_W, DEFAULT_TILE_H)) {
     APP_LOG(APP_LOG_LEVEL_ERROR, "Tile decode buffer allocation failed");
   }
-  app_message_register_inbox_received(inbox_received);
-  app_message_register_inbox_dropped(inbox_dropped);
-  app_message_register_outbox_sent(outbox_sent);
-  app_message_register_outbox_failed(outbox_failed);
-  app_message_open(4096, 512);
 
   s_window = window_create();
   window_set_background_color(s_window, GColorBlack);
@@ -85,7 +92,13 @@ void init(void) {
   s_state = AppStateWaitingForPhone;
   set_bottom_text(MAPPY_WAITING_TEXT);
   APP_LOG(APP_LOG_LEVEL_INFO, "Mappy watch waiting mode=%s", MAPPY_PHONE_MODE_LABEL);
-  send_init();
+  if (app_message_result == APP_MSG_OK) {
+    send_init();
+  } else {
+    s_state = AppStateSetupRequired;
+    copy_bounded_text(s_top_text, sizeof(s_top_text), "Connection error");
+    set_bottom_text("Restart Mappy");
+  }
 }
 
 void deinit(void) {

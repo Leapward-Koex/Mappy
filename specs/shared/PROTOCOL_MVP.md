@@ -155,6 +155,12 @@ Reconnect:
 
 ## Transport Rules
 
+- On the watch, reserve the 4096-byte AppMessage inbox and 512-byte outbox
+  before allocating the opportunistic decoded-tile cache. If memory pressure
+  prevents the full cache allocation, reduce cache capacity down to its
+  specified minimum; never sacrifice AppMessage startup buffers. A failed
+  `app_message_open` is a visible connection error and must not enter the INIT
+  retry loop.
 - Use one AppMessage send in flight per logical phone worker.
 - GPS and control messages may be prioritized ahead of queued tile sends.
 - AppMessage attempts time out after two seconds. Control, route, destination,

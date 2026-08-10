@@ -660,15 +660,38 @@ test_motion_reacquire() {
   sleep 5
 
   send_debug_motion stationary-raise
-  sleep 0.3
+  # emu-accel queues samples into QEMU and returns before 25 Hz playback ends.
+  # Let the entire 55-sample negative trace finish before evaluating it.
+  sleep 2.5
   if grep -Fq 'Motion state=looking' "$log_file"; then
     echo "Stationary raise incorrectly triggered watch-look detection" >&2
     return 1
   fi
 
+  # Toggle out of face-forward mode to unsubscribe/reset the classifier, then
+  # restore the active route context for an independent positive trace.
+  cd "$WATCH_DIR"
+  pebble send-app-message --emulator "$PLATFORM" --app-uuid "$(app_uuid)" \
+    --int 50=205 60=0
+  sleep 0.3
+  send_debug_facing 0
+  sleep 0.5
+
   send_debug_motion walking-to-look &
   local motion_pid=$!
-  sleep 2.8
+  local look_ready=0
+  for _ in $(seq 1 120); do
+    if grep -Fq 'Motion state=looking' "$log_file"; then
+      look_ready=1
+      break
+    fi
+    sleep 0.05
+  done
+  if (( look_ready == 0 )); then
+    wait "$motion_pid"
+    echo "Walking trace did not produce watch-look detection; see $(windows_path "$log_file")" >&2
+    return 1
+  fi
   send_debug_compass 180
   wait "$motion_pid"
   sleep 1
