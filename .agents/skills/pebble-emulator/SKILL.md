@@ -82,6 +82,8 @@ With the fixture emulator running, use:
 button <action> <button>
 debug-facing <degrees>
 debug-compass <degrees|clear>
+debug-manual-browse <degrees>
+debug-recenter <degrees>
 debug-map-settings <width> <height>
 debug-tile [index]
 debug-route-progress <percent>

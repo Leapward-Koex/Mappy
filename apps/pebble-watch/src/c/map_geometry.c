@@ -68,12 +68,18 @@ static int32_t target_map_bearing_centi_degrees(void) {
 void update_map_after_bearing_display_change(bool was_orientation_active) {
   bool orientation_active = map_orientation_active();
   if (was_orientation_active && !orientation_active) {
+#ifdef MAPPY_WATCH_PHONE_MODE_FIXTURE
+    fixture_perf_orientation_work();
+#endif
     invalidate_orientation_tile_coverage();
     update_state_after_map_change();
     queue_visible_tiles();
     return;
   }
   if (orientation_active) {
+#ifdef MAPPY_WATCH_PHONE_MODE_FIXTURE
+    fixture_perf_orientation_work();
+#endif
     if (orientation_tile_coverage_changed()) {
       update_state_after_map_change();
       queue_visible_tiles();
@@ -480,9 +486,8 @@ bool sync_map_bearing_smoothing(bool animate) {
     return previous_display != s_map_bearing_display_centi_degrees;
   }
 
-  if (s_manual_pan) {
-    animate = false;
-  }
+  // Manual browse still smooths the facing bearing used by the location cone.
+  // active_map_bearing_centi_degrees() keeps the geographic map north-up.
   target = normalize_centi_degrees(target);
   s_map_bearing_target_centi_degrees = target;
   if (s_map_bearing_display_centi_degrees < 0 || !animate) {
@@ -514,12 +519,13 @@ bool advance_map_bearing_smoothing(void) {
   if (delta == 0) {
     return false;
   }
+  bool was_orientation_active = map_orientation_active();
   s_map_bearing_display_centi_degrees = bearing_smoothing_advance(
       s_map_bearing_display_centi_degrees,
       s_map_bearing_target_centi_degrees,
       bearing_reacquire_active());
 
-  update_map_after_bearing_display_change(true);
+  update_map_after_bearing_display_change(was_orientation_active);
   return true;
 }
 

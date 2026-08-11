@@ -155,6 +155,8 @@ class RepositoryWorkflowTest(unittest.TestCase):
             "generate-real-fixture",
             "record-fixture-animation",
             "debug-facing",
+            "debug-manual-browse",
+            "debug-recenter",
             "debug-motion",
             "debug-route-progress",
             "kill",

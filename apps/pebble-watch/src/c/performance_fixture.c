@@ -11,7 +11,10 @@ typedef struct {
   uint32_t tile_advances;
   uint32_t menu_advances;
   uint32_t multi_source_ticks;
+  uint32_t manual_browse_bearing_ticks;
+  uint32_t manual_browse_map_errors;
   uint32_t route_projection_recomputes;
+  uint32_t orientation_work;
   uint32_t route_segments_submitted;
   uint32_t route_segments_clipped;
   uint32_t map_draw_time_ms;
@@ -48,6 +51,12 @@ void fixture_perf_scheduler_tick(bool bearing_active, bool gps_active,
   if (bearing_active) {
     s_fixture_perf.bearing_advances++;
     active_sources++;
+    if (s_manual_pan) {
+      s_fixture_perf.manual_browse_bearing_ticks++;
+      if (map_orientation_active() || active_map_bearing_centi_degrees() != 0) {
+        s_fixture_perf.manual_browse_map_errors++;
+      }
+    }
   }
   if (gps_active) {
     s_fixture_perf.gps_advances++;
@@ -101,6 +110,12 @@ void fixture_perf_route_projection_recompute(void) {
   }
 }
 
+void fixture_perf_orientation_work(void) {
+  if (s_fixture_perf_active) {
+    s_fixture_perf.orientation_work++;
+  }
+}
+
 void fixture_perf_route_segment(bool submitted) {
   if (!s_fixture_perf_active) {
     return;
@@ -133,13 +148,30 @@ void fixture_perf_start_mixed_sources(void) {
   start_menu_highlight_animation(0, 1);
 }
 
+void fixture_perf_enter_manual_browse(void) {
+  complete_tile_animations();
+  complete_gps_smoothing();
+  cancel_menu_highlight_animation();
+  s_menu_mode = MenuNone;
+  s_menu_selection = 0;
+  s_manual_pan = true;
+  sync_map_bearing_smoothing(false);
+  update_state_after_map_change();
+  queue_visible_tiles();
+  update_touch_subscription();
+  refresh_motion_detection_service();
+  if (s_map_layer) {
+    layer_mark_dirty(s_map_layer);
+  }
+}
+
 void fixture_perf_maybe_emit(void) {
   if (!s_fixture_perf_active || s_visual_animation_timer ||
       visual_animations_active()) {
     return;
   }
   APP_LOG(APP_LOG_LEVEL_INFO,
-          "MAPPY_PERF e=%lu t=%lu d=%lu b=%lu B=%lu g=%lu l=%lu m=%lu x=%lu p=%lu s=%lu c=%lu q=%lu/%lu",
+          "MAPPY_PERF e=%lu t=%lu d=%lu b=%lu B=%lu g=%lu l=%lu m=%lu x=%lu u=%lu v=%lu o=%lu p=%lu c=%lu q=%lu/%lu s=%lu",
           (unsigned long)s_fixture_perf.errors,
           (unsigned long)s_fixture_perf.scheduler_ticks,
           (unsigned long)s_fixture_perf.map_draws,
@@ -149,11 +181,14 @@ void fixture_perf_maybe_emit(void) {
           (unsigned long)s_fixture_perf.tile_advances,
           (unsigned long)s_fixture_perf.menu_advances,
           (unsigned long)s_fixture_perf.multi_source_ticks,
+          (unsigned long)s_fixture_perf.manual_browse_bearing_ticks,
+          (unsigned long)s_fixture_perf.manual_browse_map_errors,
+          (unsigned long)s_fixture_perf.orientation_work,
           (unsigned long)s_fixture_perf.route_projection_recomputes,
-          (unsigned long)s_fixture_perf.route_segments_submitted,
           (unsigned long)s_fixture_perf.route_segments_clipped,
           (unsigned long)s_fixture_perf.map_draw_time_ms,
-          (unsigned long)s_fixture_perf.max_map_draw_time_ms);
+          (unsigned long)s_fixture_perf.max_map_draw_time_ms,
+          (unsigned long)s_fixture_perf.route_segments_submitted);
   s_fixture_perf_active = false;
 }
 
