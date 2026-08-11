@@ -87,7 +87,6 @@ void init(void) {
     .unload = window_unload,
   });
   window_stack_push(s_window, true);
-  start_compass_service();
 
   s_state = AppStateWaitingForPhone;
   set_bottom_text(MAPPY_WAITING_TEXT);
@@ -99,6 +98,8 @@ void init(void) {
     copy_bounded_text(s_top_text, sizeof(s_top_text), "Connection error");
     set_bottom_text("Restart Mappy");
   }
+  // Start sensor diagnostics after CMD_INIT has claimed the first outbox slot.
+  start_compass_service();
 }
 
 void deinit(void) {

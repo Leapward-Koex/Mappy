@@ -601,6 +601,7 @@ static void apply_gps_fix(int32_t world_x, int32_t world_y, int32_t zoom,
   copy_bounded_text(s_gps_provider, sizeof(s_gps_provider), provider);
   s_has_gps = true;
   s_gps_received_at = time(NULL);
+  refresh_compass_health_monitoring();
   maybe_begin_pending_route_start_reacquire();
   sync_map_bearing_smoothing(true);
   s_route_gps_stale_logged = false;
@@ -687,6 +688,7 @@ void apply_declination(DictionaryIterator *iter) {
       layer_mark_dirty(s_map_layer);
     }
   }
+  emit_compass_state_diagnostic();
 }
 
 void apply_debug_compass(DictionaryIterator *iter) {

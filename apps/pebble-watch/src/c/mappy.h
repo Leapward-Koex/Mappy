@@ -10,6 +10,7 @@
 #include <string.h>
 
 #include "bearing_smoothing.h"
+#include "compass_filter.h"
 #include "motion_detector.h"
 
 #define CMD_INIT 101
@@ -145,7 +146,9 @@
 #define TOUCH_TILE_ANIMATION_SUPPRESS_MS 900
 #define TILE_REQUEST_STALE_MS 8000
 #define TILE_REQUEST_WATCHDOG_MS 1000
-#define COMPASS_HEADING_FILTER_DEGREES 2
+#define COMPASS_HEADING_FILTER_DEGREES 5
+#define COMPASS_HEALTH_INTERVAL_MS 2000
+#define COMPASS_OUTLIER_LOG_INTERVAL_MS 30000
 #define GPS_SMOOTHING_NONE 0
 #define GPS_SMOOTHING_LOCATION 1
 #define GPS_SMOOTHING_MAP 2
@@ -530,6 +533,9 @@ int16_t scaled_length(int16_t value);
 GPoint point_from_heading(GPoint origin, int32_t heading_degrees, int16_t length);
 void start_compass_service(void);
 void stop_compass_service(void);
+void refresh_compass_health_monitoring(void);
+const char *compass_prompt_text(void);
+void emit_compass_state_diagnostic(void);
 int normalize_tile_animation_mode(int mode);
 const char *tile_invalidation_reason_label(TileInvalidationReason reason);
 void init_tile_slot_diagnostics(TileSlotDiagnostics *diag);
