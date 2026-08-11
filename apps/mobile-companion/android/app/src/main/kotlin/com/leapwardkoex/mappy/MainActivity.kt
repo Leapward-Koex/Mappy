@@ -51,6 +51,7 @@ class MainActivity : FlutterActivity() {
     private var nativeUnitsMode = DEFAULT_UNITS_MODE
     private var nativeBacklightMode = 0
     private var nativeMapOrientation = DEFAULT_MAP_ORIENTATION
+    private val watchCompassDiagnostics = WatchCompassDiagnostics()
     private var nativeTileAnimationMode = DEFAULT_TILE_ANIMATION_MODE
     private var nativeRouteGeneration = 0
     private var nativeMapSettingsGeneration = 0
@@ -1543,7 +1544,12 @@ class MainActivity : FlutterActivity() {
             "watch_detail" to watchDetail,
             "watch_detail2" to watchDetail2,
             "watch_connected" to (watchStatus["watchConnected"] == true),
-            "watch_ready" to (watchStatus["watchReady"] == true)
+            "watch_ready" to (watchStatus["watchReady"] == true),
+            "map_orientation" to orientationName(nativeMapOrientation),
+            "heading_source" to diagnosticsHeadingSource(),
+            "orientation_fallback" to diagnosticsOrientationFallback(),
+            "compass_status" to watchCompassDiagnostics.status,
+            "heading_reference" to watchCompassDiagnostics.headingReference
         ).filterValues { it != null }
         val payload = linkedMapOf(
             "event" to "diagnosticEvent",
@@ -1583,6 +1589,8 @@ class MainActivity : FlutterActivity() {
         mapOrientation: String? = null,
         headingSource: String? = null,
         orientationFallback: String? = null,
+        compassStatus: String? = null,
+        headingReference: String? = null,
         tileWidth: Int? = null,
         tileHeight: Int? = null,
         tileChunkIndex: Int? = null,
@@ -1626,6 +1634,8 @@ class MainActivity : FlutterActivity() {
             "map_orientation" to mapOrientation,
             "heading_source" to headingSource,
             "orientation_fallback" to orientationFallback,
+            "compass_status" to compassStatus,
+            "heading_reference" to headingReference,
             "tile_width" to tileWidth,
             "tile_height" to tileHeight,
             "tile_chunk_index" to tileChunkIndex,
@@ -1764,6 +1774,8 @@ class MainActivity : FlutterActivity() {
             "map_orientation" to orientationName(nativeMapOrientation),
             "heading_source" to diagnosticsHeadingSource(),
             "orientation_fallback" to diagnosticsOrientationFallback(),
+            "compass_status" to watchCompassDiagnostics.status,
+            "heading_reference" to watchCompassDiagnostics.headingReference,
             "last_error_category" to lastError.first,
             "last_error_text" to lastError.second
         ).filterValues { it != null }
@@ -1918,7 +1930,9 @@ class MainActivity : FlutterActivity() {
             "setup_state" to stringValue(event["setup_state"]).takeIf { it.isNotBlank() },
             "map_orientation" to stringValue(event["map_orientation"]).takeIf { it.isNotBlank() },
             "heading_source" to stringValue(event["heading_source"]).takeIf { it.isNotBlank() },
-            "orientation_fallback" to stringValue(event["orientation_fallback"]).takeIf { it.isNotBlank() }
+            "orientation_fallback" to stringValue(event["orientation_fallback"]).takeIf { it.isNotBlank() },
+            "compass_status" to stringValue(event["compass_status"]).takeIf { it.isNotBlank() },
+            "heading_reference" to stringValue(event["heading_reference"]).takeIf { it.isNotBlank() }
         ).filterValues { it != null }
     }
 
@@ -1985,15 +1999,11 @@ class MainActivity : FlutterActivity() {
         if (value == 1) "forward_up" else "north_up"
 
     private fun diagnosticsHeadingSource(): String {
-        return if (nativeMapOrientation == 1) {
-            "watch_compass"
-        } else {
-            "none"
-        }
+        return watchCompassDiagnostics.headingSource(nativeMapOrientation)
     }
 
     private fun diagnosticsOrientationFallback(): String? {
-        return null
+        return watchCompassDiagnostics.orientationFallback(nativeMapOrientation)
     }
 
     private fun bridgeSetupState(providerStatus: Map<String, Any?>, permission: String): String =
@@ -2141,6 +2151,7 @@ class MainActivity : FlutterActivity() {
             .orEmpty()
         val detail = "$text$detailSuffix"
         val eventName = watchLogEventName(text, category)
+        watchCompassDiagnostics.apply(eventName, detailCode, secondaryDetail)
         emitDiagnosticEvent(
             source = "watch",
             category = category,
@@ -2155,6 +2166,11 @@ class MainActivity : FlutterActivity() {
     private fun watchLogEventName(text: String, category: Int): String {
         val normalized = text.lowercase()
         return when {
+            normalized.contains("compass_calibration_started") -> "compass_calibration_started"
+            normalized.contains("compass_heading_acquired") -> "compass_heading_acquired"
+            normalized.contains("compass_heading_lost") -> "compass_heading_lost"
+            normalized.contains("compass_service_unavailable") -> "compass_service_unavailable"
+            normalized.contains("compass_outlier_rejected") -> "compass_outlier_rejected"
             normalized.contains("pinch unavailable") -> "pinch_unavailable"
             normalized.contains("touch disabled") -> "touch_disabled"
             normalized.contains("zoom clamped") -> "zoom_clamped"

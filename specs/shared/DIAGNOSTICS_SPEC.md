@@ -47,6 +47,8 @@ camera_mode: optional gps_follow | manual_browse
 auto_rotation_suspended: optional boolean
 heading_source: optional watch_compass | phone_course | non_compass_fallback | none
 orientation_fallback: optional string
+compass_status: optional unavailable | invalid | calibrating | calibrated | stale
+heading_reference: optional magnetic | true
 motion_state: optional idle | walking | raise_candidate | looking
 bearing_reacquire_reason: optional route_start | watch_look
 bearing_reacquire_active: optional boolean
@@ -80,6 +82,11 @@ Required event names:
 | `motion_walking_detected` | watch |
 | `motion_watch_look_detected` | watch |
 | `bearing_reacquire_started` | watch |
+| `compass_calibration_started` | watch |
+| `compass_heading_acquired` | watch |
+| `compass_heading_lost` | watch |
+| `compass_service_unavailable` | watch |
+| `compass_outlier_rejected` | watch |
 | `tile_request_received` | tile_worker |
 | `tile_response_sent` | tile_worker |
 | `tile_response_dropped` | tile_worker |

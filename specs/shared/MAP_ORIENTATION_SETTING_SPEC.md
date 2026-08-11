@@ -100,8 +100,20 @@ clockwise from true north:
 
 Invalid or stale heading rules:
 
-- `CompassStatusDataInvalid` or an uninitialized compass heading means the
-  production facing bearing is unavailable.
+- `CompassStatusUnavailable`, `CompassStatusDataInvalid`, or an uninitialized
+  compass heading means the production facing bearing is unavailable.
+- On startup, set the Pebble heading callback threshold to 5 degrees, subscribe,
+  and immediately call `compass_service_peek()`.
+- A calibrated sample is usable immediately. Calibrating data becomes usable
+  only after at least three consistent samples spanning 250 ms with no more
+  than 20 degrees of circular spread.
+- Ignore accepted-heading changes of at most 3 degrees. A change greater than
+  60 degrees is provisional until another sample at least 200 ms later is
+  within 15 degrees of it; reject an unconfirmed candidate after 750 ms.
+- While GPS state makes the watch compass relevant, peek every two seconds and
+  invalidate the heading after five seconds without a callback or successful
+  peek. Pause this monitor while the app is obscured and peek immediately when
+  focus returns.
 - For non-compass fallback paths, `CMD_GPS.button_id = -1` means the stand-in
   heading is unavailable.
 - A fallback heading must not be used after the local heading freshness timeout
@@ -112,6 +124,8 @@ Invalid or stale heading rules:
   bearing.
 - Phone GPS/course heading must not drive production map orientation on
   `PBL_COMPASS` builds.
+- Until a declination correction is received, diagnostics and exports identify
+  the watch bearing reference as magnetic rather than true north.
 
 This section defines map rotation and intentionally shares the same production
 heading source as the current-location view cone, as specified in

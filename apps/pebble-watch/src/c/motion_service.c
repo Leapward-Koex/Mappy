@@ -10,6 +10,9 @@
 
 static MotionDetector s_motion_detector;
 static bool s_motion_service_subscribed;
+#ifdef MAPPY_WATCH_PHONE_MODE_FIXTURE
+static uint32_t s_fixture_motion_samples_received;
+#endif
 
 static bool s_bearing_reacquire_running;
 static BearingReacquireReason s_bearing_reacquire_reason;
@@ -145,6 +148,11 @@ static void motion_data_handler(AccelData *data, uint32_t num_samples) {
       begin_bearing_reacquire(BearingReacquireWatchLook);
     }
   }
+#ifdef MAPPY_WATCH_PHONE_MODE_FIXTURE
+  s_fixture_motion_samples_received += num_samples;
+  APP_LOG(APP_LOG_LEVEL_INFO, "MOTION_FIXTURE samples=%lu",
+          (unsigned long)s_fixture_motion_samples_received);
+#endif
 }
 
 void refresh_motion_detection_service(void) {
@@ -158,6 +166,9 @@ void refresh_motion_detection_service(void) {
   bool should_subscribe = motion_detection_should_run();
   if (should_subscribe && !s_motion_service_subscribed) {
     motion_detector_reset(&s_motion_detector);
+#ifdef MAPPY_WATCH_PHONE_MODE_FIXTURE
+    s_fixture_motion_samples_received = 0;
+#endif
     accel_data_service_subscribe(MOTION_SAMPLES_PER_UPDATE,
                                  motion_data_handler);
     if (accel_service_set_sampling_rate(ACCEL_SAMPLING_25HZ) != 0) {
