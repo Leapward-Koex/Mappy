@@ -165,6 +165,35 @@ void fixture_perf_enter_manual_browse(void) {
   }
 }
 
+void fixture_set_location_screen_position(int32_t screen_x, int32_t screen_y) {
+  if (!s_has_gps) {
+    return;
+  }
+
+  complete_tile_animations();
+  complete_gps_smoothing();
+  cancel_menu_highlight_animation();
+  s_menu_mode = MenuNone;
+  s_menu_selection = 0;
+  s_manual_pan = true;
+
+  int32_t gps_x = scale_world_to_zoom(s_gps_world_x, s_gps_zoom,
+                                      s_viewport_zoom);
+  int32_t gps_y = scale_world_to_zoom(s_gps_world_y, s_gps_zoom,
+                                      s_viewport_zoom);
+  s_viewport_x = gps_x - (screen_x - s_screen_bounds.size.w / 2);
+  s_viewport_y = gps_y - (screen_y - s_screen_bounds.size.h / 2);
+
+  sync_map_bearing_smoothing(false);
+  update_state_after_map_change();
+  queue_visible_tiles();
+  update_touch_subscription();
+  refresh_motion_detection_service();
+  if (s_map_layer) {
+    layer_mark_dirty(s_map_layer);
+  }
+}
+
 void fixture_perf_maybe_emit(void) {
   if (!s_fixture_perf_active || s_visual_animation_timer ||
       visual_animations_active()) {

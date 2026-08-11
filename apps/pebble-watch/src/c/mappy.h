@@ -170,6 +170,10 @@
 #define LOCATION_CONE_OUTLINE_SEGMENTS 8
 #define LOCATION_CONE_OUTLINE_HALO_WIDTH 4
 #define LOCATION_CONE_OUTLINE_WIDTH 2
+#define LOCATION_EDGE_LENGTH_DIVISOR 3
+#define LOCATION_EDGE_GAP 3
+#define LOCATION_EDGE_INSET \
+  (LOCATION_EDGE_GAP + LOCATION_CONE_OUTLINE_HALO_WIDTH / 2)
 
 #ifdef MAPPY_WATCH_PHONE_MODE_FIXTURE
 #define MAPPY_PHONE_MODE_LABEL "fixture"
@@ -729,6 +733,7 @@ void fixture_perf_orientation_work(void);
 void fixture_perf_route_segment(bool submitted);
 void fixture_perf_start_mixed_sources(void);
 void fixture_perf_enter_manual_browse(void);
+void fixture_set_location_screen_position(int32_t screen_x, int32_t screen_y);
 void fixture_perf_maybe_emit(void);
 #endif
 void window_load(Window *window);

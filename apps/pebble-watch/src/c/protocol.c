@@ -704,6 +704,13 @@ void apply_debug_compass(DictionaryIterator *iter) {
     fixture_perf_enter_manual_browse();
   } else if (fixture_camera_control == 2) {
     recenter_viewport();
+  } else if (fixture_camera_control == 3) {
+    Tuple *screen_x_tuple = dict_find(iter, MESSAGE_KEY_world_x);
+    Tuple *screen_y_tuple = dict_find(iter, MESSAGE_KEY_world_y);
+    if (screen_x_tuple && screen_y_tuple) {
+      fixture_set_location_screen_position(screen_x_tuple->value->int32,
+                                           screen_y_tuple->value->int32);
+    }
   }
 #endif
   bool was_orientation_active = map_orientation_active();

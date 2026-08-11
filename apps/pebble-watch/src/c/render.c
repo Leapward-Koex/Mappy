@@ -1,4 +1,5 @@
 #include "mappy.h"
+#include "location_edge_geometry.h"
 
 // Map, route, location, status chrome, and menu rendering.
 
@@ -1299,6 +1300,37 @@ void draw_current_location_cone(GContext *ctx, GPoint point, int32_t display_hea
   graphics_context_set_stroke_width(ctx, 1);
 }
 
+static void draw_location_edge_path_layer(GContext *ctx,
+                                          const LocationEdgePath *path,
+                                          GColor color, uint8_t width) {
+  graphics_context_set_stroke_color(ctx, color);
+  graphics_context_set_stroke_width(ctx, width);
+  graphics_context_set_fill_color(ctx, color);
+
+  for (uint8_t i = 1; i < path->point_count; i++) {
+    LocationEdgePoint previous = path->points[i - 1];
+    LocationEdgePoint next = path->points[i];
+    graphics_draw_line(ctx, GPoint(previous.x, previous.y),
+                       GPoint(next.x, next.y));
+  }
+
+  int16_t radius = width / 2;
+  for (uint8_t i = 0; i < path->point_count; i++) {
+    graphics_fill_circle(ctx, GPoint(path->points[i].x, path->points[i].y),
+                         radius);
+  }
+}
+
+static void draw_current_location_edge(GContext *ctx,
+                                       const LocationEdgePath *path) {
+  draw_location_edge_path_layer(ctx, path, GColorWhite,
+                                LOCATION_CONE_OUTLINE_HALO_WIDTH);
+  draw_location_edge_path_layer(ctx, path,
+                                GColorFromHEX(LOCATION_BLUE_HEX),
+                                LOCATION_CONE_OUTLINE_WIDTH);
+  graphics_context_set_stroke_width(ctx, 1);
+}
+
 void draw_current_location(GContext *ctx,
                            const MapRenderTransform *transform) {
   if (!s_has_gps) {
@@ -1307,6 +1339,15 @@ void draw_current_location(GContext *ctx,
 
   GPoint point = map_transform_point(transform, display_gps_world_x(),
                                      display_gps_world_y(), s_gps_zoom);
+  LocationEdgePath edge_path;
+  if (location_edge_build_path(
+          point.x, point.y, s_screen_bounds.size.w, s_screen_bounds.size.h,
+          LOCATION_HALO_RADIUS, LOCATION_EDGE_INSET,
+          s_screen_bounds.size.w / LOCATION_EDGE_LENGTH_DIVISOR, &edge_path)) {
+    draw_current_location_edge(ctx, &edge_path);
+    return;
+  }
+
   int32_t facing_heading;
   if (active_facing_heading_degrees(&facing_heading)) {
     int32_t display_heading = normalize_degrees(

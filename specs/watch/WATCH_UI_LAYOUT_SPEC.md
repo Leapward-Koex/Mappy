@@ -111,6 +111,10 @@ Current-location puck and view cone:
   current-location puck/cone smoothly to the new fix.
 - Movements larger than the adaptive travel-mode and elapsed-time threshold in
   `../shared/MAP_ORIENTATION_SETTING_SPEC.md` snap with no smoothing.
+- Once the circular white puck halo is fully outside the display, replace the
+  puck and cone with the clamped, rounded perimeter line defined by
+  `CURRENT_LOCATION_VIEW_CONE_SPEC.md`. The line remains eligible outside
+  manual browse and follows every viewport redraw.
 
 Heading indicator:
 
@@ -265,6 +269,9 @@ Touch-capable map state:
 - Touch panning must not resize or reposition text, buttons, or modal/menu
   chrome. Only viewport-dependent map, route, marker, and destination projection
   changes.
+- When panning carries the complete current-location halo off-screen, its edge
+  line must track the projected location smoothly and wrap around corners
+  without moving anchored chrome.
 - While manually panned away from GPS-follow, avoid transient `pan`/`panning`
   status text in the bottom band. Recenter remains available through the compact
   actions menu without covering the current instruction text.
@@ -326,6 +333,8 @@ Required screenshots on `emery`:
   tile coverage.
 - Manual-browse map after panning away from direction-up GPS-follow, showing
   north-up content and a compact recenter path.
+- Current location beyond each screen edge, near a corner, and beyond each exact
+  corner, including the wrapped 90-degree edge-line geometry.
 - Saved-location menu.
 - Route loading.
 - Active route with instruction.
@@ -338,6 +347,9 @@ Pixel/layout checks:
 - Screen is nonblank.
 - Top and bottom text stays within bands.
 - Current marker is visible.
+- A fully off-screen current marker is replaced by the blue/white edge line at
+  the clamped projected position, with a 3 px clear gap outside its white
+  outline.
 - Route line is visible when route data exists.
 - No menu text overlaps adjacent rows.
 - Missing tiles do not produce full-screen blank output when other valid tiles
@@ -356,12 +368,17 @@ Unit tests:
   GPS, destination, or nav-step state.
 - Invalid heading hides the current-location view cone and leaves a neutral
   blue puck.
+- Edge-indicator geometry covers halo intersection, four sides, four corners,
+  fixed perimeter length, runtime bounds, and incremental movement.
 - Zero-point route clears active route display state.
 
 Emulator tests:
 
 - Build/install on `emery`.
 - Capture screenshots for required states.
+- Use deterministic fixture screen positions to capture straight-edge,
+  near-corner, exact-corner, and recentered current-location states in day and
+  night themes.
 - Replay mock phone messages for GPS, tiles, destinations, route, nav steps, and
   errors.
 - Verify 5x5 tile requests cover the target viewport.
@@ -377,3 +394,6 @@ Emulator tests:
 - Destination and travel menus fit on the target screen.
 - Route, nav-step, no-route, and error states draw without text overlap.
 - UI code derives its geometry at runtime and does not assume a 144x168 screen.
+- A fully off-screen current-location halo produces the specified rounded edge
+  line, including a connected 90-degree bend when its centered length crosses a
+  corner.

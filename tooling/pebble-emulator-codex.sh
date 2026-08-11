@@ -51,6 +51,8 @@ Commands:
                            Enable face-forward orientation, then inject a debug compass heading.
   debug-manual-browse <degrees>
                            Enter fixture manual browse at the supplied heading.
+  debug-location-position <screen-x> <screen-y> [degrees]
+                           Project fixture GPS at a deterministic screen point.
   debug-recenter <degrees> Recenter the fixture and restore face-forward rotation.
   debug-map-settings <width> <height>
                             Send emulator map tile geometry settings to the watch.
@@ -293,6 +295,7 @@ test_tooling() {
   "$(pebble_tool_python)" "$ROOT_DIR/tooling/test-pebble-development.py"
   test_motion_host
   test_tile_cache_host
+  test_location_edge_host
 }
 
 test_protocol() {
@@ -332,6 +335,24 @@ test_tile_cache_host() {
     "$ROOT_DIR/tooling/test-tile-storage.c" \
     "$WATCH_DIR/src/c/tile_codec.c" \
     "$WATCH_DIR/src/c/tile_storage.c" \
+    -o "$output"
+  "$output"
+  rm -f "$output"
+  trap - RETURN
+}
+
+test_location_edge_host() {
+  local compiler="${CC:-cc}"
+  if ! command -v "$compiler" >/dev/null 2>&1; then
+    echo "C compiler was not found: $compiler" >&2
+    return 127
+  fi
+  local output
+  output="$(mktemp "${TMPDIR:-/tmp}/mappy-location-edge-tests.XXXXXX")"
+  trap 'rm -f "$output"' RETURN
+  "$compiler" -std=c99 -Wall -Wextra -Werror \
+    "$ROOT_DIR/tooling/test-location-edge-geometry.c" \
+    "$WATCH_DIR/src/c/location_edge_geometry.c" \
     -o "$output"
   "$output"
   rm -f "$output"
@@ -453,6 +474,20 @@ send_debug_compass_manual_browse() {
   cd "$WATCH_DIR"
   pebble send-app-message --emulator "$PLATFORM" --app-uuid "$(app_uuid)" \
     --int 50=901 52=1 60="$heading"
+}
+
+send_debug_location_position() {
+  require_pebble
+  if [[ $# -lt 2 || $# -gt 3 || ! "$1" =~ ^-?[0-9]+$ ||
+        ! "$2" =~ ^-?[0-9]+$ ]]; then
+    echo "debug-location-position requires integer screen-x screen-y and optional degrees" >&2
+    exit 2
+  fi
+  local heading
+  heading="$(debug_compass_value "${3:-35}")"
+  cd "$WATCH_DIR"
+  pebble send-app-message --emulator "$PLATFORM" --app-uuid "$(app_uuid)" \
+    --int 50=901 52=3 60="$heading" 63="$1" 64="$2"
 }
 
 send_debug_compass_recenter() {
@@ -966,6 +1001,9 @@ main() {
       ;;
     debug-manual-browse)
       send_debug_compass_manual_browse "$@"
+      ;;
+    debug-location-position)
+      send_debug_location_position "$@"
       ;;
     debug-recenter)
       send_debug_compass_recenter "$@"
