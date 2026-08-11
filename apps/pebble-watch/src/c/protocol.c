@@ -601,7 +601,6 @@ static void apply_gps_fix(int32_t world_x, int32_t world_y, int32_t zoom,
   copy_bounded_text(s_gps_provider, sizeof(s_gps_provider), provider);
   s_has_gps = true;
   s_gps_received_at = time(NULL);
-  refresh_compass_health_monitoring();
   maybe_begin_pending_route_start_reacquire();
   sync_map_bearing_smoothing(true);
   s_route_gps_stale_logged = false;
@@ -688,7 +687,6 @@ void apply_declination(DictionaryIterator *iter) {
       layer_mark_dirty(s_map_layer);
     }
   }
-  emit_compass_state_diagnostic();
 }
 
 void apply_debug_compass(DictionaryIterator *iter) {
@@ -779,7 +777,8 @@ void apply_debug_tile(DictionaryIterator *iter) {
                                                               origin.world_y,
                                                               origin.zoom,
                                                               &slot_diag);
-  if (!entry || !entry->decoded) {
+  if (!entry || !reserve_tile_storage(entry, (uint16_t)s_tile_bytes,
+                                      TileStoragePacked)) {
     APP_LOG(APP_LOG_LEVEL_WARNING,
             "Debug tile unavailable index=%d originCount=%d slot=%s",
             requested_index, origin_count, slot_diag.reason);
@@ -794,14 +793,23 @@ void apply_debug_tile(DictionaryIterator *iter) {
       if (px + 1 >= s_tile_width) {
         high = low;
       }
-      entry->decoded[pixel_index / 2] = (uint8_t)(low | (high << 4));
+      s_tile_decode_scratch[pixel_index / 2] =
+          (uint8_t)(low | (high << 4));
     }
   }
 
   entry->world_x = origin.world_x;
   entry->world_y = origin.world_y;
   entry->zoom = origin.zoom;
+  uint8_t *stored = tile_storage_mutable_data(&s_tile_storage_arena,
+                                              &entry->storage);
+  if (!stored) {
+    release_tile_storage(entry);
+    return;
+  }
+  memcpy(stored, s_tile_decode_scratch, s_tile_bytes);
   entry->valid = true;
+  entry->storage_suppressed = false;
   clear_tile_pending(entry);
   entry->last_used = ++s_access_counter;
   start_tile_animation(entry, true);

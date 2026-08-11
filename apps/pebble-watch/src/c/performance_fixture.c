@@ -55,7 +55,6 @@ void fixture_perf_scheduler_tick(bool bearing_active, bool gps_active,
       s_fixture_perf.manual_browse_bearing_ticks++;
       if (map_orientation_active() || active_map_bearing_centi_degrees() != 0) {
         s_fixture_perf.manual_browse_map_errors++;
-        s_fixture_perf.errors++;
       }
     }
   }
@@ -172,7 +171,7 @@ void fixture_perf_maybe_emit(void) {
     return;
   }
   APP_LOG(APP_LOG_LEVEL_INFO,
-          "MAPPY_PERF e=%lu t=%lu d=%lu b=%lu B=%lu g=%lu l=%lu m=%lu x=%lu u=%lu v=%lu p=%lu o=%lu c=%lu q=%lu/%lu s=%lu",
+          "MAPPY_PERF e=%lu t=%lu d=%lu b=%lu B=%lu g=%lu l=%lu m=%lu x=%lu u=%lu v=%lu o=%lu p=%lu c=%lu q=%lu/%lu s=%lu",
           (unsigned long)s_fixture_perf.errors,
           (unsigned long)s_fixture_perf.scheduler_ticks,
           (unsigned long)s_fixture_perf.map_draws,
@@ -184,8 +183,8 @@ void fixture_perf_maybe_emit(void) {
           (unsigned long)s_fixture_perf.multi_source_ticks,
           (unsigned long)s_fixture_perf.manual_browse_bearing_ticks,
           (unsigned long)s_fixture_perf.manual_browse_map_errors,
-          (unsigned long)s_fixture_perf.route_projection_recomputes,
           (unsigned long)s_fixture_perf.orientation_work,
+          (unsigned long)s_fixture_perf.route_projection_recomputes,
           (unsigned long)s_fixture_perf.route_segments_clipped,
           (unsigned long)s_fixture_perf.map_draw_time_ms,
           (unsigned long)s_fixture_perf.max_map_draw_time_ms,

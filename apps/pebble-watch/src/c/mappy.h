@@ -10,8 +10,9 @@
 #include <string.h>
 
 #include "bearing_smoothing.h"
-#include "compass_filter.h"
 #include "motion_detector.h"
+#include "tile_codec.h"
+#include "tile_storage.h"
 
 #define CMD_INIT 101
 #define CMD_ERROR_STATE 102
@@ -78,8 +79,7 @@
 #define GRID_COLS 7
 #define GRID_ROWS 6
 #define TILE_CACHE_SIZE (GRID_COLS * GRID_ROWS)
-#define TILE_DECODE_CACHE_BUDGET_BYTES (72 * 1024)
-#define MIN_TILE_CACHE_SIZE 8
+#define TILE_STORAGE_ARENA_BYTES (32 * 1024)
 #define MAX_RLE_BYTES MAX_TILE_PIXELS
 #define MAX_ROUTE_POINTS 128
 #define MAX_INSTRUCTION_BYTES 47
@@ -146,9 +146,7 @@
 #define TOUCH_TILE_ANIMATION_SUPPRESS_MS 900
 #define TILE_REQUEST_STALE_MS 8000
 #define TILE_REQUEST_WATCHDOG_MS 1000
-#define COMPASS_HEADING_FILTER_DEGREES 5
-#define COMPASS_HEALTH_INTERVAL_MS 2000
-#define COMPASS_OUTLIER_LOG_INTERVAL_MS 30000
+#define COMPASS_HEADING_FILTER_DEGREES 2
 #define GPS_SMOOTHING_NONE 0
 #define GPS_SMOOTHING_LOCATION 1
 #define GPS_SMOOTHING_MAP 2
@@ -206,7 +204,9 @@ typedef struct {
   time_t animation_started_s;
   uint16_t animation_started_ms;
   uint32_t last_used;
-  uint8_t *decoded;
+  TileStorageRef storage;
+  uint16_t encoded_length;
+  bool storage_suppressed;
 } TileCacheEntry;
 
 typedef struct {
@@ -300,7 +300,9 @@ typedef enum {
 extern Window *s_window;
 extern Layer *s_map_layer;
 extern TileCacheEntry *s_tiles;
-extern uint8_t *s_tile_decode_buffer;
+extern uint8_t *s_tile_storage_bytes;
+extern uint8_t *s_tile_decode_scratch;
+extern TileStorageArena s_tile_storage_arena;
 extern int s_tile_cache_size;
 extern TileRequest s_request_queue[TILE_CACHE_SIZE];
 extern int s_request_count;
@@ -426,8 +428,8 @@ extern int32_t s_tile_chunk_received;
 extern int32_t s_tile_chunk_next_index;
 extern int32_t s_tile_chunk_request_id;
 extern bool s_tile_chunk_active;
-extern uint8_t *s_tile_chunk_buffer;
-extern int32_t s_tile_chunk_buffer_size;
+extern bool s_tile_chunk_store_packed;
+extern TileRleStreamDecoder s_tile_chunk_decoder;
 extern int s_selected_slot;
 extern int s_pending_route_slot;
 extern int s_active_route_slot;
@@ -533,19 +535,13 @@ int16_t scaled_length(int16_t value);
 GPoint point_from_heading(GPoint origin, int32_t heading_degrees, int16_t length);
 void start_compass_service(void);
 void stop_compass_service(void);
-void refresh_compass_health_monitoring(void);
-const char *compass_prompt_text(void);
-void emit_compass_state_diagnostic(void);
 int normalize_tile_animation_mode(int mode);
 const char *tile_invalidation_reason_label(TileInvalidationReason reason);
 void init_tile_slot_diagnostics(TileSlotDiagnostics *diag);
 int ceil_div_i32(int value, int divisor);
 bool is_supported_tile_geometry(int width, int height);
 int active_tile_cache_size(void);
-int tile_cache_size_for_bytes(int tile_bytes);
 void reset_tile_chunk_assembly(void);
-bool ensure_tile_chunk_buffer(int32_t required_bytes);
-void assign_tile_decode_buffers(void);
 bool configure_tile_geometry(int width, int height);
 void mark_tile_pending(TileCacheEntry *entry);
 void clear_tile_pending(TileCacheEntry *entry);
@@ -578,11 +574,19 @@ void start_tile_animation(TileCacheEntry *entry, bool was_pending);
 TileCacheEntry *allocate_tile_slot_with_diagnostics(int32_t world_x, int32_t world_y,
                                                            int8_t zoom,
                                                            TileSlotDiagnostics *diag);
+void release_tile_storage(TileCacheEntry *entry);
+bool reserve_tile_storage(TileCacheEntry *entry, uint16_t length,
+                          TileStorageFormat format);
 int valid_visible_tile_count(void);
 bool visible_grid_has_missing_tiles(void);
 void queue_visible_tiles(void);
 void send_next_tile_request(void);
 bool decode_tile_rle(const uint8_t *encoded, uint16_t encoded_len, uint8_t *decoded);
+bool decode_cached_tile(const TileCacheEntry *entry, uint8_t *decoded);
+bool sample_cached_tile_palette_index(const TileCacheEntry *entry, int local_x,
+                                      int local_y, uint8_t *palette_index);
+bool decode_cached_tile_row(const TileCacheEntry *entry, int row,
+                            uint8_t *packed_row, size_t packed_row_bytes);
 void apply_tile(DictionaryIterator *iter);
 void apply_theme(DictionaryIterator *iter);
 void apply_map_settings(DictionaryIterator *iter);
@@ -688,7 +692,8 @@ int32_t tile_zoomed_local_coord_q8(int local_px, int tile_pixels, uint16_t scale
 bool draw_tiles_framebuffer_fast(GContext *ctx, const GColor *palette,
                                  TileCacheEntry **entries, int entry_count,
                                  uint8_t background_argb);
-void draw_tile_entry_slow(GContext *ctx, TileCacheEntry *entry, const GColor *palette);
+void draw_tile_entry_slow(GContext *ctx, TileCacheEntry *entry,
+                          const uint8_t *decoded, const GColor *palette);
 void draw_tiles(GContext *ctx, GColor background, bool fill_background);
 void draw_route(GContext *ctx, const MapRenderTransform *transform);
 void draw_destination_marker(GContext *ctx, const MapRenderTransform *transform);
