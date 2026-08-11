@@ -18,8 +18,6 @@ Commands:
   test-tooling             Run deterministic Pebble development-tool tests.
   test-protocol            Check protocol constants across specs and runtimes.
   test-motion-host         Run allocation-free motion and bearing host tests.
-  test-compass-host        Run portable compass filter host tests.
-  test-compass-emulator    Exercise native CompassService states on Emery.
   test-render-performance  Run fixture bearing and mixed-animation assertions.
   test-motion-reacquire    Replay wrist motion and assert fast bearing behavior.
   build                    Build the Pebble watch app.
@@ -47,15 +45,9 @@ Commands:
   generate-real-fixture    Generate ignored provider-map fixture files using the
                            Pebble Tool Python environment.
   debug-compass <degrees|clear>
-                           Bypass CompassService and inject a render-test heading.
+                           Inject a watch-side compass heading for emulator rotation tests.
   debug-facing <degrees|clear>
                            Enable face-forward orientation, then inject a debug compass heading.
-  debug-manual-browse <degrees>
-                           Enter fixture manual browse at the supplied heading.
-  debug-recenter <degrees> Recenter the fixture and restore face-forward rotation.
-  debug-facing-setting     Enable face-forward without overriding CompassService.
-  native-compass <degrees> <invalid|calibrating|calibrated>
-                           Drive the emulator's production CompassService path.
   debug-map-settings <width> <height>
                             Send emulator map tile geometry settings to the watch.
   debug-tile [index]       Synthesize a decoded visible tile on the watch.
@@ -296,7 +288,6 @@ test_tooling() {
   require_pebble
   "$(pebble_tool_python)" "$ROOT_DIR/tooling/test-pebble-development.py"
   test_motion_host
-  test_compass_host
 }
 
 test_protocol() {
@@ -316,25 +307,6 @@ test_motion_host() {
     "$ROOT_DIR/tooling/test-motion-detector.c" \
     "$WATCH_DIR/src/c/motion_detector.c" \
     "$WATCH_DIR/src/c/bearing_smoothing.c" \
-    -o "$output"
-  cd "$ROOT_DIR"
-  "$output"
-  rm -f "$output"
-  trap - RETURN
-}
-
-test_compass_host() {
-  local compiler="${CC:-cc}"
-  if ! command -v "$compiler" >/dev/null 2>&1; then
-    echo "C compiler was not found: $compiler" >&2
-    return 127
-  fi
-  local output
-  output="$(mktemp "${TMPDIR:-/tmp}/mappy-compass-tests.XXXXXX")"
-  trap 'rm -f "$output"' RETURN
-  "$compiler" -std=c99 -Wall -Wextra -Werror \
-    "$ROOT_DIR/tooling/test-compass-filter.c" \
-    "$WATCH_DIR/src/c/compass_filter.c" \
     -o "$output"
   cd "$ROOT_DIR"
   "$output"
@@ -446,24 +418,6 @@ send_debug_compass_mixed() {
     --int 50=901 51=1 60="$heading"
 }
 
-send_debug_compass_manual_browse() {
-  require_pebble
-  local heading
-  heading="$(debug_compass_value "$1")"
-  cd "$WATCH_DIR"
-  pebble send-app-message --emulator "$PLATFORM" --app-uuid "$(app_uuid)" \
-    --int 50=901 52=1 60="$heading"
-}
-
-send_debug_compass_recenter() {
-  require_pebble
-  local heading
-  heading="$(debug_compass_value "$1")"
-  cd "$WATCH_DIR"
-  pebble send-app-message --emulator "$PLATFORM" --app-uuid "$(app_uuid)" \
-    --int 50=901 52=2 60="$heading"
-}
-
 send_debug_facing() {
   require_pebble
   if [[ $# -ne 1 ]]; then
@@ -475,44 +429,6 @@ send_debug_facing() {
     --int 50=205 60=1
   sleep 0.15
   send_debug_compass "$1"
-}
-
-send_debug_facing_setting() {
-  require_pebble
-  cd "$WATCH_DIR"
-  pebble send-app-message --emulator "$PLATFORM" --app-uuid "$(app_uuid)" \
-    --int 50=205 60=1
-}
-
-send_native_compass() {
-  require_pebble
-  if [[ $# -ne 2 ]]; then
-    echo "native-compass requires degrees and invalid|calibrating|calibrated" >&2
-    exit 2
-  fi
-  local heading
-  heading="$(debug_compass_value "$1")"
-  if [[ "$heading" == "-1" ]]; then
-    echo "native-compass heading must be 0..359" >&2
-    exit 2
-  fi
-  local status_flag
-  case "$2" in
-    invalid|uncalibrated)
-      status_flag="--uncalibrated"
-      ;;
-    calibrating)
-      status_flag="--calibrating"
-      ;;
-    calibrated)
-      status_flag="--calibrated"
-      ;;
-    *)
-      echo "native-compass status must be invalid, calibrating, or calibrated" >&2
-      exit 2
-      ;;
-  esac
-  pebble emu-compass --emulator "$PLATFORM" --heading "$heading" "$status_flag"
 }
 
 send_debug_map_settings() {
@@ -597,28 +513,6 @@ send_debug_motion() {
   pebble emu-accel --emulator "$PLATFORM" custom "$fixture_path"
 }
 
-motion_fixture_sample_count() {
-  local log_file="$1"
-  local count
-  count="$(grep -o 'MOTION_FIXTURE samples=[0-9]*' "$log_file" 2>/dev/null |
-    tail -n 1 | sed 's/.*=//' || true)"
-  printf '%s' "${count:-0}"
-}
-
-wait_for_motion_fixture_samples() {
-  local expected="$1"
-  local log_file="$2"
-  for _ in $(seq 1 160); do
-    local received
-    received="$(motion_fixture_sample_count "$log_file")"
-    if (( received >= expected )); then
-      return 0
-    fi
-    sleep 0.05
-  done
-  return 1
-}
-
 perf_summary_value() {
   local line="$1"
   local key="$2"
@@ -659,39 +553,20 @@ test_render_performance() {
   send_debug_compass_mixed 200
   sleep 3
 
-  send_debug_compass_manual_browse 200
-  sleep 2
-  send_debug_compass 20
-  sleep 3
-
-  send_debug_compass_recenter 20
-  sleep 2
-  send_debug_compass 4
-  sleep 3
-
-  send_debug_compass clear
-  sleep 1
-
   kill "$log_pid" >/dev/null 2>&1 || true
   wait "$log_pid" 2>/dev/null || true
   trap - RETURN
 
   mapfile -t summaries < <(grep 'MAPPY_PERF' "$log_file")
-  if (( ${#summaries[@]} < 7 )); then
-    echo "Expected at least seven MAPPY_PERF summaries; see $(windows_path "$log_file")" >&2
+  if (( ${#summaries[@]} < 5 )); then
+    echo "Expected at least five MAPPY_PERF summaries; see $(windows_path "$log_file")" >&2
     return 1
   fi
-  local isolated="${summaries[${#summaries[@]}-4]}"
-  local mixed="${summaries[${#summaries[@]}-3]}"
-  local manual="${summaries[${#summaries[@]}-2]}"
-  local recentered="${summaries[${#summaries[@]}-1]}"
+  local isolated="${summaries[${#summaries[@]}-2]}"
+  local mixed="${summaries[${#summaries[@]}-1]}"
   local isolated_draws isolated_steps isolated_projections
   local mixed_multi mixed_ticks mixed_draws mixed_gps mixed_tiles mixed_menu
   local mixed_clipped mixed_errors
-  local manual_ticks manual_draws manual_steps manual_advances manual_browse
-  local manual_map_errors manual_projections manual_orientation_work manual_errors
-  local recentered_ticks recentered_steps recentered_browse
-  local recentered_orientation_work recentered_errors
   isolated_draws="$(perf_summary_value "$isolated" d)"
   isolated_steps="$(perf_summary_value "$isolated" b)"
   isolated_projections="$(perf_summary_value "$isolated" p)"
@@ -703,20 +578,6 @@ test_render_performance() {
   mixed_menu="$(perf_summary_value "$mixed" m)"
   mixed_clipped="$(perf_summary_value "$mixed" c)"
   mixed_errors="$(perf_summary_value "$mixed" e)"
-  manual_ticks="$(perf_summary_value "$manual" t)"
-  manual_draws="$(perf_summary_value "$manual" d)"
-  manual_steps="$(perf_summary_value "$manual" b)"
-  manual_advances="$(perf_summary_value "$manual" B)"
-  manual_browse="$(perf_summary_value "$manual" u)"
-  manual_map_errors="$(perf_summary_value "$manual" v)"
-  manual_projections="$(perf_summary_value "$manual" p)"
-  manual_orientation_work="$(perf_summary_value "$manual" o)"
-  manual_errors="$(perf_summary_value "$manual" e)"
-  recentered_ticks="$(perf_summary_value "$recentered" t)"
-  recentered_steps="$(perf_summary_value "$recentered" b)"
-  recentered_browse="$(perf_summary_value "$recentered" u)"
-  recentered_orientation_work="$(perf_summary_value "$recentered" o)"
-  recentered_errors="$(perf_summary_value "$recentered" e)"
 
   if [[ -z "$isolated_draws" || "$isolated_draws" != "$isolated_steps" ]]; then
     echo "Bearing redraw assertion failed: $isolated" >&2
@@ -748,46 +609,8 @@ test_render_performance() {
     return 1
   fi
 
-  if [[ -z "$manual_ticks" || -z "$manual_draws" || -z "$manual_steps" ||
-        -z "$manual_advances" || -z "$manual_browse" ]] ||
-      (( manual_ticks < 2 || manual_draws != manual_steps ||
-         manual_advances != manual_steps || manual_browse != manual_steps )); then
-    echo "Manual-browse bearing animation assertion failed: $manual" >&2
-    return 1
-  fi
-  if [[ -z "$manual_projections" || "$manual_projections" != "0" ||
-        -z "$manual_orientation_work" || "$manual_orientation_work" != "0" ]]; then
-    echo "Manual-browse map isolation assertion failed: $manual" >&2
-    return 1
-  fi
-  if [[ -z "$manual_map_errors" || "$manual_map_errors" != "0" ]]; then
-    echo "Manual-browse map-bearing assertion failed: $manual" >&2
-    return 1
-  fi
-  if [[ -z "$manual_errors" || "$manual_errors" != "0" ]]; then
-    echo "Manual-browse fixture errors reported: $manual" >&2
-    return 1
-  fi
-
-  if [[ -z "$recentered_ticks" || -z "$recentered_steps" ]] ||
-      (( recentered_ticks < 2 || recentered_steps != recentered_ticks )); then
-    echo "Recentered bearing animation assertion failed: $recentered" >&2
-    return 1
-  fi
-  if [[ -z "$recentered_browse" || "$recentered_browse" != "0" ||
-        -z "$recentered_orientation_work" ]] ||
-      (( recentered_orientation_work != recentered_steps )); then
-    echo "Recentered map-orientation assertion failed: $recentered" >&2
-    return 1
-  fi
-  if [[ -z "$recentered_errors" || "$recentered_errors" != "0" ]]; then
-    echo "Recentered fixture errors reported: $recentered" >&2
-    return 1
-  fi
-
-  printf 'Isolated: %s\nMixed: %s\nManual browse: %s\nRecentered: %s\nPerformance log: %s\n' \
-    "$isolated" "$mixed" "$manual" "$recentered" \
-    "$(windows_path "$log_file")"
+  printf 'Isolated: %s\nMixed: %s\nPerformance log: %s\n' \
+    "$isolated" "$mixed" "$(windows_path "$log_file")"
   pebble kill >/dev/null 2>&1 || true
 }
 
@@ -836,16 +659,10 @@ test_motion_reacquire() {
   send_button click select
   sleep 5
 
-  local stationary_baseline stationary_expected
-  stationary_baseline="$(motion_fixture_sample_count "$log_file")"
-  stationary_expected=$((stationary_baseline + 55))
   send_debug_motion stationary-raise
-  # emu-accel returns before QEMU finishes playback. Require the fixture-only
-  # watch counter to prove that the complete negative trace was delivered.
-  if ! wait_for_motion_fixture_samples "$stationary_expected" "$log_file"; then
-    echo "Stationary trace was incomplete ($(( $(motion_fixture_sample_count "$log_file") - stationary_baseline ))/55 samples); see $(windows_path "$log_file")" >&2
-    return 1
-  fi
+  # emu-accel queues samples into QEMU and returns before 25 Hz playback ends.
+  # Let the entire 55-sample negative trace finish before evaluating it.
+  sleep 2.5
   if grep -Fq 'Motion state=looking' "$log_file"; then
     echo "Stationary raise incorrectly triggered watch-look detection" >&2
     return 1
@@ -860,33 +677,23 @@ test_motion_reacquire() {
   send_debug_facing 0
   sleep 0.5
 
-  local walking_baseline walking_expected
-  walking_baseline="$(motion_fixture_sample_count "$log_file")"
-  walking_expected=$((walking_baseline + 89))
-  send_debug_motion walking-to-look
+  send_debug_motion walking-to-look &
+  local motion_pid=$!
   local look_ready=0
-  local samples_ready=0
-  for _ in $(seq 1 160); do
-    if (( $(motion_fixture_sample_count "$log_file") >= walking_expected )); then
-      samples_ready=1
-    fi
+  for _ in $(seq 1 120); do
     if grep -Fq 'Motion state=looking' "$log_file"; then
       look_ready=1
-    fi
-    if (( look_ready == 1 && samples_ready == 1 )); then
       break
     fi
     sleep 0.05
   done
-  if (( samples_ready == 0 )); then
-    echo "Walking trace was incomplete ($(( $(motion_fixture_sample_count "$log_file") - walking_baseline ))/89 samples); see $(windows_path "$log_file")" >&2
-    return 1
-  fi
   if (( look_ready == 0 )); then
+    wait "$motion_pid"
     echo "Walking trace did not produce watch-look detection; see $(windows_path "$log_file")" >&2
     return 1
   fi
   send_debug_compass 180
+  wait "$motion_pid"
   sleep 1
 
   kill "$log_pid" >/dev/null 2>&1 || true
@@ -922,104 +729,6 @@ test_motion_reacquire() {
   pebble kill >/dev/null 2>&1 || true
 }
 
-test_compass_emulator() {
-  require_pebble
-  if pgrep -x qemu-pebble >/dev/null 2>&1; then
-    echo "Pebble emulator is already running; retry test-compass-emulator after its owner finishes." >&2
-    return 75
-  fi
-  set_phone_mode fixture
-  mkdir -p "$OUT_DIR"
-  local log_file="$OUT_DIR/compass-service.log"
-  rm -f "$log_file"
-  trap 'pebble kill >/dev/null 2>&1 || true' RETURN
-  install_app
-  sleep 6
-  cd "$WATCH_DIR"
-  PYTHONUNBUFFERED=1 pebble logs --emulator "$PLATFORM" >"$log_file" 2>&1 &
-  local log_pid=$!
-  trap 'kill "$log_pid" >/dev/null 2>&1 || true; pebble kill >/dev/null 2>&1 || true' RETURN
-  sleep 1
-
-  send_debug_facing_setting
-  sleep 0.2
-  capture_screenshot compass-startup-invalid.png
-  send_native_compass 0 calibrated
-  sleep 0.3
-  if ! grep -Fq 'COMPASS_FIXTURE status=2 usable=1' "$log_file"; then
-    echo "Pebble emulator log transport did not produce the native compass probe; retry after other emulator work finishes." >&2
-    return 75
-  fi
-  send_native_compass 0 invalid
-  sleep 0.3
-  if ! grep -Fq 'COMPASS_FIXTURE status=0 usable=0 heading=-1' "$log_file"; then
-    echo "Native invalid compass state did not clear heading; see $(windows_path "$log_file")" >&2
-    return 1
-  fi
-
-  send_native_compass 0 calibrating
-  sleep 0.1
-  send_native_compass 5 calibrating
-  sleep 0.1
-  send_native_compass 10 calibrating
-  sleep 0.1
-  if grep -F 'COMPASS_FIXTURE status=1' "$log_file" | tail -n 1 |
-      grep -Fq 'usable=1'; then
-    echo "Calibrating compass acquired before the 250ms stability window" >&2
-    return 1
-  fi
-  send_native_compass 15 calibrating
-  sleep 0.2
-  if ! grep -F 'COMPASS_FIXTURE status=1' "$log_file" | tail -n 1 |
-      grep -Fq 'usable=1'; then
-    echo "Stable calibrating compass did not acquire; see $(windows_path "$log_file")" >&2
-    return 1
-  fi
-
-  send_native_compass 0 calibrated
-  sleep 0.2
-  local isolated_start
-  isolated_start=$(wc -l <"$log_file")
-  send_native_compass 180 calibrated
-  sleep 0.08
-  send_native_compass 0 calibrated
-  sleep 0.3
-  if tail -n "+$((isolated_start + 1))" "$log_file" |
-      grep -Fq 'heading=180 pending=0'; then
-    echo "Isolated 180-degree sample was incorrectly accepted" >&2
-    return 1
-  fi
-  if ! tail -n "+$((isolated_start + 1))" "$log_file" |
-      grep -Fq 'pending=1'; then
-    echo "Large native compass jump was not held for confirmation" >&2
-    return 1
-  fi
-
-  send_native_compass 180 calibrated
-  sleep 0.35
-  if ! grep -Fq 'COMPASS_FIXTURE status=2 usable=1 heading=180 pending=0' "$log_file"; then
-    echo "Persistent 180-degree turn was not confirmed; see $(windows_path "$log_file")" >&2
-    return 1
-  fi
-
-  send_native_compass 180 invalid
-  sleep 0.3
-  if ! grep -F 'COMPASS_FIXTURE status=0' "$log_file" | tail -n 1 |
-      grep -Fq 'usable=0 heading=-1'; then
-    echo "Final invalid status did not immediately remove heading" >&2
-    return 1
-  fi
-  capture_screenshot compass-invalid.png
-
-  kill "$log_pid" >/dev/null 2>&1 || true
-  wait "$log_pid" 2>/dev/null || true
-  trap - RETURN
-  printf 'CompassService emulator checks passed.\nLog: %s\nScreenshot: %s\n' \
-    "$(windows_path "$log_file")" \
-    "$(windows_path "$OUT_DIR/compass-invalid.png")"
-  pebble kill >/dev/null 2>&1 || true
-}
-
 main() {
   local command="${1:-}"
   if [[ -z "$command" || "$command" == "-h" || "$command" == "--help" ]]; then
@@ -1043,12 +752,6 @@ main() {
       ;;
     test-motion-host)
       test_motion_host
-      ;;
-    test-compass-host)
-      test_compass_host
-      ;;
-    test-compass-emulator)
-      test_compass_emulator
       ;;
     test-render-performance)
       test_render_performance
@@ -1136,18 +839,6 @@ main() {
       ;;
     debug-facing)
       send_debug_facing "$@"
-      ;;
-    debug-manual-browse)
-      send_debug_compass_manual_browse "$@"
-      ;;
-    debug-recenter)
-      send_debug_compass_recenter "$@"
-      ;;
-    debug-facing-setting)
-      send_debug_facing_setting "$@"
-      ;;
-    native-compass)
-      send_native_compass "$@"
       ;;
     debug-map-settings)
       send_debug_map_settings "$@"

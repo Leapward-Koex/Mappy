@@ -44,7 +44,6 @@ From Windows PowerShell, run:
 .\tooling\pebble-wsl.ps1 test-tooling
 .\tooling\pebble-wsl.ps1 test-protocol
 .\tooling\pebble-wsl.ps1 test-motion-host
-.\tooling\pebble-wsl.ps1 test-compass-host
 .\tooling\pebble-wsl.ps1 build-phone
 .\tooling\pebble-wsl.ps1 smoke-fixture
 ```
@@ -82,8 +81,6 @@ With the fixture emulator running, use:
 button <action> <button>
 debug-facing <degrees>
 debug-compass <degrees|clear>
-debug-facing-setting
-native-compass <degrees> <invalid|calibrating|calibrated>
 debug-map-settings <width> <height>
 debug-tile [index]
 debug-route-progress <percent>
@@ -98,11 +95,6 @@ it replays both deterministic accelerometer traces, asserts one watch-look
 event and a 2–8 tick fast bearing animation, and captures the final state. The
 command refuses to run while another QEMU session exists and does not use the
 wipe-and-retry path.
-
-Use `test-compass-emulator` for the owned native `CompassService` sequence. It
-checks invalid and calibrating states, stable acquisition, isolated outlier
-rejection, confirmed large turns, and captures the invalid-state prompt. Keep
-`debug-compass` for rendering tests only because it bypasses the sensor path.
 
 ## Work with provider-backed fixtures safely
 

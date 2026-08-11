@@ -68,18 +68,12 @@ static int32_t target_map_bearing_centi_degrees(void) {
 void update_map_after_bearing_display_change(bool was_orientation_active) {
   bool orientation_active = map_orientation_active();
   if (was_orientation_active && !orientation_active) {
-#ifdef MAPPY_WATCH_PHONE_MODE_FIXTURE
-    fixture_perf_orientation_work();
-#endif
     invalidate_orientation_tile_coverage();
     update_state_after_map_change();
     queue_visible_tiles();
     return;
   }
   if (orientation_active) {
-#ifdef MAPPY_WATCH_PHONE_MODE_FIXTURE
-    fixture_perf_orientation_work();
-#endif
     if (orientation_tile_coverage_changed()) {
       update_state_after_map_change();
       queue_visible_tiles();
@@ -158,20 +152,6 @@ void refresh_corrected_compass_heading(void) {
 }
 
 #if defined(PBL_COMPASS)
-static CompassFilter s_compass_filter;
-static AppTimer *s_compass_health_timer;
-static AppTimer *s_compass_outlier_timer;
-static bool s_compass_focused = true;
-static uint16_t s_compass_rejected_outlier_count;
-static uint32_t s_compass_last_outlier_log_ms;
-
-static uint32_t compass_now_ms(void) {
-  time_t seconds;
-  uint16_t milliseconds;
-  time_ms(&seconds, &milliseconds);
-  return (uint32_t)seconds * 1000u + milliseconds;
-}
-
 int32_t compass_heading_to_degrees(CompassHeading heading) {
   // Pebble compass headings increase counter-clockwise; app rendering uses clockwise degrees.
   int32_t counter_clockwise_heading = heading % TRIG_MAX_ANGLE;
@@ -181,226 +161,6 @@ int32_t compass_heading_to_degrees(CompassHeading heading) {
   int32_t clockwise_heading =
       (TRIG_MAX_ANGLE - counter_clockwise_heading) % TRIG_MAX_ANGLE;
   return (int32_t)(((int64_t)clockwise_heading * 360) / TRIG_MAX_ANGLE);
-}
-
-static int compass_diagnostic_state(void) {
-  if (s_compass_filter.stale) {
-    return 3;
-  }
-  return (int)s_compass_filter.status;
-}
-
-static void send_compass_log(const char *event_name, int detail) {
-  send_log_event(0, detail, s_declination_valid ? 1 : 0, event_name);
-}
-
-void emit_compass_state_diagnostic(void) {
-  if (!s_compass_filter.status_known && !s_compass_filter.stale) {
-    return;
-  }
-  send_compass_log(s_compass_filter.heading_usable ?
-      "compass_heading_acquired" : "compass_heading_lost",
-      compass_diagnostic_state());
-}
-
-static void emit_rejected_outlier_diagnostic(uint32_t now_ms) {
-  if (s_compass_rejected_outlier_count < UINT16_MAX) {
-    s_compass_rejected_outlier_count++;
-  }
-  if (s_compass_last_outlier_log_ms != 0 &&
-      now_ms - s_compass_last_outlier_log_ms <
-          COMPASS_OUTLIER_LOG_INTERVAL_MS) {
-    return;
-  }
-  send_compass_log("compass_outlier_rejected",
-                   s_compass_rejected_outlier_count);
-  s_compass_rejected_outlier_count = 0;
-  s_compass_last_outlier_log_ms = now_ms;
-}
-
-static void cancel_compass_outlier_timer(void) {
-  if (s_compass_outlier_timer) {
-    app_timer_cancel(s_compass_outlier_timer);
-    s_compass_outlier_timer = NULL;
-  }
-}
-
-static void compass_peek(void);
-
-static void compass_outlier_timer_callback(void *context) {
-  (void)context;
-  s_compass_outlier_timer = NULL;
-  if (!s_compass_focused || !s_compass_filter.outlier_pending) {
-    return;
-  }
-  compass_peek();
-}
-
-static void schedule_compass_outlier_confirmation(uint32_t now_ms) {
-  if (!s_compass_filter.outlier_pending || !s_compass_focused ||
-      s_compass_outlier_timer) {
-    return;
-  }
-  uint32_t elapsed = now_ms - s_compass_filter.outlier_started_ms;
-  uint32_t delay = elapsed < COMPASS_FILTER_OUTLIER_CONFIRM_MS ?
-      COMPASS_FILTER_OUTLIER_CONFIRM_MS - elapsed : 1;
-  s_compass_outlier_timer = app_timer_register(
-      delay, compass_outlier_timer_callback, NULL);
-}
-
-static void apply_compass_filter_result(CompassFilterResult result,
-                                        uint32_t now_ms) {
-  if (result == CompassFilterResultNone) {
-    return;
-  }
-
-  bool was_orientation_active = map_orientation_active();
-  int32_t previous_heading = s_compass_heading_degrees;
-  if (s_compass_filter.heading_usable) {
-    s_compass_magnetic_degrees = s_compass_filter.accepted_heading;
-    s_compass_heading_degrees = corrected_compass_heading_degrees(
-        s_compass_magnetic_degrees);
-  } else {
-    s_compass_magnetic_degrees = -1;
-    s_compass_heading_degrees = -1;
-  }
-
-  if (result & CompassFilterResultCalibrationStarted) {
-    send_compass_log("compass_calibration_started",
-                     CompassFilterStatusCalibrating);
-  }
-  if (result & CompassFilterResultServiceUnavailable) {
-    send_compass_log("compass_service_unavailable",
-                     CompassFilterStatusUnavailable);
-  }
-  if (result & CompassFilterResultOutlierRejected) {
-    emit_rejected_outlier_diagnostic(now_ms);
-  }
-  if ((result & CompassFilterResultHeadingLost) ||
-      ((result & CompassFilterResultStatusChanged) &&
-       !s_compass_filter.heading_usable &&
-       !(result & CompassFilterResultCalibrationStarted) &&
-       !(result & CompassFilterResultServiceUnavailable)) ||
-      (result & CompassFilterResultStale)) {
-    send_compass_log("compass_heading_lost", compass_diagnostic_state());
-  }
-  if ((result & CompassFilterResultHeadingAcquired) ||
-      ((result & CompassFilterResultStatusChanged) &&
-       s_compass_filter.heading_usable)) {
-    send_compass_log("compass_heading_acquired", compass_diagnostic_state());
-  }
-
-  if (s_compass_filter.outlier_pending) {
-    schedule_compass_outlier_confirmation(now_ms);
-  } else {
-    cancel_compass_outlier_timer();
-  }
-
-  bool heading_changed = previous_heading != s_compass_heading_degrees;
-  if (result & CompassFilterResultHeadingAccepted) {
-    maybe_begin_pending_route_start_reacquire();
-  }
-#ifdef MAPPY_WATCH_PHONE_MODE_FIXTURE
-  APP_LOG(APP_LOG_LEVEL_INFO,
-          "COMPASS_FIXTURE status=%d usable=%d heading=%ld pending=%d result=%u",
-          compass_diagnostic_state(), s_compass_filter.heading_usable ? 1 : 0,
-          (long)s_compass_heading_degrees,
-          s_compass_filter.outlier_pending ? 1 : 0, (unsigned int)result);
-#endif
-  bool display_changed = false;
-  if (heading_changed) {
-    display_changed = sync_map_bearing_smoothing(
-        s_compass_filter.heading_usable);
-    if (display_changed) {
-      update_map_after_bearing_display_change(was_orientation_active);
-    }
-  }
-  if ((display_changed ||
-       (result & (CompassFilterResultStatusChanged |
-                  CompassFilterResultHeadingAcquired |
-                  CompassFilterResultHeadingLost |
-                  CompassFilterResultStale))) && s_map_layer) {
-    layer_mark_dirty(s_map_layer);
-  }
-}
-
-static CompassFilterStatus compass_filter_status_from_pebble(
-    CompassStatus status) {
-  switch (status) {
-    case CompassStatusUnavailable:
-      return CompassFilterStatusUnavailable;
-    case CompassStatusCalibrating:
-      return CompassFilterStatusCalibrating;
-    case CompassStatusCalibrated:
-      return CompassFilterStatusCalibrated;
-    case CompassStatusDataInvalid:
-    default:
-      return CompassFilterStatusDataInvalid;
-  }
-}
-
-const char *compass_prompt_text(void) {
-#ifdef MAPPY_WATCH_PHONE_MODE_FIXTURE
-  if (s_debug_compass_override_active) {
-    return NULL;
-  }
-#endif
-  if (s_map_orientation != 1 || s_manual_pan || !s_has_gps ||
-      s_compass_filter.heading_usable) {
-    return NULL;
-  }
-  if (s_compass_filter.stale) {
-    return "Compass reconnecting";
-  }
-  if (s_compass_filter.status_known &&
-      s_compass_filter.status == CompassFilterStatusUnavailable) {
-    return "Compass unavailable";
-  }
-  return "Move wrist to calibrate";
-}
-
-static void compass_health_timer_callback(void *context) {
-  (void)context;
-  s_compass_health_timer = NULL;
-  if (!s_compass_focused || !s_has_gps) {
-    return;
-  }
-  uint32_t now_ms = compass_now_ms();
-  apply_compass_filter_result(compass_filter_tick(&s_compass_filter, now_ms),
-                              now_ms);
-  compass_peek();
-  refresh_compass_health_monitoring();
-}
-
-void refresh_compass_health_monitoring(void) {
-  if (!s_compass_focused || !s_has_gps) {
-    if (s_compass_health_timer) {
-      app_timer_cancel(s_compass_health_timer);
-      s_compass_health_timer = NULL;
-    }
-    return;
-  }
-  if (!s_compass_health_timer) {
-    s_compass_health_timer = app_timer_register(
-        COMPASS_HEALTH_INTERVAL_MS, compass_health_timer_callback, NULL);
-  }
-}
-
-static void compass_focus_handler(bool in_focus) {
-  s_compass_focused = in_focus;
-  if (!in_focus) {
-    if (s_compass_health_timer) {
-      app_timer_cancel(s_compass_health_timer);
-      s_compass_health_timer = NULL;
-    }
-    cancel_compass_outlier_timer();
-    return;
-  }
-  uint32_t now_ms = compass_now_ms();
-  apply_compass_filter_result(compass_filter_tick(&s_compass_filter, now_ms),
-                              now_ms);
-  compass_peek();
-  refresh_compass_health_monitoring();
 }
 #endif
 
@@ -720,8 +480,9 @@ bool sync_map_bearing_smoothing(bool animate) {
     return previous_display != s_map_bearing_display_centi_degrees;
   }
 
-  // Manual browse still smooths the facing bearing used by the location cone.
-  // active_map_bearing_centi_degrees() keeps the geographic map north-up.
+  if (s_manual_pan) {
+    animate = false;
+  }
   target = normalize_centi_degrees(target);
   s_map_bearing_target_centi_degrees = target;
   if (s_map_bearing_display_centi_degrees < 0 || !animate) {
@@ -753,13 +514,12 @@ bool advance_map_bearing_smoothing(void) {
   if (delta == 0) {
     return false;
   }
-  bool was_orientation_active = map_orientation_active();
   s_map_bearing_display_centi_degrees = bearing_smoothing_advance(
       s_map_bearing_display_centi_degrees,
       s_map_bearing_target_centi_degrees,
       bearing_reacquire_active());
 
-  update_map_after_bearing_display_change(was_orientation_active);
+  update_map_after_bearing_display_change(true);
   return true;
 }
 
@@ -832,15 +592,38 @@ GPoint point_from_heading(GPoint origin, int32_t heading_degrees, int16_t length
 
 #if defined(PBL_COMPASS)
 void update_compass_heading(CompassHeadingData heading_data) {
-  uint32_t now_ms = compass_now_ms();
-  CompassFilterStatus status = compass_filter_status_from_pebble(
-      heading_data.compass_status);
-  int16_t heading = (status == CompassFilterStatusCalibrating ||
-                     status == CompassFilterStatusCalibrated) ?
-      (int16_t)compass_heading_to_degrees(heading_data.magnetic_heading) : -1;
-  CompassFilterResult result = compass_filter_process(
-      &s_compass_filter, status, heading, now_ms);
-  apply_compass_filter_result(result, now_ms);
+  if (heading_data.compass_status == CompassStatusDataInvalid) {
+    bool was_orientation_active = map_orientation_active();
+    if (s_compass_heading_degrees != -1) {
+      s_compass_magnetic_degrees = -1;
+      s_compass_heading_degrees = -1;
+      bool display_changed = sync_map_bearing_smoothing(false);
+      update_map_after_bearing_display_change(was_orientation_active);
+      if (display_changed && s_map_layer) {
+        layer_mark_dirty(s_map_layer);
+      }
+    }
+    return;
+  }
+
+  int32_t next_magnetic_heading =
+      compass_heading_to_degrees(heading_data.magnetic_heading);
+  int32_t next_heading = corrected_compass_heading_degrees(next_magnetic_heading);
+  if (next_heading == s_compass_heading_degrees) {
+    s_compass_magnetic_degrees = next_magnetic_heading;
+    return;
+  }
+
+  s_compass_magnetic_degrees = next_magnetic_heading;
+  s_compass_heading_degrees = next_heading;
+  maybe_begin_pending_route_start_reacquire();
+  bool display_changed = sync_map_bearing_smoothing(true);
+  if (display_changed) {
+    update_map_after_bearing_display_change(false);
+  }
+  if (display_changed && s_map_layer) {
+    layer_mark_dirty(s_map_layer);
+  }
 }
 
 void compass_heading_handler(CompassHeadingData heading_data) {
@@ -852,36 +635,13 @@ void compass_heading_handler(CompassHeadingData heading_data) {
   update_compass_heading(heading_data);
 }
 
-static void compass_peek(void) {
-#ifdef MAPPY_WATCH_PHONE_MODE_FIXTURE
-  if (s_debug_compass_override_active) {
-    return;
-  }
-#endif
-  CompassHeadingData heading_data = {0};
-  heading_data.compass_status = compass_service_peek(&heading_data);
-  update_compass_heading(heading_data);
-}
-
 void start_compass_service(void) {
-  uint32_t now_ms = compass_now_ms();
-  compass_filter_reset(&s_compass_filter, now_ms);
-  s_compass_focused = true;
+  compass_service_subscribe(compass_heading_handler);
   compass_service_set_heading_filter(
       TRIG_MAX_ANGLE * COMPASS_HEADING_FILTER_DEGREES / 360);
-  compass_service_subscribe(compass_heading_handler);
-  app_focus_service_subscribe(compass_focus_handler);
-  compass_peek();
-  refresh_compass_health_monitoring();
 }
 
 void stop_compass_service(void) {
-  if (s_compass_health_timer) {
-    app_timer_cancel(s_compass_health_timer);
-    s_compass_health_timer = NULL;
-  }
-  cancel_compass_outlier_timer();
-  app_focus_service_unsubscribe();
   compass_service_unsubscribe();
 }
 #else
@@ -889,15 +649,5 @@ void start_compass_service(void) {
 }
 
 void stop_compass_service(void) {
-}
-
-void refresh_compass_health_monitoring(void) {
-}
-
-const char *compass_prompt_text(void) {
-  return NULL;
-}
-
-void emit_compass_state_diagnostic(void) {
 }
 #endif

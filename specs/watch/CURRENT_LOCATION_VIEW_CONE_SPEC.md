@@ -103,8 +103,6 @@ Heading source rules:
   derived from the watch compass.
 - Invalid, unavailable, or stale compass heading: draw only the neutral blue puck
   and no cone.
-- Calibrating readings remain unavailable until they satisfy the shared stable
-  acquisition gate in `../shared/MAP_ORIENTATION_SETTING_SPEC.md`.
 - `north_up`: display heading is the watch compass heading in screen space.
 - `forward_up`: when GPS-follow is active and the wearer-facing compass heading
   is valid, that same heading rotates the map and is compensated out of the cone

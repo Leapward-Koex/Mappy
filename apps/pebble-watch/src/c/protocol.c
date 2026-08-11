@@ -601,7 +601,6 @@ static void apply_gps_fix(int32_t world_x, int32_t world_y, int32_t zoom,
   copy_bounded_text(s_gps_provider, sizeof(s_gps_provider), provider);
   s_has_gps = true;
   s_gps_received_at = time(NULL);
-  refresh_compass_health_monitoring();
   maybe_begin_pending_route_start_reacquire();
   sync_map_bearing_smoothing(true);
   s_route_gps_stale_logged = false;
@@ -688,7 +687,6 @@ void apply_declination(DictionaryIterator *iter) {
       layer_mark_dirty(s_map_layer);
     }
   }
-  emit_compass_state_diagnostic();
 }
 
 void apply_debug_compass(DictionaryIterator *iter) {
@@ -697,20 +695,10 @@ void apply_debug_compass(DictionaryIterator *iter) {
     return;
   }
 
+  bool was_orientation_active = map_orientation_active();
   int32_t heading = heading_tuple->value->int32;
 #ifdef MAPPY_WATCH_PHONE_MODE_FIXTURE
-  Tuple *fixture_camera_tuple = dict_find(iter, MESSAGE_KEY_height);
-  int fixture_camera_control = heading >= 0 && fixture_camera_tuple ?
-      fixture_camera_tuple->value->int32 : 0;
-  if (fixture_camera_control == 1) {
-    fixture_perf_enter_manual_browse();
-  } else if (fixture_camera_control == 2) {
-    recenter_viewport();
-  }
-#endif
-  bool was_orientation_active = map_orientation_active();
-#ifdef MAPPY_WATCH_PHONE_MODE_FIXTURE
-  if (heading >= 0 && fixture_camera_control == 0) {
+  if (heading >= 0) {
     fixture_perf_begin();
   }
 #endif
@@ -733,7 +721,7 @@ void apply_debug_compass(DictionaryIterator *iter) {
 
   bool display_changed = sync_map_bearing_smoothing(true);
 #ifdef MAPPY_WATCH_PHONE_MODE_FIXTURE
-  if (heading >= 0 && fixture_camera_control == 0 && display_changed) {
+  if (heading >= 0 && display_changed) {
     fixture_perf_bearing_immediate_step();
   }
   if (heading >= 0 && dict_find(iter, MESSAGE_KEY_width)) {
@@ -747,7 +735,7 @@ void apply_debug_compass(DictionaryIterator *iter) {
     layer_mark_dirty(s_map_layer);
   }
 #ifdef MAPPY_WATCH_PHONE_MODE_FIXTURE
-  if (heading >= 0 && fixture_camera_control == 0 && !display_changed) {
+  if (heading >= 0 && !display_changed) {
     fixture_perf_maybe_emit();
   }
 #endif

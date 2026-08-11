@@ -132,9 +132,7 @@ bash tooling/pebble-emulator-codex.sh screenshot debug-facing-45.png
 ```
 
 `debug-facing <degrees>` switches centered-map orientation to face-forward and
-then sends `CMD_DEBUG_COMPASS` with a heading from `0` to `359`. This bypasses
-`CompassService` and is intended only for isolated rendering and animation
-tests. Use
+then sends `CMD_DEBUG_COMPASS` with a heading from `0` to `359`. Use
 `debug-compass clear` to clear the simulated compass heading. To exercise
 large-tile rotation without a phone tile payload, use:
 
@@ -142,17 +140,6 @@ large-tile rotation without a phone tile payload, use:
 bash tooling/pebble-emulator-codex.sh debug-map-settings 108 126
 bash tooling/pebble-emulator-codex.sh debug-facing 45
 bash tooling/pebble-emulator-codex.sh debug-tile 0
-```
-
-Use the native emulator command to exercise the production compass callback,
-status handling, calibration gate, and outlier filter:
-
-```sh
-bash tooling/pebble-emulator-codex.sh debug-facing-setting
-bash tooling/pebble-emulator-codex.sh native-compass 0 invalid
-bash tooling/pebble-emulator-codex.sh native-compass 90 calibrating
-bash tooling/pebble-emulator-codex.sh native-compass 90 calibrated
-bash tooling/pebble-emulator-codex.sh test-compass-emulator
 ```
 
 ### Motion-assisted face-forward reacquisition
@@ -169,7 +156,6 @@ emulator:
 
 ```sh
 bash tooling/pebble-emulator-codex.sh test-motion-host
-bash tooling/pebble-emulator-codex.sh test-compass-host
 ```
 
 With a fixture build and active face-forward Walk route, deterministic sensor

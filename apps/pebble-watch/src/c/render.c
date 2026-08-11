@@ -1340,10 +1340,7 @@ void split_status_text(const char *source, char *primary, size_t primary_size,
 }
 
 void draw_top_chrome(GContext *ctx) {
-  const char *compass_prompt = compass_prompt_text();
-  const char *top_text = compass_prompt ? compass_prompt : s_top_text;
-  int width = (has_active_route() || compass_prompt) ?
-      s_screen_bounds.size.w - 8 : 98;
+  int width = has_active_route() ? s_screen_bounds.size.w - 8 : 98;
   GRect rect = GRect(4, 4, width, 22);
   draw_card(ctx, rect, chrome_bg(), chrome_border());
 
@@ -1351,7 +1348,7 @@ void draw_top_chrome(GContext *ctx) {
   graphics_fill_rect(ctx, GRect(rect.origin.x + 4, rect.origin.y + 5, 4, rect.size.h - 10),
                      2, GCornersAll);
   draw_text_in_rect(ctx, GRect(rect.origin.x + 12, rect.origin.y, rect.size.w - 16, rect.size.h),
-                    top_text, fonts_get_system_font(FONT_KEY_GOTHIC_18_BOLD), chrome_fg(),
+                    s_top_text, fonts_get_system_font(FONT_KEY_GOTHIC_18_BOLD), chrome_fg(),
                     GTextAlignmentLeft);
 }
 
