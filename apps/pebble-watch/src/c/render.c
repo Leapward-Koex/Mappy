@@ -189,14 +189,13 @@ static bool sample_visible_tile_palette_index(TileCacheEntry **entries,
     }
   }
 
-  int pixel_index = sample_y * s_tile_width + sample_x;
-  uint8_t packed = entry->decoded[pixel_index / 2];
-  *palette_index = (pixel_index & 1) ? (packed >> 4) : (packed & 0x0f);
-  return true;
+  return sample_cached_tile_palette_index(entry, sample_x, sample_y,
+                                          palette_index);
 }
 
 typedef struct {
   TileCacheEntry *entry;
+  const uint8_t *stored;
   uint16_t progress_q8;
   uint16_t scale_q8;
 } RotatedTileCell;
@@ -293,6 +292,7 @@ static bool prepare_rotated_tile_lookup(TileCacheEntry **entries, int entry_coun
 
     RotatedTileCell *cell = &lookup->cells[row * cols + col];
     cell->entry = entry;
+    cell->stored = tile_storage_data(&s_tile_storage_arena, &entry->storage);
     cell->progress_q8 = progress_q8;
     cell->scale_q8 = scale_q8;
   }
@@ -345,7 +345,7 @@ static inline bool sample_rotated_tile_lookup_palette_index(
 
   const RotatedTileCell *cell = &lookup->cells[row * lookup->cols + col];
   TileCacheEntry *entry = cell->entry;
-  if (!entry || !entry->valid) {
+  if (!entry || !entry->valid || !cell->stored) {
     return false;
   }
 
@@ -371,10 +371,41 @@ static inline bool sample_rotated_tile_lookup_palette_index(
     }
   }
 
-  int pixel_index = sample_y * s_tile_width + sample_x;
-  uint8_t packed = entry->decoded[pixel_index / 2];
-  *palette_index = (pixel_index & 1) ? (packed >> 4) : (packed & 0x0f);
-  return true;
+  if (entry->storage.format == TileStoragePacked) {
+    int pixel_index = sample_y * s_tile_width + sample_x;
+    uint8_t packed = cell->stored[pixel_index / 2];
+    *palette_index = (pixel_index & 1) ? packed >> 4 : packed & 0x0f;
+    return true;
+  }
+  if (entry->storage.format != TileStorageIndexedRle ||
+      entry->encoded_length == 0 ||
+      entry->encoded_length >= entry->storage.length) {
+    return false;
+  }
+
+  uint16_t columns = TILE_RLE_INDEX_COLUMNS(s_tile_width);
+  uint16_t column = (uint16_t)sample_x >> 5;
+  size_t index_offset = ((size_t)sample_y * columns + column) *
+      TILE_RLE_ROW_INDEX_BYTES;
+  const uint8_t *index = cell->stored + entry->encoded_length + index_offset;
+  size_t encoded_offset = index[0] | ((size_t)index[1] << 8);
+  uint8_t skip = index[2];
+  uint16_t remaining_x = (uint16_t)sample_x & 31;
+  while (encoded_offset < entry->encoded_length) {
+    uint8_t byte = cell->stored[encoded_offset++];
+    uint16_t run_length = (byte >> 4) + 1;
+    if (skip >= run_length) {
+      return false;
+    }
+    run_length -= skip;
+    skip = 0;
+    if (remaining_x < run_length) {
+      *palette_index = byte & 0x0f;
+      return true;
+    }
+    remaining_x -= run_length;
+  }
+  return false;
 }
 
 static inline void rotated_lookup_position(const RotatedTileLookup *lookup,
@@ -501,7 +532,6 @@ static void draw_rotated_tiles_framebuffer_sampled(uint8_t *framebuffer_data,
     }
     return;
   }
-
   for (int screen_y = 0; screen_y < screen_h; screen_y++) {
     int32_t sy = screen_y - center_y;
     int32_t sx = -center_x;
@@ -566,6 +596,7 @@ static void draw_tile_row_unscaled(uint8_t *dst_row, const uint8_t *decoded,
 static void draw_tile_framebuffer_animated(uint8_t *framebuffer_data,
                                            int16_t bytes_per_row,
                                            const uint8_t *palette_argb,
+                                           const uint8_t *decoded,
                                            const TileCacheEntry *entry,
                                            int dst_origin_x,
                                            int dst_origin_y,
@@ -599,7 +630,7 @@ static void draw_tile_framebuffer_animated(uint8_t *framebuffer_data,
       }
 
       int pixel_index = py * s_tile_width + px;
-      uint8_t packed = entry->decoded[pixel_index / 2];
+      uint8_t packed = decoded[pixel_index / 2];
       uint8_t palette_index =
           (pixel_index & 1) ? (packed >> 4) : (packed & 0x0f);
       dst_row[dst_x] = palette_argb[palette_index & 0x0f];
@@ -661,6 +692,9 @@ bool draw_tiles_framebuffer_fast(GContext *ctx, const GColor *palette,
     if (!entry || !entry->valid) {
       continue;
     }
+    if (!decode_cached_tile(entry, s_tile_decode_scratch)) {
+      continue;
+    }
 
     entry->last_used = ++s_access_counter;
 
@@ -678,7 +712,8 @@ bool draw_tiles_framebuffer_fast(GContext *ctx, const GColor *palette,
               (((256 - TILE_ANIMATION_ZOOM_START_Q8) * eased_q8) / 256);
         }
         draw_tile_framebuffer_animated(framebuffer_data, bytes_per_row,
-                                       palette_argb, entry, dst_origin_x,
+                                       palette_argb, s_tile_decode_scratch,
+                                       entry, dst_origin_x,
                                        dst_origin_y, screen_w, screen_h,
                                        progress_q8, scale_q8);
         continue;
@@ -715,7 +750,8 @@ bool draw_tiles_framebuffer_fast(GContext *ctx, const GColor *palette,
     for (int row = 0; row < draw_h; row++) {
       int pixel_index = (src_y + row) * s_tile_width + src_x;
       uint8_t *dst_row = framebuffer_data + ((dst_y + row) * bytes_per_row) + dst_x;
-      draw_tile_row_unscaled(dst_row, entry->decoded, pixel_index, draw_w, palette_argb);
+      draw_tile_row_unscaled(dst_row, s_tile_decode_scratch, pixel_index,
+                             draw_w, palette_argb);
     }
   }
 
@@ -723,8 +759,9 @@ bool draw_tiles_framebuffer_fast(GContext *ctx, const GColor *palette,
   return true;
 }
 
-void draw_tile_entry_slow(GContext *ctx, TileCacheEntry *entry, const GColor *palette) {
-  if (!ctx || !entry || !palette || !entry->valid) {
+void draw_tile_entry_slow(GContext *ctx, TileCacheEntry *entry,
+                          const uint8_t *decoded, const GColor *palette) {
+  if (!ctx || !entry || !decoded || !palette || !entry->valid) {
     return;
   }
 
@@ -760,7 +797,7 @@ void draw_tile_entry_slow(GContext *ctx, TileCacheEntry *entry, const GColor *pa
         continue;
       }
       int pixel_index = py * s_tile_width + px;
-      uint8_t packed = entry->decoded[pixel_index / 2];
+      uint8_t packed = decoded[pixel_index / 2];
       uint8_t palette_index = (pixel_index & 1) ? (packed >> 4) : (packed & 0x0f);
       graphics_context_set_fill_color(ctx, palette[palette_index & 0x0f]);
       graphics_fill_rect(ctx, GRect(point.x, point.y, scaled_length(1),
@@ -813,7 +850,9 @@ void draw_tiles(GContext *ctx, GColor background, bool fill_background) {
     if (!entry || !entry->valid) {
       continue;
     }
-    draw_tile_entry_slow(ctx, entry, palette);
+    if (decode_cached_tile(entry, s_tile_decode_scratch)) {
+      draw_tile_entry_slow(ctx, entry, s_tile_decode_scratch, palette);
+    }
   }
 }
 

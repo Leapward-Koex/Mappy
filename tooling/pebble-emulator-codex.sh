@@ -18,6 +18,7 @@ Commands:
   test-tooling             Run deterministic Pebble development-tool tests.
   test-protocol            Check protocol constants across specs and runtimes.
   test-motion-host         Run allocation-free motion and bearing host tests.
+  test-tile-cache-host     Run bounded tile codec and arena host tests.
   test-render-performance  Run fixture bearing and mixed-animation assertions.
   test-motion-reacquire    Replay wrist motion and assert fast bearing behavior.
   build                    Build the Pebble watch app.
@@ -288,6 +289,7 @@ test_tooling() {
   require_pebble
   "$(pebble_tool_python)" "$ROOT_DIR/tooling/test-pebble-development.py"
   test_motion_host
+  test_tile_cache_host
 }
 
 test_protocol() {
@@ -309,6 +311,25 @@ test_motion_host() {
     "$WATCH_DIR/src/c/bearing_smoothing.c" \
     -o "$output"
   cd "$ROOT_DIR"
+  "$output"
+  rm -f "$output"
+  trap - RETURN
+}
+
+test_tile_cache_host() {
+  local compiler="${CC:-cc}"
+  if ! command -v "$compiler" >/dev/null 2>&1; then
+    echo "C compiler was not found: $compiler" >&2
+    return 127
+  fi
+  local output
+  output="$(mktemp "${TMPDIR:-/tmp}/mappy-tile-cache-tests.XXXXXX")"
+  trap 'rm -f "$output"' RETURN
+  "$compiler" -std=c99 -Wall -Wextra -Werror \
+    "$ROOT_DIR/tooling/test-tile-storage.c" \
+    "$WATCH_DIR/src/c/tile_codec.c" \
+    "$WATCH_DIR/src/c/tile_storage.c" \
+    -o "$output"
   "$output"
   rm -f "$output"
   trap - RETURN
@@ -752,6 +773,9 @@ main() {
       ;;
     test-motion-host)
       test_motion_host
+      ;;
+    test-tile-cache-host)
+      test_tile_cache_host
       ;;
     test-render-performance)
       test_render_performance

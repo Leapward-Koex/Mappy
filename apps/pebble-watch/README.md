@@ -109,6 +109,21 @@ Refreshing performs live provider API requests and may incur usage. The
 synthetic `fixture` mode remains the reproducible, publication-safe default for
 emulator and CI testing.
 
+### Tile-cache memory
+
+Watch tiles remain compressed while cached in a fixed 32 KiB arena. Normal map
+tiles use the existing RLE bytes plus bounded lookup checkpoints; high-entropy
+tiles fall back to packed 4-bit pixels. A single 6,804-byte scratch tile is
+shared for validation and north-up rendering. Arena eviction compacts storage,
+prefers offscreen/LRU tiles, and suppresses byte-pressure re-fetch loops until
+the affected origin leaves the viewport.
+
+Run the host codec, geometry, malformed-input, and arena-bound checks with:
+
+```sh
+bash tooling/pebble-emulator-codex.sh test-tile-cache-host
+```
+
 Codex can inspect that PNG directly from Windows. Emulator button input can be
 sent with:
 

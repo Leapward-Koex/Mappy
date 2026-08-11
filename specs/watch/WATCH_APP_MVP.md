@@ -58,9 +58,10 @@ MVP map tile geometry:
 | Tile crop height | 63 px |
 | Decoded bytes per tile | 1,701 |
 | Visible grid target | 5 x 5 |
-| Decoded cache entries | 25 |
+| Visible cache entries | 25 |
 | Tile request queue | 25 entries, or refill scheduler with equivalent coverage |
-| Decoded visible tile memory | 42,525 bytes plus metadata |
+| Compressed tile arena | 32,768 bytes |
+| Shared decode scratch | 6,804 bytes |
 
 The implementation must confirm heap usage on target hardware before shipping.
 If 5x5 is not viable, the spec must be revised with measured memory and a
@@ -68,13 +69,14 @@ different measured coverage strategy, such as dynamically positioned crop
 origins; do not fall back to a smaller fixed grid without proving full-screen
 coverage.
 
-The 5x5 decoded cache target is the north-up baseline. Direction-up GPS-follow
+The 5x5 cache target is the north-up baseline. Direction-up GPS-follow
 orientation can require expanded rotated-footprint coverage as defined by
 `../shared/MAP_ORIENTATION_SETTING_SPEC.md`; that mode must be heap-tested with
 the larger coverage or implemented with an equivalent refill/streaming strategy
 before it is enabled. Manual-browse mode uses north-up coverage.
 
-Heap acceptance must include decoded tile buffers, cache metadata, a 4,096-byte
+Heap acceptance must include the compressed arena, shared scratch, cache
+metadata, a 4,096-byte
 AppMessage inbox, outbound queue storage, route buffers for 128 points, nav-step
 buffers, saved-location records, layers, fonts, and menu/UI allocations.
 
@@ -211,8 +213,18 @@ zoom int8
 valid bool
 pending bool
 last_used counter
-decoded[1701]
+storage_offset uint16
+stored_length uint16
+storage_format enum(indexed_rle, packed)
+encoded_length uint16
+storage_suppressed bool
 ```
+
+All entry payloads live in a compact fixed 32 KiB arena. Indexed RLE retains
+the wire bytes and adds a three-byte checkpoint every 32 source pixels. If that
+representation is not smaller than the decoded 4-bit pixels, the entry stores
+packed nibbles instead. One 6,804-byte scratch allocation is shared by incoming
+high-entropy streaming and one-at-a-time north-up tile decode.
 
 Cache eviction:
 
@@ -220,6 +232,11 @@ Cache eviction:
 2. Else use an invalid entry.
 3. Else replace the least-recently-used entry outside the current visible grid.
 4. Else replace the oldest visible entry only if memory pressure requires it.
+
+Removing an arena segment compacts later segments and updates their offsets.
+An entry evicted only to satisfy the byte budget is not requested again until
+it leaves the viewport. This keeps pathological imagery stable instead of
+cycling continuously between request and eviction.
 
 Theme, zoom, or `CMD_MAP_SETTINGS` changes invalidate encoded-color cache
 entries because phone palette selection or source tile generation changes the
@@ -235,11 +252,13 @@ queued/in-flight request.
 `CMD_TILE` validation:
 
 - Required tuples: x, y, zoom, `chunk_data`, and `total_bytes`.
-- `total_bytes` must equal `chunk_data.length`.
-- `chunk_data.length` must be 1..3,402.
-- RLE decode must produce exactly 3,402 pixels before marking cache entry valid.
-- Extra encoded pixels after 3,402 or payload exhaustion before 3,402 rejects the
-  tile.
+- `total_bytes` is the complete RLE byte count; chunk offsets and indexes must
+  form an exact contiguous stream.
+- The complete RLE byte count must be 1..13,608 for supported geometry.
+- RLE decode must produce exactly `watch_tile_width * watch_tile_height` pixels
+  before marking a cache entry valid.
+- Extra encoded pixels or payload exhaustion before the configured pixel count
+  rejects the tile.
 
 `CMD_DESTINATIONS` validation:
 
@@ -287,13 +306,17 @@ Render order:
 
 Map tile rendering:
 
-- Read decoded nibbles as palette indexes.
+- North-up rendering decodes one cached tile at a time into the shared scratch
+  buffer and reuses the clipped row-copy path.
+- Facing-up rendering samples packed entries directly and uses 32-pixel RLE
+  checkpoints so compressed lookup work is bounded.
+- Read packed nibbles as palette indexes.
 - Even source pixel index uses low nibble.
 - Odd source pixel index uses high nibble.
 - Map through active day/night palette to GColor8.
 - Clip all writes to the layer bounds.
 - Use nearest-neighbor sampling during zoom transitions.
-- In facing-up GPS-follow mode, sample or project decoded tile pixels through
+- In facing-up GPS-follow mode, sample compressed tile pixels through
   the same rotation transform used by route and marker overlays.
 
 Route rendering:

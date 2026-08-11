@@ -82,7 +82,7 @@ class CredentialLoadingTest(unittest.TestCase):
 
 
 class RepositoryWorkflowTest(unittest.TestCase):
-    def test_watch_reserves_appmessage_before_opportunistic_tile_cache(self) -> None:
+    def test_watch_reserves_appmessage_before_bounded_tile_storage(self) -> None:
         main_source = (
             ROOT / "apps" / "pebble-watch" / "src" / "c" / "main.c"
         ).read_text(encoding="utf-8")
@@ -91,13 +91,33 @@ class RepositoryWorkflowTest(unittest.TestCase):
         tile_entries = main_source.index(
             "calloc(TILE_CACHE_SIZE, sizeof(TileCacheEntry))"
         )
-        tile_decode_cache = main_source.index(
+        tile_storage = main_source.index(
+            "malloc(TILE_STORAGE_ARENA_BYTES)"
+        )
+        tile_decode_scratch = main_source.index("malloc(MAX_TILE_BYTES)")
+        tile_configuration = main_source.index(
             "configure_tile_geometry(DEFAULT_TILE_W, DEFAULT_TILE_H)"
         )
 
         self.assertLess(app_message_open, tile_entries)
-        self.assertLess(app_message_open, tile_decode_cache)
+        self.assertLess(app_message_open, tile_storage)
+        self.assertLess(app_message_open, tile_decode_scratch)
+        self.assertLess(app_message_open, tile_configuration)
         self.assertIn("app_message_result != APP_MSG_OK", main_source)
+
+        header = (
+            ROOT / "apps" / "pebble-watch" / "src" / "c" / "mappy.h"
+        ).read_text(encoding="utf-8")
+        decode = (
+            ROOT / "apps" / "pebble-watch" / "src" / "c" / "tile_decode.c"
+        ).read_text(encoding="utf-8")
+        requests = (
+            ROOT / "apps" / "pebble-watch" / "src" / "c" / "tile_requests.c"
+        ).read_text(encoding="utf-8")
+        self.assertIn("TILE_STORAGE_ARENA_BYTES (32 * 1024)", header)
+        self.assertNotIn("s_tile_chunk_buffer", header + decode)
+        self.assertIn("s_tile_chunk_store_packed", decode)
+        self.assertIn("storage_suppressed", requests)
 
     def test_fixture_startup_honors_phone_ready_delay(self) -> None:
         fixture = (
@@ -125,6 +145,7 @@ class RepositoryWorkflowTest(unittest.TestCase):
             "test-tooling",
             "test-protocol",
             "test-motion-host",
+            "test-tile-cache-host",
             "test-render-performance",
             "test-motion-reacquire",
             "build-phone",

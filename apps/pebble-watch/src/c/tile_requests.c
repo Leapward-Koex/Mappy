@@ -27,7 +27,8 @@ void queue_visible_tiles(void) {
   for (int i = 0; i < origin_count; i++) {
     TileRequest origin = origins[i];
     TileCacheEntry *entry = find_tile(origin.world_x, origin.world_y, origin.zoom);
-    if (entry && (entry->valid || entry->pending)) {
+    if (entry && (entry->valid || entry->pending ||
+                  entry->storage_suppressed)) {
       continue;
     }
     if (s_request_count >= TILE_CACHE_SIZE) {
@@ -55,6 +56,7 @@ void queue_visible_tiles(void) {
             (long)s_viewport_x, (long)s_viewport_y);
     mark_tile_pending(entry);
     entry->valid = false;
+    entry->storage_suppressed = false;
     entry->animation_active = false;
     entry->animation_mode = TILE_ANIMATION_NONE;
     entry->last_used = ++s_access_counter;

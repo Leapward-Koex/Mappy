@@ -125,6 +125,7 @@ void invalidate_tiles_with_reason(TileInvalidationReason reason) {
   int valid_count = 0;
   int pending_count = 0;
   int capacity = active_tile_cache_size();
+  tile_storage_arena_reset(&s_tile_storage_arena);
   for (int i = 0; i < capacity; i++) {
     if (s_tiles[i].valid) {
       valid_count++;
@@ -133,6 +134,8 @@ void invalidate_tiles_with_reason(TileInvalidationReason reason) {
       pending_count++;
     }
     s_tiles[i].valid = false;
+    s_tiles[i].storage_suppressed = false;
+    tile_storage_ref_reset(&s_tiles[i].storage);
     clear_tile_pending(&s_tiles[i]);
     s_tiles[i].animation_active = false;
     s_tiles[i].animation_mode = TILE_ANIMATION_NONE;
@@ -155,7 +158,8 @@ TileCacheEntry *find_tile(int32_t world_x, int32_t world_y, int8_t zoom) {
   }
   int capacity = active_tile_cache_size();
   for (int i = 0; i < capacity; i++) {
-    if ((s_tiles[i].valid || s_tiles[i].pending) &&
+    if ((s_tiles[i].valid || s_tiles[i].pending ||
+         s_tiles[i].storage_suppressed) &&
         tile_matches(&s_tiles[i], world_x, world_y, zoom)) {
       return &s_tiles[i];
     }
@@ -368,6 +372,9 @@ void clear_offscreen_pending_tile_requests(void) {
   int capacity = active_tile_cache_size();
   for (int i = 0; i < capacity; i++) {
     TileCacheEntry *entry = &s_tiles[i];
+    if (entry->storage_suppressed && !tile_is_visible(entry)) {
+      entry->storage_suppressed = false;
+    }
     if (!entry->pending || tile_is_visible(entry)) {
       continue;
     }
@@ -422,13 +429,16 @@ TileCacheEntry *allocate_tile_slot_with_diagnostics(int32_t world_x, int32_t wor
 
   int capacity = active_tile_cache_size();
   for (int i = 0; i < capacity; i++) {
-    if (!s_tiles[i].valid && !s_tiles[i].pending) {
+    if (!s_tiles[i].valid && !s_tiles[i].pending &&
+        !s_tiles[i].storage_suppressed) {
       if (diag) {
         diag->reason = "empty";
       }
       s_tiles[i].world_x = world_x;
       s_tiles[i].world_y = world_y;
       s_tiles[i].zoom = zoom;
+      release_tile_storage(&s_tiles[i]);
+      s_tiles[i].storage_suppressed = false;
       s_tiles[i].last_used = ++s_access_counter;
       return &s_tiles[i];
     }
@@ -478,11 +488,71 @@ TileCacheEntry *allocate_tile_slot_with_diagnostics(int32_t world_x, int32_t wor
   entry->world_y = world_y;
   entry->zoom = zoom;
   entry->valid = false;
+  release_tile_storage(entry);
+  entry->storage_suppressed = false;
   clear_tile_pending(entry);
   entry->animation_active = false;
   entry->animation_mode = TILE_ANIMATION_NONE;
   entry->last_used = ++s_access_counter;
   return entry;
+}
+
+void release_tile_storage(TileCacheEntry *entry) {
+  if (!entry || !s_tiles || !tile_storage_ref_valid(&entry->storage)) {
+    if (entry) {
+      tile_storage_ref_reset(&entry->storage);
+      entry->encoded_length = 0;
+    }
+    return;
+  }
+  tile_storage_arena_remove(&s_tile_storage_arena, &entry->storage,
+                            &s_tiles[0].storage, active_tile_cache_size(),
+                            sizeof(TileCacheEntry));
+  entry->encoded_length = 0;
+}
+
+static TileCacheEntry *storage_eviction_candidate(TileCacheEntry *target) {
+  TileStorageEvictionCandidate candidates[TILE_CACHE_SIZE];
+  int capacity = active_tile_cache_size();
+  for (int i = 0; i < capacity; i++) {
+    TileCacheEntry *entry = &s_tiles[i];
+    candidates[i].eligible = entry != target && !entry->pending &&
+        entry->valid && tile_storage_ref_valid(&entry->storage);
+    candidates[i].visible = candidates[i].eligible && tile_is_visible(entry);
+    candidates[i].last_used = entry->last_used;
+  }
+  int index = tile_storage_select_eviction(candidates, capacity);
+  return index >= 0 ? &s_tiles[index] : NULL;
+}
+
+bool reserve_tile_storage(TileCacheEntry *entry, uint16_t length,
+                          TileStorageFormat format) {
+  if (!entry || !s_tiles || length == 0 ||
+      length > TILE_STORAGE_ARENA_BYTES) {
+    return false;
+  }
+
+  release_tile_storage(entry);
+  while ((uint32_t)s_tile_storage_arena.used + length >
+         s_tile_storage_arena.capacity) {
+    TileCacheEntry *evicted = storage_eviction_candidate(entry);
+    if (!evicted) {
+      return false;
+    }
+    APP_LOG(APP_LOG_LEVEL_WARNING,
+            "Tile storage evict x=%ld y=%ld z=%d bytes=%u used=%u/%u",
+            (long)evicted->world_x, (long)evicted->world_y,
+            (int)evicted->zoom, (unsigned)evicted->storage.length,
+            (unsigned)s_tile_storage_arena.used,
+            (unsigned)s_tile_storage_arena.capacity);
+    release_tile_storage(evicted);
+    evicted->valid = false;
+    evicted->storage_suppressed = true;
+    evicted->animation_active = false;
+    evicted->animation_mode = TILE_ANIMATION_NONE;
+  }
+  return tile_storage_arena_reserve(&s_tile_storage_arena, &entry->storage,
+                                    length, format);
 }
 
 int valid_visible_tile_count(void) {
@@ -509,7 +579,8 @@ bool visible_grid_has_missing_tiles(void) {
   for (int i = 0; i < count; i++) {
     TileCacheEntry *entry = find_tile(origins[i].world_x, origins[i].world_y,
                                       origins[i].zoom);
-    if (!entry || (!entry->valid && !entry->pending)) {
+    if (!entry || (!entry->valid && !entry->pending &&
+                   !entry->storage_suppressed)) {
       return true;
     }
   }

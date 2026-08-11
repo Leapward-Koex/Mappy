@@ -51,27 +51,18 @@ int active_tile_cache_size(void) {
   return s_tile_cache_size > TILE_CACHE_SIZE ? TILE_CACHE_SIZE : s_tile_cache_size;
 }
 
-int tile_cache_size_for_bytes(int tile_bytes) {
-  if (tile_bytes <= 0) {
-    return MIN_TILE_CACHE_SIZE;
-  }
-  int capacity = TILE_DECODE_CACHE_BUDGET_BYTES / tile_bytes;
-  if (capacity < MIN_TILE_CACHE_SIZE) {
-    capacity = MIN_TILE_CACHE_SIZE;
-  }
-  if (capacity > TILE_CACHE_SIZE) {
-    capacity = TILE_CACHE_SIZE;
-  }
-  return capacity;
-}
-
 void reset_tile_chunk_assembly(void) {
-  s_tile_chunk_active = false;
-  if (s_tile_chunk_buffer) {
-    free(s_tile_chunk_buffer);
-    s_tile_chunk_buffer = NULL;
+  if (s_tile_chunk_active && s_tiles) {
+    TileCacheEntry *entry = find_tile(s_tile_chunk_world_x,
+                                      s_tile_chunk_world_y,
+                                      s_tile_chunk_zoom);
+    if (entry && !entry->valid) {
+      release_tile_storage(entry);
+    }
   }
-  s_tile_chunk_buffer_size = 0;
+  s_tile_chunk_active = false;
+  s_tile_chunk_store_packed = false;
+  memset(&s_tile_chunk_decoder, 0, sizeof(s_tile_chunk_decoder));
   s_tile_chunk_world_x = 0;
   s_tile_chunk_world_y = 0;
   s_tile_chunk_zoom = 0;
@@ -81,45 +72,6 @@ void reset_tile_chunk_assembly(void) {
   s_tile_chunk_received = 0;
   s_tile_chunk_next_index = 0;
   s_tile_chunk_request_id = 0;
-}
-
-bool ensure_tile_chunk_buffer(int32_t required_bytes) {
-  if (required_bytes <= 0 || required_bytes > MAX_RLE_BYTES) {
-    return false;
-  }
-  if (s_tile_chunk_buffer && s_tile_chunk_buffer_size >= required_bytes) {
-    return true;
-  }
-
-  if (s_tile_chunk_buffer) {
-    free(s_tile_chunk_buffer);
-    s_tile_chunk_buffer = NULL;
-    s_tile_chunk_buffer_size = 0;
-  }
-  s_tile_chunk_buffer = malloc(required_bytes);
-  if (!s_tile_chunk_buffer) {
-    return false;
-  }
-  s_tile_chunk_buffer_size = required_bytes;
-  return true;
-}
-
-void assign_tile_decode_buffers(void) {
-  if (!s_tiles) {
-    return;
-  }
-  int capacity = active_tile_cache_size();
-  for (int i = 0; i < TILE_CACHE_SIZE; i++) {
-    if (s_tile_decode_buffer && i < capacity) {
-      s_tiles[i].decoded = s_tile_decode_buffer + (i * s_tile_bytes);
-    } else {
-      s_tiles[i].decoded = NULL;
-      s_tiles[i].valid = false;
-      clear_tile_pending(&s_tiles[i]);
-      s_tiles[i].animation_active = false;
-      s_tiles[i].animation_mode = TILE_ANIMATION_NONE;
-    }
-  }
 }
 
 bool configure_tile_geometry(int width, int height) {
@@ -133,41 +85,27 @@ bool configure_tile_geometry(int width, int height) {
     return false;
   }
 
-  uint8_t *buffer = NULL;
-  int next_capacity = tile_cache_size_for_bytes(next_bytes);
+  reset_tile_chunk_assembly();
+  tile_storage_arena_reset(&s_tile_storage_arena);
   if (s_tiles) {
-    if (s_tile_decode_buffer) {
-      free(s_tile_decode_buffer);
-      s_tile_decode_buffer = NULL;
-    }
-    s_tile_cache_size = 0;
-    assign_tile_decode_buffers();
-
-    while (next_capacity >= MIN_TILE_CACHE_SIZE) {
-      buffer = calloc(next_capacity, next_bytes);
-      if (buffer) {
-        break;
-      }
-      next_capacity--;
-    }
-    if (!buffer || next_capacity < MIN_TILE_CACHE_SIZE) {
-      APP_LOG(APP_LOG_LEVEL_ERROR,
-              "Tile decode buffer allocation failed for %dx%d bytes=%d cap<=%d",
-              width, height, next_bytes, next_capacity + 1);
-      return false;
+    for (int i = 0; i < TILE_CACHE_SIZE; i++) {
+      tile_storage_ref_reset(&s_tiles[i].storage);
+      s_tiles[i].valid = false;
+      s_tiles[i].storage_suppressed = false;
+      clear_tile_pending(&s_tiles[i]);
+      s_tiles[i].animation_active = false;
+      s_tiles[i].animation_mode = TILE_ANIMATION_NONE;
     }
   }
-
   s_tile_width = width;
   s_tile_height = height;
   s_tile_pixels = next_pixels;
   s_tile_bytes = next_bytes;
-  s_tile_cache_size = s_tiles ? next_capacity : TILE_CACHE_SIZE;
-  reset_tile_chunk_assembly();
-  s_tile_decode_buffer = buffer;
-  assign_tile_decode_buffers();
-  APP_LOG(APP_LOG_LEVEL_INFO, "Tile geometry %dx%d bytes=%d cache=%d/%d",
-          s_tile_width, s_tile_height, s_tile_bytes, active_tile_cache_size(),
+  s_tile_cache_size = TILE_CACHE_SIZE;
+  APP_LOG(APP_LOG_LEVEL_INFO,
+          "Tile geometry %dx%d packed=%d arena=%u cache=%d/%d",
+          s_tile_width, s_tile_height, s_tile_bytes,
+          (unsigned)TILE_STORAGE_ARENA_BYTES, active_tile_cache_size(),
           TILE_CACHE_SIZE);
   return true;
 }

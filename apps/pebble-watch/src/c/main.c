@@ -71,12 +71,25 @@ void init(void) {
 
   // AppMessage owns fixed inbox/outbox buffers for the lifetime of the app.
   // Reserve them before the opportunistic tile cache so navigation can always
-  // cold-start; configure_tile_geometry() reduces cache capacity if necessary.
+  // cold-start. Tile images live in a fixed compressed arena rather than
+  // consuming the remaining heap.
+  s_tile_storage_bytes = malloc(TILE_STORAGE_ARENA_BYTES);
+  s_tile_decode_scratch = malloc(MAX_TILE_BYTES);
+  tile_storage_arena_init(&s_tile_storage_arena, s_tile_storage_bytes,
+                          s_tile_storage_bytes ? TILE_STORAGE_ARENA_BYTES : 0);
   s_tiles = calloc(TILE_CACHE_SIZE, sizeof(TileCacheEntry));
-  if (!s_tiles) {
-    APP_LOG(APP_LOG_LEVEL_ERROR, "Tile cache allocation failed");
-  } else if (!configure_tile_geometry(DEFAULT_TILE_W, DEFAULT_TILE_H)) {
-    APP_LOG(APP_LOG_LEVEL_ERROR, "Tile decode buffer allocation failed");
+  if (!s_tile_storage_bytes || !s_tile_decode_scratch || !s_tiles) {
+    APP_LOG(APP_LOG_LEVEL_ERROR,
+            "Tile cache allocation failed arena=%d scratch=%d entries=%d",
+            s_tile_storage_bytes ? 1 : 0, s_tile_decode_scratch ? 1 : 0,
+            s_tiles ? 1 : 0);
+  } else {
+    for (int i = 0; i < TILE_CACHE_SIZE; i++) {
+      tile_storage_ref_reset(&s_tiles[i].storage);
+    }
+    if (!configure_tile_geometry(DEFAULT_TILE_W, DEFAULT_TILE_H)) {
+      APP_LOG(APP_LOG_LEVEL_ERROR, "Tile storage configuration failed");
+    }
   }
 
   s_window = window_create();
@@ -88,6 +101,11 @@ void init(void) {
   });
   window_stack_push(s_window, true);
   start_compass_service();
+  APP_LOG(APP_LOG_LEVEL_INFO,
+          "Mappy memory heap=%u arena=%u scratch=%u entries=%u",
+          (unsigned)heap_bytes_free(), (unsigned)TILE_STORAGE_ARENA_BYTES,
+          (unsigned)MAX_TILE_BYTES,
+          (unsigned)(TILE_CACHE_SIZE * sizeof(TileCacheEntry)));
 
   s_state = AppStateWaitingForPhone;
   set_bottom_text(MAPPY_WAITING_TEXT);
@@ -121,9 +139,14 @@ void deinit(void) {
     free(s_tiles);
     s_tiles = NULL;
   }
-  if (s_tile_decode_buffer) {
-    free(s_tile_decode_buffer);
-    s_tile_decode_buffer = NULL;
+  tile_storage_arena_reset(&s_tile_storage_arena);
+  if (s_tile_storage_bytes) {
+    free(s_tile_storage_bytes);
+    s_tile_storage_bytes = NULL;
+  }
+  if (s_tile_decode_scratch) {
+    free(s_tile_decode_scratch);
+    s_tile_decode_scratch = NULL;
   }
   if (s_destinations) {
     free(s_destinations);

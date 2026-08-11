@@ -44,6 +44,7 @@ From Windows PowerShell, run:
 .\tooling\pebble-wsl.ps1 test-tooling
 .\tooling\pebble-wsl.ps1 test-protocol
 .\tooling\pebble-wsl.ps1 test-motion-host
+.\tooling\pebble-wsl.ps1 test-tile-cache-host
 .\tooling\pebble-wsl.ps1 build-phone
 .\tooling\pebble-wsl.ps1 smoke-fixture
 ```
