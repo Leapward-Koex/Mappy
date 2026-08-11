@@ -720,8 +720,10 @@ void fixture_perf_scheduler_tick(bool bearing_active, bool gps_active,
 void fixture_perf_map_draw(void);
 void fixture_perf_map_draw_complete(void);
 void fixture_perf_route_projection_recompute(void);
+void fixture_perf_orientation_work(void);
 void fixture_perf_route_segment(bool submitted);
 void fixture_perf_start_mixed_sources(void);
+void fixture_perf_enter_manual_browse(void);
 void fixture_perf_maybe_emit(void);
 #endif
 void window_load(Window *window);
