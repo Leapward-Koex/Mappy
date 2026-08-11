@@ -228,6 +228,7 @@ internal class MappyWatchRuntime private constructor(context: Context) {
                     routeConfirmations.remove(requestId)?.complete("deliveryFailed")
                 }
             }
+            "tileDrop" -> tileDeliveryRetryMessage(event)?.let(bridge::enqueue)
         }
         emitEvent(event)
     }

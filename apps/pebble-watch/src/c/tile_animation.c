@@ -78,6 +78,10 @@ bool advance_tile_animations(void) {
   if (!s_tiles) {
     return false;
   }
+  bool use_origin_snapshot = map_orientation_active();
+  TileRequest origins[TILE_CACHE_SIZE];
+  int origin_count = use_origin_snapshot ?
+      visible_tile_origins(origins, active_tile_cache_size()) : 0;
   int capacity = active_tile_cache_size();
   for (int i = 0; i < capacity; i++) {
     TileCacheEntry *entry = &s_tiles[i];
@@ -85,7 +89,9 @@ bool advance_tile_animations(void) {
       continue;
     }
     bool visible = entry->valid && entry->zoom == s_viewport_zoom &&
-        tile_is_visible(entry);
+        (use_origin_snapshot ? tile_origin_list_contains(
+            origins, origin_count, entry->world_x, entry->world_y,
+            entry->zoom) : tile_is_visible(entry));
     if (visible) {
       visible_changed = true;
     }

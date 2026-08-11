@@ -137,7 +137,7 @@ def main() -> int:
     allowed_key_ids = set(canonical_keys.values())
     allowed_command_ids = set(canonical_commands.values())
     script_expectations = {
-        "tooling/pebble-emulator-codex.sh": {204, 205, 901, 902, 903},
+        "tooling/pebble-emulator-codex.sh": {204, 205, 206, 901, 902, 903},
     }
     for relative, expected_commands in script_expectations.items():
         script = read(relative)

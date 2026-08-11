@@ -83,9 +83,7 @@ void update_state_after_map_change(void) {
     return;
   }
 
-  TileRequest origins[TILE_CACHE_SIZE];
-  int visible_count = visible_tile_origins(origins, active_tile_cache_size());
-  if (visible_count > 0 && valid_visible_tile_count() >= visible_count) {
+  if (visible_grid_is_complete()) {
     s_state = AppStateMapReady;
     set_bottom_text("");
   } else if (s_state != AppStateSetupRequired && s_state != AppStateRouteError) {

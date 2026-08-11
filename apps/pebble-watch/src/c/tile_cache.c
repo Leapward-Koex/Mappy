@@ -1,119 +1,13 @@
 #include "mappy.h"
 
-// Tile cache bookkeeping, visibility checks, and stale request cleanup.
-
-void mark_tile_pending(TileCacheEntry *entry) {
-  if (!entry) {
-    return;
-  }
-  entry->pending = true;
-  time_ms(&entry->pending_started_s, &entry->pending_started_ms);
-}
-
-void clear_tile_pending(TileCacheEntry *entry) {
-  if (!entry) {
-    return;
-  }
-  entry->pending = false;
-  entry->pending_request_id = 0;
-  entry->pending_started_s = 0;
-  entry->pending_started_ms = 0;
-}
-
-uint16_t tile_pending_elapsed_ms(const TileCacheEntry *entry) {
-  if (!entry || !entry->pending) {
-    return 0;
-  }
-  if (entry->pending_started_s == 0 && entry->pending_started_ms == 0) {
-    return UINT16_MAX;
-  }
-
-  time_t now_s;
-  uint16_t now_ms;
-  time_ms(&now_s, &now_ms);
-  int32_t elapsed = (int32_t)(now_s - entry->pending_started_s) * 1000 +
-      (int32_t)now_ms - (int32_t)entry->pending_started_ms;
-  if (elapsed < 0) {
-    return 0;
-  }
-  if (elapsed > UINT16_MAX) {
-    return UINT16_MAX;
-  }
-  return (uint16_t)elapsed;
-}
-
-bool any_pending_tile_requests(void) {
-  if (!s_tiles) {
-    return false;
-  }
-  int capacity = active_tile_cache_size();
-  for (int i = 0; i < capacity; i++) {
-    if (s_tiles[i].pending) {
-      return true;
-    }
-  }
-  return false;
-}
-
-bool expire_stale_tile_requests(void) {
-  if (!s_tiles) {
-    return false;
-  }
-
-  bool expired_any = false;
-  int capacity = active_tile_cache_size();
-  for (int i = 0; i < capacity; i++) {
-    TileCacheEntry *entry = &s_tiles[i];
-    if (!entry->pending || tile_pending_elapsed_ms(entry) < TILE_REQUEST_STALE_MS) {
-      continue;
-    }
-    APP_LOG(APP_LOG_LEVEL_WARNING,
-            "Tile pending expired x=%ld y=%ld z=%d age=%u cache=%d/%d",
-            (long)entry->world_x, (long)entry->world_y, (int)entry->zoom,
-            tile_pending_elapsed_ms(entry), active_tile_cache_size(), TILE_CACHE_SIZE);
-    clear_tile_pending(entry);
-    entry->animation_active = false;
-    entry->animation_mode = TILE_ANIMATION_NONE;
-    expired_any = true;
-  }
-  return expired_any;
-}
-
-void tile_request_watchdog_callback(void *data) {
-  (void)data;
-  s_tile_request_watchdog_timer = NULL;
-  if (expire_stale_tile_requests()) {
-    send_next_tile_request();
-    if (s_map_layer) {
-      layer_mark_dirty(s_map_layer);
-    }
-  }
-  if (any_pending_tile_requests()) {
-    s_tile_request_watchdog_timer = app_timer_register(TILE_REQUEST_WATCHDOG_MS,
-                                                       tile_request_watchdog_callback,
-                                                       NULL);
-  }
-}
-
-void schedule_tile_request_watchdog(void) {
-  if (!s_tile_request_watchdog_timer && any_pending_tile_requests()) {
-    s_tile_request_watchdog_timer = app_timer_register(TILE_REQUEST_WATCHDOG_MS,
-                                                       tile_request_watchdog_callback,
-                                                       NULL);
-  }
-}
-
-void cancel_tile_request_watchdog(void) {
-  if (s_tile_request_watchdog_timer) {
-    app_timer_cancel(s_tile_request_watchdog_timer);
-    s_tile_request_watchdog_timer = NULL;
-  }
-}
+// Tile cache bookkeeping and visibility checks. Request lifetime is owned by
+// TileFlight records in tile_requests.c, not by cache entries.
 
 void invalidate_tiles_with_reason(TileInvalidationReason reason) {
   complete_tile_animations();
-  cancel_tile_request_watchdog();
-  reset_tile_chunk_assembly();
+  clear_zoom_fallback();
+  cancel_all_tile_requests();
+  cancel_tile_redraw();
   invalidate_orientation_tile_coverage();
   if (!s_tiles) {
     s_request_count = 0;
@@ -123,20 +17,16 @@ void invalidate_tiles_with_reason(TileInvalidationReason reason) {
     return;
   }
   int valid_count = 0;
-  int pending_count = 0;
+  int pending_count = any_pending_tile_requests() ? 1 : 0;
   int capacity = active_tile_cache_size();
   tile_storage_arena_reset(&s_tile_storage_arena);
   for (int i = 0; i < capacity; i++) {
     if (s_tiles[i].valid) {
       valid_count++;
     }
-    if (s_tiles[i].pending) {
-      pending_count++;
-    }
     s_tiles[i].valid = false;
     s_tiles[i].storage_suppressed = false;
     tile_storage_ref_reset(&s_tiles[i].storage);
-    clear_tile_pending(&s_tiles[i]);
     s_tiles[i].animation_active = false;
     s_tiles[i].animation_mode = TILE_ANIMATION_NONE;
   }
@@ -158,8 +48,7 @@ TileCacheEntry *find_tile(int32_t world_x, int32_t world_y, int8_t zoom) {
   }
   int capacity = active_tile_cache_size();
   for (int i = 0; i < capacity; i++) {
-    if ((s_tiles[i].valid || s_tiles[i].pending ||
-         s_tiles[i].storage_suppressed) &&
+    if ((s_tiles[i].valid || s_tiles[i].storage_suppressed) &&
         tile_matches(&s_tiles[i], world_x, world_y, zoom)) {
       return &s_tiles[i];
     }
@@ -286,6 +175,20 @@ int visible_tile_origins(TileRequest *origins, int max_count) {
   return count;
 }
 
+bool tile_origin_list_contains(const TileRequest *origins, int count,
+                               int32_t world_x, int32_t world_y, int8_t zoom) {
+  if (!origins || count <= 0) {
+    return false;
+  }
+  for (int i = 0; i < count; i++) {
+    if (origins[i].world_x == world_x && origins[i].world_y == world_y &&
+        origins[i].zoom == zoom) {
+      return true;
+    }
+  }
+  return false;
+}
+
 void invalidate_orientation_tile_coverage(void) {
   s_orientation_tile_origin_count = 0;
   s_orientation_tile_origins_valid = false;
@@ -363,59 +266,12 @@ bool tile_is_visible(const TileCacheEntry *entry) {
   return entry && tile_coordinates_visible(entry->world_x, entry->world_y, entry->zoom);
 }
 
-void clear_offscreen_pending_tile_requests(void) {
-  if (!s_tiles) {
-    return;
-  }
-
-  int cleared = 0;
-  int capacity = active_tile_cache_size();
-  for (int i = 0; i < capacity; i++) {
-    TileCacheEntry *entry = &s_tiles[i];
-    if (entry->storage_suppressed && !tile_is_visible(entry)) {
-      entry->storage_suppressed = false;
-    }
-    if (!entry->pending || tile_is_visible(entry)) {
-      continue;
-    }
-    clear_tile_pending(entry);
-    entry->animation_active = false;
-    entry->animation_mode = TILE_ANIMATION_NONE;
-    cleared++;
-  }
-  if (cleared > 0) {
-    APP_LOG(APP_LOG_LEVEL_DEBUG, "Tile pending clear offscreen count=%d cache=%d/%d",
-            cleared, capacity, TILE_CACHE_SIZE);
-  }
-}
-
-void clear_unsent_tile_requests(void) {
-  if (!s_tiles || s_request_index >= s_request_count) {
-    return;
-  }
-
-  int cleared = 0;
-  for (int i = s_request_index; i < s_request_count; i++) {
-    TileRequest request = s_request_queue[i];
-    TileCacheEntry *entry = find_tile(request.world_x, request.world_y, request.zoom);
-    if (!entry || !entry->pending || entry->valid) {
-      continue;
-    }
-    clear_tile_pending(entry);
-    entry->animation_active = false;
-    entry->animation_mode = TILE_ANIMATION_NONE;
-    cleared++;
-  }
-  if (cleared > 0) {
-    APP_LOG(APP_LOG_LEVEL_DEBUG, "Tile pending clear unsent count=%d idx=%d/%d",
-            cleared, s_request_index, s_request_count);
-  }
-}
-
 TileCacheEntry *allocate_tile_slot_with_diagnostics(int32_t world_x, int32_t world_y,
                                                            int8_t zoom,
                                                            TileSlotDiagnostics *diag) {
-  init_tile_slot_diagnostics(diag);
+  if (diag) {
+    diag->reason = "unknown";
+  }
   if (!s_tiles) {
     return NULL;
   }
@@ -429,8 +285,7 @@ TileCacheEntry *allocate_tile_slot_with_diagnostics(int32_t world_x, int32_t wor
 
   int capacity = active_tile_cache_size();
   for (int i = 0; i < capacity; i++) {
-    if (!s_tiles[i].valid && !s_tiles[i].pending &&
-        !s_tiles[i].storage_suppressed) {
+    if (!s_tiles[i].valid && !s_tiles[i].storage_suppressed) {
       if (diag) {
         diag->reason = "empty";
       }
@@ -448,19 +303,58 @@ TileCacheEntry *allocate_tile_slot_with_diagnostics(int32_t world_x, int32_t wor
   uint32_t oldest = UINT32_MAX;
   const char *replace_reason = "evictOffscreen";
   for (int i = 0; i < capacity; i++) {
-    if (s_tiles[i].pending) {
-      continue;
-    }
-    if (!tile_is_visible(&s_tiles[i]) && s_tiles[i].last_used < oldest) {
+    if (!zoom_fallback_retains_entry(&s_tiles[i]) &&
+        !tile_is_visible(&s_tiles[i]) && s_tiles[i].last_used < oldest) {
       oldest = s_tiles[i].last_used;
       replace_index = i;
     }
   }
 
   if (replace_index < 0) {
+    replace_reason = "evictSupersededFallback";
+    for (int i = 0; i < capacity; i++) {
+      TileCacheEntry *candidate = &s_tiles[i];
+      if (zoom_fallback_retains_entry(candidate) &&
+          zoom_fallback_entry_fully_covered(candidate) &&
+          candidate->last_used < oldest) {
+        oldest = candidate->last_used;
+        replace_index = i;
+      }
+    }
+  }
+
+  if (replace_index < 0) {
+    replace_reason = "evictIncomingCoveredFallback";
+    for (int i = 0; i < capacity; i++) {
+      TileCacheEntry *candidate = &s_tiles[i];
+      if (zoom_fallback_retains_entry(candidate) &&
+          zoom_fallback_entry_covered_by_tile(candidate, world_x, world_y,
+                                              zoom) &&
+          candidate->last_used < oldest) {
+        oldest = candidate->last_used;
+        replace_index = i;
+      }
+    }
+  }
+
+  if (replace_index < 0) {
     replace_reason = "evictLru";
     for (int i = 0; i < capacity; i++) {
-      if (!s_tiles[i].pending && s_tiles[i].last_used < oldest) {
+      if (!zoom_fallback_retains_entry(&s_tiles[i]) &&
+          s_tiles[i].last_used < oldest) {
+        oldest = s_tiles[i].last_used;
+        replace_index = i;
+      }
+    }
+  }
+
+  if (replace_index < 0) {
+    // The fixed cache/arena can be smaller than worst-case transient coverage.
+    // Preserve fallback until this final, validated commit forces an eviction.
+    replace_reason = "evictFallbackPressure";
+    for (int i = 0; i < capacity; i++) {
+      if (zoom_fallback_retains_entry(&s_tiles[i]) &&
+          s_tiles[i].last_used < oldest) {
         oldest = s_tiles[i].last_used;
         replace_index = i;
       }
@@ -477,12 +371,6 @@ TileCacheEntry *allocate_tile_slot_with_diagnostics(int32_t world_x, int32_t wor
   TileCacheEntry *entry = &s_tiles[replace_index];
   if (diag) {
     diag->reason = replace_reason;
-    diag->evicted = entry->valid || entry->pending;
-    diag->old_valid = entry->valid;
-    diag->old_pending = entry->pending;
-    diag->old_world_x = entry->world_x;
-    diag->old_world_y = entry->world_y;
-    diag->old_zoom = entry->zoom;
   }
   entry->world_x = world_x;
   entry->world_y = world_y;
@@ -490,7 +378,6 @@ TileCacheEntry *allocate_tile_slot_with_diagnostics(int32_t world_x, int32_t wor
   entry->valid = false;
   release_tile_storage(entry);
   entry->storage_suppressed = false;
-  clear_tile_pending(entry);
   entry->animation_active = false;
   entry->animation_mode = TILE_ANIMATION_NONE;
   entry->last_used = ++s_access_counter;
@@ -498,6 +385,7 @@ TileCacheEntry *allocate_tile_slot_with_diagnostics(int32_t world_x, int32_t wor
 }
 
 void release_tile_storage(TileCacheEntry *entry) {
+  zoom_fallback_release_entry(entry);
   if (!entry || !s_tiles || !tile_storage_ref_valid(&entry->storage)) {
     if (entry) {
       tile_storage_ref_reset(&entry->storage);
@@ -514,15 +402,36 @@ void release_tile_storage(TileCacheEntry *entry) {
 static TileCacheEntry *storage_eviction_candidate(TileCacheEntry *target) {
   TileStorageEvictionCandidate candidates[TILE_CACHE_SIZE];
   int capacity = active_tile_cache_size();
-  for (int i = 0; i < capacity; i++) {
-    TileCacheEntry *entry = &s_tiles[i];
-    candidates[i].eligible = entry != target && !entry->pending &&
-        entry->valid && tile_storage_ref_valid(&entry->storage);
-    candidates[i].visible = candidates[i].eligible && tile_is_visible(entry);
-    candidates[i].last_used = entry->last_used;
+  for (int pass = 0; pass < 5; pass++) {
+    for (int i = 0; i < capacity; i++) {
+      TileCacheEntry *entry = &s_tiles[i];
+      bool retained = zoom_fallback_retains_entry(entry);
+      bool eligible = false;
+      if (entry != target && entry->valid &&
+          tile_storage_ref_valid(&entry->storage)) {
+        if (pass == 0) {
+          eligible = !retained && !tile_is_visible(entry);
+        } else if (pass == 1) {
+          eligible = retained && zoom_fallback_entry_fully_covered(entry);
+        } else if (pass == 2) {
+          eligible = retained && zoom_fallback_entry_covered_by_tile(
+              entry, target->world_x, target->world_y, target->zoom);
+        } else if (pass == 3) {
+          eligible = !retained;
+        } else {
+          eligible = retained;
+        }
+      }
+      candidates[i].eligible = eligible;
+      candidates[i].visible = eligible && pass != 0;
+      candidates[i].last_used = entry->last_used;
+    }
+    int index = tile_storage_select_eviction(candidates, capacity);
+    if (index >= 0) {
+      return &s_tiles[index];
+    }
   }
-  int index = tile_storage_select_eviction(candidates, capacity);
-  return index >= 0 ? &s_tiles[index] : NULL;
+  return NULL;
 }
 
 bool reserve_tile_storage(TileCacheEntry *entry, uint16_t length,
@@ -545,9 +454,14 @@ bool reserve_tile_storage(TileCacheEntry *entry, uint16_t length,
             (int)evicted->zoom, (unsigned)evicted->storage.length,
             (unsigned)s_tile_storage_arena.used,
             (unsigned)s_tile_storage_arena.capacity);
+    // Only suppress an unavoidable eviction from the current request grid.
+    // A retained source-zoom tile is useful as fallback imagery, but it is not
+    // request-visible at the target zoom.  Tombstoning it here would prevent a
+    // rapid zoom reversal from ever requesting that coordinate again.
+    bool evicted_was_request_visible = tile_is_visible(evicted);
     release_tile_storage(evicted);
     evicted->valid = false;
-    evicted->storage_suppressed = true;
+    evicted->storage_suppressed = evicted_was_request_visible;
     evicted->animation_active = false;
     evicted->animation_mode = TILE_ANIMATION_NONE;
   }
@@ -559,10 +473,21 @@ int valid_visible_tile_count(void) {
   if (!s_tiles) {
     return 0;
   }
+  bool use_origin_snapshot = map_orientation_active();
+  TileRequest origins[TILE_CACHE_SIZE];
+  int origin_count = use_origin_snapshot ?
+      visible_tile_origins(origins, active_tile_cache_size()) : 0;
   int count = 0;
   int capacity = active_tile_cache_size();
   for (int i = 0; i < capacity; i++) {
-    if (s_tiles[i].valid && tile_is_visible(&s_tiles[i])) {
+    TileCacheEntry *entry = &s_tiles[i];
+    if (!entry->valid) {
+      continue;
+    }
+    bool visible = use_origin_snapshot ? tile_origin_list_contains(
+        origins, origin_count, entry->world_x, entry->world_y, entry->zoom) :
+        tile_is_visible(entry);
+    if (visible) {
       count++;
     }
   }
@@ -579,10 +504,32 @@ bool visible_grid_has_missing_tiles(void) {
   for (int i = 0; i < count; i++) {
     TileCacheEntry *entry = find_tile(origins[i].world_x, origins[i].world_y,
                                       origins[i].zoom);
-    if (!entry || (!entry->valid && !entry->pending &&
-                   !entry->storage_suppressed)) {
+    if ((!entry || (!entry->valid && !entry->storage_suppressed)) &&
+        !tile_request_is_suppressed(origins[i].world_x, origins[i].world_y,
+                                    origins[i].zoom)) {
       return true;
     }
   }
   return false;
+}
+
+bool visible_grid_is_complete(void) {
+  if (!s_has_gps || s_screen_bounds.size.w == 0 ||
+      s_screen_bounds.size.h == 0) {
+    return false;
+  }
+
+  TileRequest origins[TILE_CACHE_SIZE];
+  int count = visible_tile_origins(origins, active_tile_cache_size());
+  if (count <= 0) {
+    return false;
+  }
+  for (int i = 0; i < count; i++) {
+    TileCacheEntry *entry = find_tile(origins[i].world_x, origins[i].world_y,
+                                      origins[i].zoom);
+    if (!entry || !entry->valid) {
+      return false;
+    }
+  }
+  return true;
 }

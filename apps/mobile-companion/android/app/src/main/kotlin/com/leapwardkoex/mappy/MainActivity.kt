@@ -56,7 +56,6 @@ class MainActivity : FlutterActivity() {
     private var nativeMapSettingsGeneration = 0
     private var nativeDisplaySettingsGeneration = 0
     private val nativePendingPhoneMessages = mutableListOf<Map<String, Any?>>()
-    private var watchBridge: WatchAppMessageBridge? = null
     private val runtimeEventSink: (Map<String, Any?>) -> Unit = { event -> handleWatchBridgeEvent(event) }
     private var bridgeEventSink: EventChannel.EventSink? = null
     private var lastEmittedSetupState: String? = null
@@ -84,7 +83,6 @@ class MainActivity : FlutterActivity() {
             message = "App bridge started."
         )
         super.configureFlutterEngine(flutterEngine)
-        watchBridge = watchRuntime.bridge
         watchRuntime.attachUi(runtimeEventSink)
 
         MethodChannel(
@@ -448,7 +446,6 @@ class MainActivity : FlutterActivity() {
     override fun cleanUpFlutterEngine(flutterEngine: FlutterEngine) {
         bridgeEventSink = null
         watchRuntime.detachUi(runtimeEventSink)
-        watchBridge = null
         super.cleanUpFlutterEngine(flutterEngine)
     }
 
@@ -1342,7 +1339,6 @@ class MainActivity : FlutterActivity() {
         if (event["event"] == "tileDrop") {
             val reason = event["reason"] as? String ?: "drop"
             recordTileDropDiagnostic(event, reason)
-            enqueueTileRetryMessage(event, reason)
         }
         emitBridgeEvent(event)
         if (event["event"] != "bridgeStatus") {
@@ -1368,26 +1364,6 @@ class MainActivity : FlutterActivity() {
             tileChunkOffset = (event[KEY_CHUNK_OFFSET] as? Number)?.toInt(),
             tileTotalBytes = (event[KEY_TOTAL_BYTES] as? Number)?.toInt(),
             tileReason = reason
-        )
-    }
-
-    private fun enqueueTileRetryMessage(event: Map<String, Any?>, reason: String) {
-        if (reason == "staleTileRequest") {
-            return
-        }
-        val worldX = (event[KEY_WORLD_X] as? Number)?.toInt() ?: return
-        val worldY = (event[KEY_WORLD_Y] as? Number)?.toInt() ?: return
-        val zoom = (event[KEY_TILE_ZOOM] as? Number)?.toInt() ?: return
-        watchBridge?.enqueue(
-            errorMessage(
-                category = ERROR_TILE_PROVIDER,
-                failedCommand = CMD_TILE_REQUEST,
-                text = "Tile delivery dropped; retrying.",
-                worldX = worldX,
-                worldY = worldY,
-                zoom = zoom,
-                retryImmediately = true
-            )
         )
     }
 

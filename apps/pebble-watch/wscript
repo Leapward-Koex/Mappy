@@ -102,6 +102,10 @@ def write_fixture_options(ctx):
         'tileDelayMs': fixture_int_env('MAPPY_FIXTURE_TILE_DELAY_MS', 0, 0, 60000),
         'tileStaggerMs': fixture_int_env('MAPPY_FIXTURE_TILE_STAGGER_MS', 0, 0, 60000),
         'tileAnimationMode': fixture_int_env('MAPPY_FIXTURE_TILE_ANIMATION_MODE', -1, -1, 2),
+        'tileWidth': fixture_int_env('MAPPY_FIXTURE_TILE_WIDTH', 54, 54, 108),
+        'tileHeight': fixture_int_env('MAPPY_FIXTURE_TILE_HEIGHT', 63, 63, 126),
+        'tileChunkBytes': fixture_int_env('MAPPY_FIXTURE_TILE_CHUNK_BYTES', 3072, 128, 3072),
+        'tileHighEntropy': fixture_bool_env('MAPPY_FIXTURE_TILE_HIGH_ENTROPY'),
         'routePointCount': fixture_int_env('MAPPY_FIXTURE_ROUTE_POINT_COUNT', 3, 3, 128),
         'txSuccessDelayMs': fixture_int_env('MAPPY_FIXTURE_TX_SUCCESS_DELAY_MS', 45, 0, 5000),
         'txFailureDelayMs': fixture_int_env('MAPPY_FIXTURE_TX_FAILURE_DELAY_MS', 180, 0, 5000),
@@ -135,6 +139,9 @@ def build(ctx):
     if phone_mode in (PHONE_MODE_FIXTURE, PHONE_MODE_REAL_FIXTURE):
         write_fixture_options(ctx)
     defines = phone_mode_defines(phone_mode)
+    hardware_perf = os.environ.get('MAPPY_WATCH_HARDWARE_PERF', '').strip().lower()
+    if phone_mode == PHONE_MODE_PHONE and hardware_perf in ('1', 'true', 'yes', 'on'):
+        defines.append('MAPPY_WATCH_HARDWARE_PERF=1')
     build_worker = os.path.exists('worker_src')
     binaries = []
 
@@ -142,11 +149,14 @@ def build(ctx):
     for platform in ctx.env.TARGET_PLATFORMS:
         ctx.env = ctx.all_envs[platform]
         ctx.set_group(ctx.env.PLATFORM_NAME)
+        # LTO otherwise drops the generated, unreferenced Pebble process header.
+        ctx.env.append_value('LINKFLAGS', ['-flto', '-Wl,-u,__pbl_app_info'])
         app_elf = '{}/pebble-app.elf'.format(ctx.env.BUILD_DIR)
         ctx.pbl_build(source=ctx.path.ant_glob('src/c/**/*.c'),
                       target=app_elf,
                       bin_type='app',
-                      defines=defines)
+                      defines=defines,
+                      cflags=['-flto'])
 
         if build_worker:
             worker_elf = '{}/pebble-worker.elf'.format(ctx.env.BUILD_DIR)
@@ -154,7 +164,8 @@ def build(ctx):
             ctx.pbl_build(source=ctx.path.ant_glob('worker_src/c/**/*.c'),
                           target=worker_elf,
                           bin_type='worker',
-                          defines=defines)
+                          defines=defines,
+                          cflags=['-flto'])
         else:
             binaries.append({'platform': platform, 'app_elf': app_elf})
     ctx.env = cached_env

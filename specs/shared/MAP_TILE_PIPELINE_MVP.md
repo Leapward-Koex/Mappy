@@ -251,7 +251,8 @@ north-up grid even when the stored centered-map preference is face-forward.
 The watch must suppress duplicate requests already present in:
 
 - the valid compressed tile cache, or
-- the outbound request queue.
+- the outbound request queue, or
+- the two-entry active-response window.
 
 The request queue must either hold at least `grid_cols * grid_rows` entries, or
 the watch must run a refill scheduler after each send/timeout so all visible
@@ -260,6 +261,19 @@ tiles are eventually requested. The default `54x63` preset therefore uses a
 `tile_request_queue_len >= visible_cache_entries`.
 
 The watch may display stale prior tiles while replacements are loading.
+
+Queued coordinates do not reserve cache entries and do not start their response
+timeout. Cache allocation happens only after a complete current response has
+validated. Tile loading pauses during touch interaction and resumes after a
+100 ms post-liftoff grace period; AppMessage callbacks for obsolete responses
+must not decode, store, or dirty the map.
+
+Accepted visible tiles share a non-sliding 60 ms redraw window; the first tile
+on an empty map and completion of the visible grid may flush immediately. On
+Emery hardware, accepted input must reach a changed frame within 100 ms at p95
+with no interaction stall above 150 ms. North-up map draws must remain at or
+below 50 ms, facing-up draws at or below 100 ms, and a healthy deterministic
+cold load must complete within five seconds.
 
 Zoom transitions must preserve the previously visible compressed tiles as
 transient coverage instead of immediately unloading or blanking them. While the
@@ -310,6 +324,12 @@ crosses_y = offset_y + watch_tile_height > 256
 10. RLE-pack the `watch_tile_width * watch_tile_height` palette indexes.
 11. Queue one logical `CMD_TILE` response, split into ordered chunks when the
   encoded tile does not fit in one AppMessage.
+
+The send queue treats that logical response as an atomic group. It validates
+consistent metadata and exact contiguous payload coverage before enqueueing,
+keeps sibling chunks ordered, and waits 30 ms after the final chunk ACK before
+starting another tile response. GPS and control delivery bypass this tile-only
+cooldown.
 
 The phone should maintain:
 

@@ -127,6 +127,16 @@ class RepositoryWorkflowTest(unittest.TestCase):
             "if (!ignoreStartupReady) setTimeout(sendReadyState, phoneReadyDelayMs);",
             fixture,
         )
+        self.assertIn(
+            "positiveModulo(tileColumn, 4) === 0",
+            fixture,
+        )
+        self.assertIn(
+            "positiveModulo(tileRow, 3) === 0",
+            fixture,
+        )
+        self.assertIn("offset += tileChunkBytes", fixture)
+        self.assertIn("'tile-he-'", fixture)
 
     def test_shell_scripts_parse_and_help_lists_supported_commands(self) -> None:
         helper = ROOT / "tooling" / "pebble-emulator-codex.sh"
@@ -146,7 +156,10 @@ class RepositoryWorkflowTest(unittest.TestCase):
             "test-protocol",
             "test-motion-host",
             "test-tile-cache-host",
+            "test-tile-scheduler-host",
             "test-render-performance",
+            "test-pan-under-load",
+            "test-rapid-zoom-reversal",
             "test-motion-reacquire",
             "build-phone",
             "capture-fixture",
@@ -165,6 +178,9 @@ class RepositoryWorkflowTest(unittest.TestCase):
             self.assertIn(command, result.stdout)
 
         helper_text = helper.read_text(encoding="utf-8")
+        self.assertIn("test_tile_scheduler_host", helper_text)
+        self.assertIn("test_rapid_zoom_reversal", helper_text)
+        self.assertTrue((ROOT / "tooling" / "test-tile-request-scheduler.c").is_file())
         self.assertIn('PEBBLE_QEMU_CAPTURE_FRAMES:-60', helper_text)
         self.assertIn('PEBBLE_QEMU_CAPTURE_INTERVAL:-0.2', helper_text)
         for fixture_name in ("stationary-raise.csv", "walking-to-look.csv"):

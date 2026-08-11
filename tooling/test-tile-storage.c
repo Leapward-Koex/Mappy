@@ -52,6 +52,7 @@ static void test_geometry_round_trips(void) {
   uint8_t expected[MAX_PIXELS];
   uint8_t row_index[MAX_INDEX_BYTES];
   uint8_t packed_row[(108 + 1) / 2];
+  uint8_t packed_block[TILE_RLE_INDEX_BLOCK_PIXELS / 2];
   for (size_t geometry = 0; geometry < 3; geometry++) {
     int width = geometries[geometry][0];
     int height = geometries[geometry][1];
@@ -74,6 +75,25 @@ static void test_geometry_round_trips(void) {
                                   packed_row[x / 2] & 0x0f;
         CHECK(value == expected[row * width + x],
               "indexed row and source pixels should be identical");
+      }
+      int columns = TILE_RLE_INDEX_COLUMNS(width);
+      for (int block = 0; block < columns; block++) {
+        CHECK(tile_rle_decode_indexed_block(
+                  encoded, encoded_len, row_index,
+                  TILE_RLE_INDEX_BYTES(width, height), width, height, block,
+                  row, packed_block, sizeof(packed_block)),
+              "indexed RLE geometry should decode each block");
+        int first_x = block * TILE_RLE_INDEX_BLOCK_PIXELS;
+        int block_pixels = width - first_x;
+        if (block_pixels > TILE_RLE_INDEX_BLOCK_PIXELS) {
+          block_pixels = TILE_RLE_INDEX_BLOCK_PIXELS;
+        }
+        for (int x = 0; x < block_pixels; x++) {
+          uint8_t value = (x & 1) ? packed_block[x / 2] >> 4 :
+                                    packed_block[x / 2] & 0x0f;
+          CHECK(value == expected[row * width + first_x + x],
+                "indexed block and source pixels should be identical");
+        }
       }
     }
     for (int i = 0; i < pixels; i++) {
@@ -122,6 +142,7 @@ static void test_high_entropy_packed_fallback(void) {
 static void test_malformed_rle(void) {
   uint8_t packed[8];
   uint8_t row_index[2 * TILE_RLE_ROW_INDEX_BYTES];
+  uint8_t packed_block[TILE_RLE_INDEX_BLOCK_PIXELS / 2];
   const uint8_t underfill[] = {0x31};
   const uint8_t overfill[] = {0xf1};
   CHECK(!tile_rle_decode(underfill, sizeof(underfill), 8, packed,
@@ -136,6 +157,10 @@ static void test_malformed_rle(void) {
   CHECK(!tile_rle_build_row_index(overfill, sizeof(overfill), 4, 2,
                                   row_index, sizeof(row_index)),
         "overfilled RLE should not build a row index");
+  CHECK(!tile_rle_decode_indexed_block(
+            underfill, sizeof(underfill), row_index, sizeof(row_index), 4, 2,
+            1, 0, packed_block, sizeof(packed_block)),
+        "indexed block should reject an out-of-range block");
 }
 
 static void test_arena_compaction_and_bound(void) {

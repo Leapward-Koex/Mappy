@@ -13,6 +13,30 @@ internal fun watchMessage(command: Int, fields: Map<String, Any?> = emptyMap()):
         put(KEY_CMD, command)
     }
 
+internal fun tileDeliveryRetryMessage(event: Map<String, Any?>): Map<String, Any?>? {
+    if (event["reason"] == "staleTileRequest") {
+        return null
+    }
+    val worldX = (event[KEY_WORLD_X] as? Number)?.toInt() ?: return null
+    val worldY = (event[KEY_WORLD_Y] as? Number)?.toInt() ?: return null
+    val zoom = (event[KEY_TILE_ZOOM] as? Number)?.toInt() ?: return null
+    val requestId = (event[KEY_REQUEST_ID] as? Number)?.toInt()?.takeIf { it > 0 } ?: return null
+    return watchMessage(
+        CMD_ERROR_STATE,
+        mapOf(
+            KEY_BUTTON_ID to ERROR_TILE_PROVIDER,
+            KEY_CHUNK_INDEX to CMD_TILE_REQUEST,
+            KEY_CHUNK_OFFSET to 0,
+            KEY_INSTRUCTION to "Tile delivery dropped; retrying.",
+            KEY_WORLD_X to worldX,
+            KEY_WORLD_Y to worldY,
+            KEY_TILE_ZOOM to zoom,
+            KEY_TOTAL_BYTES to 1,
+            KEY_REQUEST_ID to requestId
+        )
+    )
+}
+
 internal fun routeWindowPoints(
     points: List<Map<*, *>>,
     centerX: Int,
