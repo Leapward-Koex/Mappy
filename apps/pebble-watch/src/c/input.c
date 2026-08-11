@@ -368,7 +368,16 @@ void select_menu_item(void) {
         send_backlight();
       } else if (s_menu_selection == SettingsRowOrientation) {
         complete_gps_smoothing();
+        bool resume_follow_for_facing =
+            s_map_orientation != 1 && s_manual_pan && s_has_gps;
         bool was_orientation_active = map_orientation_active();
+        if (resume_follow_for_facing) {
+          s_viewport_x = scale_world_to_zoom(s_gps_world_x, s_gps_zoom,
+                                             s_viewport_zoom);
+          s_viewport_y = scale_world_to_zoom(s_gps_world_y, s_gps_zoom,
+                                             s_viewport_zoom);
+          s_manual_pan = false;
+        }
         s_map_orientation = s_map_orientation == 1 ? 0 : 1;
         persist_write_int(PERSIST_MAP_ORIENTATION, s_map_orientation);
         send_map_orientation();
@@ -376,11 +385,13 @@ void select_menu_item(void) {
           s_map_bearing_display_centi_degrees = 0;
         }
         sync_map_bearing_smoothing(true);
-        if (was_orientation_active || map_orientation_active()) {
+        if (resume_follow_for_facing || was_orientation_active ||
+            map_orientation_active()) {
           complete_tile_animations();
         }
         update_state_after_map_change();
-        if (was_orientation_active || map_orientation_active()) {
+        if (resume_follow_for_facing || was_orientation_active ||
+            map_orientation_active()) {
           queue_visible_tiles();
         }
         refresh_motion_detection_service();

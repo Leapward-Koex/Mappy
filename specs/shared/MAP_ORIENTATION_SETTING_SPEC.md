@@ -392,6 +392,11 @@ Menus:
 - Watch settings/actions may show the current orientation.
 - Full editing is required in the Flutter Settings screen. Watch-side editing is
   optional; if added, it must send `CMD_MAP_ORIENTATION`.
+- When the user directly selects `forward_up` from the watch while manually
+  browsing, the watch recenters on the latest GPS fix and resumes GPS-follow so
+  the requested orientation takes effect immediately. This does not change the
+  protocol rule for phone-originated settings reconciliation, which records the
+  preference without moving a manually browsed viewport.
 
 ## Mobile UI
 
@@ -451,6 +456,9 @@ Watch unit tests:
   north-up, and ignores subsequent heading changes for map rotation.
 - Recenter from manual-browse mode centers on the latest GPS fix and reapplies
   `forward_up` when the bearing is valid.
+- Selecting `forward_up` from the watch in manual-browse mode centers on the
+  latest GPS fix and resumes heading-driven rotation without requiring a
+  separate recenter action.
 - Current-location cone direction follows the watch compass source specified in
   `../watch/CURRENT_LOCATION_VIEW_CONE_SPEC.md`.
 - Orientation changes do not clear route, GPS, destination, or nav-step state.
