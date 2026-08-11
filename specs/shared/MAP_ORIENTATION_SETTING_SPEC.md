@@ -362,6 +362,9 @@ Performance requirements:
   a map redraw with low latency.
 - Facing-heading updates in manual-browse mode must not rotate the map or
   rebuild tile coverage.
+- Manual browse suspends map rotation, not facing-bearing smoothing. The
+  current-location cone continues using the normal bearing animation profile
+  while the active map bearing remains zero.
 - The watch must not rebuild the visible tile request queue for every accepted
   compass sample. It should compare the current orientation-aware tile coverage
   with the last requested coverage, and only requeue when the origin set changes
@@ -487,6 +490,8 @@ Watch unit tests:
 - Normal bearing smoothing retains its existing 4–12 degree profile. Fast
   reacquisition is visibly animated, follows the shortest wraparound path,
   accepts a changed target, and completes 180 degrees within 240 ms.
+- Manual-browse bearing animation advances across multiple visual ticks without
+  rotating the map, recomputing route projection, or rebuilding tile coverage.
 
 Mobile tests:
 
