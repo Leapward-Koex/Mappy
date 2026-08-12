@@ -83,6 +83,28 @@ class AndroidPublicationComplianceTest {
         )
     }
 
+    @Test
+    fun tileDeliveryRetryIsOwnedByTheBackgroundRuntime() {
+        val activitySource = mainActivitySource()
+        val runtimeSource = sourceFile("MappyWatchRuntime.kt")
+        val payloadSource = sourceFile("NativeWatchPayloads.kt")
+
+        assertTrue(
+            runtimeSource.contains("\"tileDrop\" -> tileDeliveryRetryMessage(event)?.let(bridge::enqueue)"),
+            "The persistent watch runtime must retire dropped tile requests even without an Activity."
+        )
+        assertTrue(
+            !activitySource.contains("enqueueTileRetryMessage") &&
+                !activitySource.contains("watchBridge?.enqueue"),
+            "Activity attachment must not own tile-drop retries."
+        )
+        assertTrue(
+            payloadSource.contains("event[KEY_REQUEST_ID]") &&
+                payloadSource.contains("KEY_REQUEST_ID to requestId"),
+            "Runtime-owned tile retries must preserve the positive logical request ID."
+        )
+    }
+
     private fun assertNoEventSource(source: String, eventName: String, rejectedSource: String) {
         var searchStart = 0
         while (true) {
@@ -114,12 +136,16 @@ class AndroidPublicationComplianceTest {
     }
 
     private fun mainActivitySource(): String {
+        return sourceFile("MainActivity.kt")
+    }
+
+    private fun sourceFile(name: String): String {
         val candidates = listOf(
-            File("app/src/main/kotlin/com/leapwardkoex/mappy/MainActivity.kt"),
-            File("src/main/kotlin/com/leapwardkoex/mappy/MainActivity.kt")
+            File("app/src/main/kotlin/com/leapwardkoex/mappy/$name"),
+            File("src/main/kotlin/com/leapwardkoex/mappy/$name")
         )
         val file = candidates.firstOrNull { it.isFile }
-        assertTrue(file != null, "MainActivity.kt was not found from the unit test working directory.")
+        assertTrue(file != null, "$name was not found from the unit test working directory.")
         return file.readText()
     }
 }

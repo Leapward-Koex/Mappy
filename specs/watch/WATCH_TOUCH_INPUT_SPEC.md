@@ -94,9 +94,9 @@ Rules:
   recenters on the latest GPS fix.
 - If the stored orientation preference is facing-up, manual browse suspends
   heading-driven map rotation and renders north-up until recenter.
-- Route lines, destination markers, current-location puck/view cone,
-  and map tiles must all project from the same viewport state and active map
-  orientation.
+- Route lines, destination markers, current-location puck/view cone or
+  off-screen edge line, and map tiles must all project from the same viewport
+  state and active map orientation.
 
 ## Single-Finger Pan
 
@@ -114,6 +114,10 @@ Dragging map content right/down moves the viewport center left/up in world-pixel
 space. If the drag began from facing-up follow mode, the first accepted drag
 also transitions the map to north-up manual browse; subsequent drag deltas use
 ordinary north-up mapping. One-finger rotate is not supported or inferred.
+Each accepted position update redraws the current-location overlay. Once its
+white puck halo is completely outside the screen, the edge line defined by
+`CURRENT_LOCATION_VIEW_CONE_SPEC.md` must move directly with the clamped GPS
+projection and wrap continuously around corners.
 
 ## Pinch Zoom
 
@@ -250,6 +254,8 @@ Real-watch verification on `emery` is required before pinch is called supported:
 - Confirm no touch gesture works while a menu/modal is active.
 - Confirm map, route, current marker, heading, and destination projections stay
   aligned during pan and zoom.
+- Confirm the off-screen current-location edge line follows manual drag frames
+  along every side, bends around corners, and disappears after recenter.
 - Confirm smooth zoom rendering is nonblank and does not corrupt UI bands; if
   smooth zoom is not shipped, record the discrete-level fallback decision.
 - Confirm non-touch or disabled-touch builds pass the same map, zoom, route, and
@@ -263,6 +269,8 @@ replace the real-watch pinch availability check.
 - Real `emery` hardware can pan the map with one finger when touch is enabled.
 - Panning away from the centered current location suspends auto-follow and
   facing-up rotation instead of disabling panning.
+- Panning the complete puck halo off-screen shows the specified blue/white edge
+  line at the clamped GPS position and moves it without visible lag.
 - Real `emery` hardware can pinch to zoom in/out when the SDK exposes reliable
   pinch or two-contact data.
 - Pinch zoom sends only existing `CMD_BUTTON` zoom notifications plus normal

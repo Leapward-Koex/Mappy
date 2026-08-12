@@ -14,10 +14,18 @@ static AppTimer *s_init_retry_timer;
 static AppTimer *s_route_action_retry_timer;
 static uint8_t s_init_retry_attempt;
 static bool s_phone_ready;
+static bool s_zoom_notification_pending;
+static int8_t s_zoom_notification_delta;
+static int8_t s_zoom_notification_inflight_delta;
 
 static bool route_action_pending(void) {
   return s_route_clear_pending || s_route_applied_pending ||
       s_route_complete_pending;
+}
+
+static bool deferred_control_pending(void) {
+  return s_zoom_notification_pending || route_action_pending() ||
+      s_pending_log_count > 0 || s_pending_setting_mask != 0;
 }
 
 static void route_action_retry_callback(void *context) {
@@ -26,7 +34,7 @@ static void route_action_retry_callback(void *context) {
   if (!s_outbox_busy) {
     send_deferred_route_action();
   }
-  if (route_action_pending() && !s_route_action_retry_timer) {
+  if (deferred_control_pending() && !s_route_action_retry_timer) {
     s_route_action_retry_timer = app_timer_register(1000, route_action_retry_callback, NULL);
   }
 }
@@ -303,16 +311,38 @@ void send_route_complete(void) {
   s_route_complete_pending = false;
 }
 
-void send_zoom_button(int delta) {
+static bool send_pending_zoom_notification(void) {
+  if (!s_zoom_notification_pending) {
+    return false;
+  }
   DictionaryIterator *iter;
   AppMessageResult result = send_message_begin(&iter, CMD_BUTTON);
   if (result != APP_MSG_OK) {
-    return;
+    schedule_route_action_retry();
+    return true;
   }
 
+  int8_t delta = s_zoom_notification_delta >= 0 ? 1 : -1;
   write_i32(iter, MESSAGE_KEY_button_id, delta);
   write_i32(iter, MESSAGE_KEY_is_color, s_theme_mode);
-  app_message_outbox_send();
+  result = app_message_outbox_send();
+  if (result != APP_MSG_OK) {
+    s_outbox_busy = false;
+    s_outbox_cmd = 0;
+    schedule_route_action_retry();
+    return true;
+  }
+  s_zoom_notification_pending = false;
+  s_zoom_notification_inflight_delta = delta;
+  return true;
+}
+
+void send_zoom_button(int delta) {
+  s_zoom_notification_delta = delta >= 0 ? 1 : -1;
+  s_zoom_notification_pending = true;
+  if (!s_outbox_busy) {
+    send_deferred_route_action();
+  }
 }
 
 static bool is_saved_destination_id(int slot) {
@@ -380,6 +410,9 @@ void send_route_clear(void) {
 }
 
 bool send_deferred_route_action(void) {
+  if (send_pending_zoom_notification()) {
+    return true;
+  }
   PendingLogEvent event;
   if (dequeue_log_event(&event)) {
     send_log_event(event.category, event.detail, event.detail2, event.text);
@@ -704,6 +737,18 @@ void apply_debug_compass(DictionaryIterator *iter) {
     fixture_perf_enter_manual_browse();
   } else if (fixture_camera_control == 2) {
     recenter_viewport();
+  } else if (fixture_camera_control == 3) {
+    Tuple *screen_x_tuple = dict_find(iter, MESSAGE_KEY_world_x);
+    Tuple *screen_y_tuple = dict_find(iter, MESSAGE_KEY_world_y);
+    if (screen_x_tuple && screen_y_tuple) {
+      fixture_set_location_screen_position(screen_x_tuple->value->int32,
+                                           screen_y_tuple->value->int32);
+    }
+  } else if (fixture_camera_control == 4) {
+    Tuple *action_tuple = dict_find(iter, MESSAGE_KEY_width);
+    if (action_tuple) {
+      fixture_perf_pan_under_load(action_tuple->value->int32);
+    }
   }
 #endif
   bool was_orientation_active = map_orientation_active();
@@ -734,7 +779,8 @@ void apply_debug_compass(DictionaryIterator *iter) {
   if (heading >= 0 && fixture_camera_control == 0 && display_changed) {
     fixture_perf_bearing_immediate_step();
   }
-  if (heading >= 0 && dict_find(iter, MESSAGE_KEY_width)) {
+  if (heading >= 0 && fixture_camera_control == 0 &&
+      dict_find(iter, MESSAGE_KEY_width)) {
     fixture_perf_start_mixed_sources();
   }
 #endif
@@ -810,7 +856,6 @@ void apply_debug_tile(DictionaryIterator *iter) {
   memcpy(stored, s_tile_decode_scratch, s_tile_bytes);
   entry->valid = true;
   entry->storage_suppressed = false;
-  clear_tile_pending(entry);
   entry->last_used = ++s_access_counter;
   start_tile_animation(entry, true);
   update_state_after_map_change();
@@ -909,21 +954,47 @@ void apply_travel_mode(DictionaryIterator *iter) {
 }
 
 
-void apply_error(DictionaryIterator *iter) {
+bool apply_error(DictionaryIterator *iter) {
   Tuple *category_tuple = dict_find(iter, MESSAGE_KEY_button_id);
   Tuple *failed_cmd_tuple = dict_find(iter, MESSAGE_KEY_chunk_index);
   Tuple *retry_tuple = dict_find(iter, MESSAGE_KEY_total_bytes);
   Tuple *instruction_tuple = dict_find(iter, MESSAGE_KEY_instruction);
-  s_error_category = category_tuple ? category_tuple->value->int32 : 0;
+  int error_category = category_tuple ? category_tuple->value->int32 : 0;
   int32_t failed_cmd = failed_cmd_tuple ? failed_cmd_tuple->value->int32 : 0;
   bool retry_immediately = retry_tuple && retry_tuple->value->int32 == 1;
+  Tuple *x_tuple = dict_find(iter, MESSAGE_KEY_world_x);
+  Tuple *y_tuple = dict_find(iter, MESSAGE_KEY_world_y);
+  Tuple *zoom_tuple = dict_find(iter, MESSAGE_KEY_tile_zoom);
+  Tuple *request_id_tuple = dict_find(iter, MESSAGE_KEY_request_id);
+
+  if (failed_cmd == CMD_TILE_REQUEST) {
+    if (!x_tuple || !y_tuple || !zoom_tuple || !request_id_tuple ||
+        request_id_tuple->value->int32 <= 0) {
+      return false;
+    }
+    TileFlight *flight = find_tile_flight(
+        x_tuple->value->int32, y_tuple->value->int32,
+        zoom_tuple->value->int32, request_id_tuple->value->int32);
+    if (!flight) {
+      return false;
+    }
+    if (flight->discard_only) {
+      handle_tile_request_error(
+          x_tuple->value->int32, y_tuple->value->int32,
+          zoom_tuple->value->int32, request_id_tuple->value->int32,
+          false, retry_immediately);
+      return false;
+    }
+  }
+
+  s_error_category = error_category;
   if (failed_cmd == CMD_NAV_STEPS) {
     s_nav_request_inflight = false;
   }
 
   const char *text = instruction_tuple ? instruction_tuple->value->cstring : NULL;
   if (!text || text[0] == '\0') {
-    switch (s_error_category) {
+    switch (error_category) {
       case 1:
       case 2:
         text = "Open phone setup";
@@ -949,40 +1020,21 @@ void apply_error(DictionaryIterator *iter) {
     }
   }
 
-  if (s_error_category == 1 || s_error_category == 2 || s_error_category == 9) {
+  if (error_category == 1 || error_category == 2 || error_category == 9) {
     s_state = AppStateSetupRequired;
     copy_bounded_text(s_top_text, sizeof(s_top_text), "Setup required");
-  } else if (s_error_category == 6 || s_error_category == 7 || s_error_category == 8) {
+  } else if (error_category == 6 || error_category == 7 || error_category == 8) {
     s_state = AppStateRouteError;
   }
   set_bottom_text(text);
 
-  Tuple *x_tuple = dict_find(iter, MESSAGE_KEY_world_x);
-  Tuple *y_tuple = dict_find(iter, MESSAGE_KEY_world_y);
-  Tuple *zoom_tuple = dict_find(iter, MESSAGE_KEY_tile_zoom);
-  if (x_tuple && y_tuple && zoom_tuple) {
-    TileCacheEntry *entry = find_tile(x_tuple->value->int32, y_tuple->value->int32,
-                                      zoom_tuple->value->int32);
-    if (entry) {
-      if (failed_cmd == CMD_TILE_REQUEST && !entry->valid &&
-          s_error_category != 1 && s_error_category != 2) {
-        if (retry_immediately) {
-          clear_tile_pending(entry);
-          entry->animation_active = false;
-          entry->animation_mode = TILE_ANIMATION_NONE;
-          queue_visible_tiles();
-        } else {
-          mark_tile_pending(entry);
-          schedule_tile_request_watchdog();
-        }
-      } else {
-        clear_tile_pending(entry);
-      }
-    } else if (failed_cmd == CMD_TILE_REQUEST && retry_immediately &&
-               s_error_category != 1 && s_error_category != 2) {
-      queue_visible_tiles();
-    }
+  if (failed_cmd == CMD_TILE_REQUEST) {
+    handle_tile_request_error(
+        x_tuple->value->int32, y_tuple->value->int32,
+        zoom_tuple->value->int32, request_id_tuple->value->int32,
+        error_category == 1 || error_category == 2, retry_immediately);
   }
+  return true;
 }
 
 void inbox_received(DictionaryIterator *iter, void *context) {
@@ -1003,6 +1055,7 @@ void inbox_received(DictionaryIterator *iter, void *context) {
         set_bottom_text("Phone/watch mismatch");
       } else {
         cancel_init_retry();
+        resume_tile_requests_after_phone_ready();
         update_state_after_map_change();
       }
       break;
@@ -1012,6 +1065,7 @@ void inbox_received(DictionaryIterator *iter, void *context) {
       break;
     case CMD_TILE:
       apply_tile(iter);
+      mark_dirty_after_dispatch = false;
       break;
     case CMD_THEME:
       apply_theme(iter);
@@ -1075,7 +1129,7 @@ void inbox_received(DictionaryIterator *iter, void *context) {
       apply_debug_route_progress(iter);
       break;
     case CMD_ERROR_STATE:
-      apply_error(iter);
+      mark_dirty_after_dispatch = apply_error(iter);
       break;
     case CMD_DESTINATIONS: {
       Tuple *data_tuple = dict_find(iter, MESSAGE_KEY_chunk_data);
@@ -1111,6 +1165,13 @@ void outbox_sent(DictionaryIterator *iter, void *context) {
   if (completed_cmd == CMD_INIT && !s_phone_ready) {
     schedule_init_retry();
   }
+  if (completed_cmd == CMD_TILE_REQUEST) {
+    // The outbound ACK only frees the AppMessage outbox. The corresponding
+    // flight remains active until its tile/error response is terminal.
+    s_inflight_tile_request_id = 0;
+  } else if (completed_cmd == CMD_BUTTON) {
+    s_zoom_notification_inflight_delta = 0;
+  }
   if (send_deferred_route_action()) {
     return;
   }
@@ -1119,18 +1180,20 @@ void outbox_sent(DictionaryIterator *iter, void *context) {
 
 void outbox_failed(DictionaryIterator *iter, AppMessageResult reason, void *context) {
   APP_LOG(APP_LOG_LEVEL_WARNING, "Outbox failed cmd=%ld reason=%d", (long)s_outbox_cmd, (int)reason);
-  bool should_log_tile_failure = false;
+  int32_t failed_cmd = s_outbox_cmd;
   if (s_outbox_cmd == CMD_INIT) {
     schedule_init_retry();
   } else if (s_outbox_cmd == CMD_TILE_REQUEST) {
-    TileCacheEntry *entry = find_tile(s_inflight_request.world_x, s_inflight_request.world_y,
-                                      s_inflight_request.zoom);
-    if (entry) {
-      clear_tile_pending(entry);
-      entry->animation_active = false;
-      entry->animation_mode = TILE_ANIMATION_NONE;
+    // Handled after the outbox is released below so the retry/log scheduler can
+    // use the next control-message slot.
+  } else if (s_outbox_cmd == CMD_BUTTON) {
+    if (!s_zoom_notification_pending &&
+        s_zoom_notification_inflight_delta != 0) {
+      s_zoom_notification_delta = s_zoom_notification_inflight_delta;
     }
-    should_log_tile_failure = true;
+    s_zoom_notification_pending = true;
+    s_zoom_notification_inflight_delta = 0;
+    schedule_route_action_retry();
   } else if (s_outbox_cmd == CMD_NAV_STEPS) {
     s_nav_request_inflight = false;
   } else if (s_outbox_cmd == CMD_ROUTE_CLEAR) {
@@ -1152,8 +1215,8 @@ void outbox_failed(DictionaryIterator *iter, AppMessageResult reason, void *cont
   }
   s_outbox_busy = false;
   s_outbox_cmd = 0;
-  if (should_log_tile_failure) {
-    send_log_event(6, s_inflight_request.zoom, (int)reason, "tile request failed");
+  if (failed_cmd == CMD_TILE_REQUEST) {
+    handle_tile_request_outbox_failure(reason);
   }
   if (send_deferred_route_action()) {
     return;

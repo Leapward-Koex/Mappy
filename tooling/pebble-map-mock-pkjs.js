@@ -14,6 +14,7 @@
   var CMD_GPS = 201;
   var CMD_TILE_REQUEST = 202;
   var CMD_TILE = 203;
+  var CMD_MAP_SETTINGS = 204;
   var CMD_TILE_ANIMATION = 206;
   var CMD_BUTTON = 207;
   var CMD_DESTINATIONS = 301;
@@ -42,6 +43,10 @@
   var tileDelayMs = numberOption('tileDelayMs', 0, 0, 60000);
   var tileStaggerMs = numberOption('tileStaggerMs', 0, 0, 60000);
   var tileAnimationMode = numberOption('tileAnimationMode', -1, -1, 2);
+  var configuredTileWidth = numberOption('tileWidth', 54, 54, 108);
+  var configuredTileHeight = numberOption('tileHeight', 63, 63, 126);
+  var tileChunkBytes = numberOption('tileChunkBytes', 3072, 128, 3072);
+  var tileHighEntropy = fixtureOptions.tileHighEntropy === true;
   var routePointCount = numberOption('routePointCount', 3, 3, 128);
   var phoneReadyDelayMs = numberOption('phoneReadyDelayMs', 0, 0, 60000);
   var ignoreStartupReady = fixtureOptions.ignoreStartupReady === true;
@@ -50,11 +55,22 @@
   var tileSequence = 0;
   var initCount = 0;
 
+  if ((configuredTileWidth === 54 && configuredTileHeight === 63) ||
+      (configuredTileWidth === 72 && configuredTileHeight === 84) ||
+      (configuredTileWidth === 108 && configuredTileHeight === 126)) {
+    TILE_W = configuredTileWidth;
+    TILE_H = configuredTileHeight;
+  }
+
   function numberOption(name, fallback, minValue, maxValue) {
     var value = Number(fixtureOptions[name]);
     if (!isFinite(value)) return fallback;
     value = Math.round(value);
     return Math.max(minValue, Math.min(maxValue, value));
+  }
+
+  function positiveModulo(value, divisor) {
+    return ((value % divisor) + divisor) % divisor;
   }
 
   function pick(payload, name, id) {
@@ -150,7 +166,7 @@
     return 1 + ((Math.floor((wx + px) / 27) + Math.floor((wy + py) / 31)) % 3);
   }
 
-  function encodeTile(wx, wy) {
+  function encodeTile(wx, wy, useHighEntropy) {
     var encoded = [];
     var runValue = -1;
     var runLength = 0;
@@ -163,7 +179,9 @@
 
     for (var py = 0; py < TILE_H; py++) {
       for (var px = 0; px < TILE_W; px++) {
-        var value = tilePaletteIndex(wx, wy, px, py) & 0x0f;
+        var value = useHighEntropy ?
+            ((px + py * TILE_W) & 1 ? 5 : 10) :
+            tilePaletteIndex(wx, wy, px, py) & 0x0f;
         if (value === runValue && runLength < 16) {
           runLength++;
         } else {
@@ -256,6 +274,11 @@
       protocol_version: 2
     });
     enqueue('theme', { cmd: CMD_THEME, button_id: 1 });
+    enqueue('map-settings', {
+      cmd: CMD_MAP_SETTINGS,
+      width: TILE_W,
+      height: TILE_H
+    });
     enqueue('units', { cmd: CMD_UNITS, button_id: 1 });
     enqueue('backlight', { cmd: CMD_BACKLIGHT, button_id: 0 });
     if (tileAnimationMode >= 0) {
@@ -320,30 +343,61 @@
       var wy = Number(pick(payload, 'world_y', KEY_WORLD_Y) || 0);
       var zoom = Number(pick(payload, 'tile_zoom', KEY_TILE_ZOOM) || ROUTE_ZOOM);
       var requestId = Number(pick(payload, 'request_id', KEY_REQUEST_ID) || 0);
-      var tile = encodeTile(wx, wy);
-      var tileMessage = {
-        cmd: CMD_TILE,
-        world_x: wx,
-        world_y: wy,
-        tile_zoom: zoom,
-        total_bytes: tile.length,
-        request_id: requestId,
-        chunk_data: tile
-      };
+      // A complete high-entropy rotated viewport cannot fit in the watch's
+      // bounded 46 KiB arena after it falls back to packed storage. Stable
+      // stress tiles exercise real multi-chunk streaming while ensuring a
+      // retry or zoom reversal returns the same bytes for the same tile.
+      var tileColumn = Math.floor(wx / TILE_W);
+      var tileRow = Math.floor(wy / TILE_H);
+      // Emery can need a 4x3 tile envelope in facing mode. One stable lattice
+      // point per such envelope guarantees a real multi-chunk response without
+      // making a 108x126 visible grid exceed the watch's tile arena.
+      var highEntropyTile = tileHighEntropy &&
+          positiveModulo(tileColumn, 4) === 0 &&
+          positiveModulo(tileRow, 3) === 0;
+      var tile = encodeTile(wx, wy, highEntropyTile);
+      var tileMessages = [];
+      for (var offset = 0, chunkIndex = 0; offset < tile.length;
+           offset += tileChunkBytes, chunkIndex++) {
+        tileMessages.push({
+          cmd: CMD_TILE,
+          world_x: wx,
+          world_y: wy,
+          tile_zoom: zoom,
+          width: TILE_W,
+          height: TILE_H,
+          total_bytes: tile.length,
+          chunk_index: chunkIndex,
+          chunk_offset: offset,
+          request_id: requestId,
+          chunk_data: tile.slice(offset, Math.min(offset + tileChunkBytes,
+                                                  tile.length))
+        });
+      }
       var delayMs = tileDelayMs + tileSequence * tileStaggerMs;
       tileSequence++;
       if (injectStaleTileFirst) {
-        var staleTileMessage = {};
-        for (var tileKey in tileMessage) {
-          if (Object.prototype.hasOwnProperty.call(tileMessage, tileKey)) {
-            staleTileMessage[tileKey] = tileMessage[tileKey];
+        for (var staleIndex = 0; staleIndex < tileMessages.length; staleIndex++) {
+          var staleTileMessage = {};
+          for (var tileKey in tileMessages[staleIndex]) {
+            if (Object.prototype.hasOwnProperty.call(tileMessages[staleIndex], tileKey)) {
+              staleTileMessage[tileKey] = tileMessages[staleIndex][tileKey];
+            }
           }
+          staleTileMessage.request_id = Math.max(0, requestId - 1);
+          enqueueDelayed('stale-tile-' + staleIndex, staleTileMessage, delayMs);
         }
-        staleTileMessage.request_id = Math.max(0, requestId - 1);
-        enqueueDelayed('stale-tile', staleTileMessage, delayMs);
         delayMs += 25;
       }
-      enqueueDelayed('tile', tileMessage, delayMs);
+      (function(messages, transferDelay) {
+        setTimeout(function() {
+          for (var messageIndex = 0; messageIndex < messages.length; messageIndex++) {
+            enqueue((highEntropyTile ? 'tile-he-' : 'tile-') +
+                    messageIndex + '/' + messages.length,
+                    messages[messageIndex]);
+          }
+        }, transferDelay);
+      })(tileMessages, delayMs);
       return;
     }
 

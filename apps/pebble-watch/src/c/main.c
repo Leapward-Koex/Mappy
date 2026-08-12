@@ -20,6 +20,7 @@ void window_unload(Window *window) {
   complete_gps_smoothing();
   cancel_map_bearing_smoothing();
   cancel_visual_animation_timer();
+  cancel_tile_redraw();
   layer_destroy(s_map_layer);
   s_map_layer = NULL;
 }
@@ -131,7 +132,12 @@ void deinit(void) {
   complete_gps_smoothing();
   cancel_map_bearing_smoothing();
   cancel_visual_animation_timer();
-  reset_tile_chunk_assembly();
+  cancel_tile_redraw();
+  cancel_all_tile_requests();
+  if (s_tile_request_resume_timer) {
+    app_timer_cancel(s_tile_request_resume_timer);
+    s_tile_request_resume_timer = NULL;
+  }
   if (s_window) {
     window_destroy(s_window);
   }

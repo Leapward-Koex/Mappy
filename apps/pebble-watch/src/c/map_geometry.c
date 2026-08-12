@@ -21,6 +21,16 @@ int32_t scale_world_to_zoom(int32_t value, int8_t from_zoom, int8_t to_zoom) {
   return value;
 }
 
+int32_t scale_world_extent_end_to_zoom(int32_t value, int8_t from_zoom,
+                                       int8_t to_zoom) {
+  if (to_zoom >= from_zoom) {
+    return scale_world_to_zoom(value, from_zoom, to_zoom);
+  }
+  int32_t divisor = (int32_t)1 << (from_zoom - to_zoom);
+  int32_t quotient = value / divisor;
+  return quotient + (value % divisor > 0 ? 1 : 0);
+}
+
 int32_t clamp_i32_to_i16(int32_t value) {
   if (value > 32767) {
     return 32767;

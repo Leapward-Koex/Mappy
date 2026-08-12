@@ -42,5 +42,11 @@ bool tile_rle_decode_indexed_row(const uint8_t *encoded, size_t encoded_len,
                                  uint16_t height, uint16_t y,
                                  uint8_t *packed_row,
                                  size_t packed_row_bytes);
+bool tile_rle_decode_indexed_block(const uint8_t *encoded, size_t encoded_len,
+                                   const uint8_t *row_index,
+                                   size_t row_index_bytes, uint16_t width,
+                                   uint16_t height, uint16_t block,
+                                   uint16_t y, uint8_t *packed_block,
+                                   size_t packed_block_bytes);
 
 #endif

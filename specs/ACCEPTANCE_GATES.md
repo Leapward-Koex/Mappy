@@ -96,6 +96,12 @@ manual release checks before the corresponding milestone is considered done.
 - Current-location glyph matches `watch/CURRENT_LOCATION_VIEW_CONE_SPEC.md`:
   blue puck, white halo, outlined 90-degree blue view cone when heading is valid.
 - Invalid heading hides the view cone and leaves a neutral blue puck.
+- Once the complete puck halo is off-screen, the glyph is replaced by a rounded
+  one-third-width blue line with a white outline at the clamped GPS edge
+  position and a 3 px clear outer gap. Two-axis overflow anchors at a connected
+  90-degree corner bend.
+- The edge line follows successive viewport redraws during manual panning and
+  disappears when recenter makes the puck halo visible again.
 - Direction-up GPS-follow orientation rotates map tiles, route, destination
   marker, and current-location cursor consistently around the viewport center
   while GPS-follow is active.

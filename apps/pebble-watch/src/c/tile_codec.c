@@ -148,27 +148,25 @@ bool tile_rle_sample_indexed(const uint8_t *encoded, size_t encoded_len,
   return false;
 }
 
-bool tile_rle_decode_indexed_row(const uint8_t *encoded, size_t encoded_len,
-                                 const uint8_t *row_index,
-                                 size_t row_index_bytes, uint16_t width,
-                                 uint16_t height, uint16_t y,
-                                 uint8_t *packed_row,
-                                 size_t packed_row_bytes) {
-  size_t required_bytes = (width + 1) / 2;
-  if (!encoded || !row_index || !packed_row || width == 0 || y >= height ||
-      packed_row_bytes < required_bytes ||
-      row_index_bytes < TILE_RLE_INDEX_BYTES(width, height)) {
+static bool tile_rle_decode_indexed_span(const uint8_t *encoded,
+                                         size_t encoded_len,
+                                         const uint8_t *row_index,
+                                         size_t index_offset,
+                                         uint16_t pixel_count,
+                                         uint8_t *packed,
+                                         size_t packed_bytes) {
+  size_t required_bytes = (pixel_count + 1) / 2;
+  if (!encoded || !row_index || !packed || pixel_count == 0 ||
+      packed_bytes < required_bytes) {
     return false;
   }
 
-  memset(packed_row, 0, required_bytes);
-  uint16_t columns = TILE_RLE_INDEX_COLUMNS(width);
-  size_t index_offset = (size_t)y * columns * TILE_RLE_ROW_INDEX_BYTES;
+  memset(packed, 0, required_bytes);
   size_t encoded_offset = row_index[index_offset] |
       ((size_t)row_index[index_offset + 1] << 8);
   uint8_t skip = row_index[index_offset + 2];
   uint16_t pixel = 0;
-  while (encoded_offset < encoded_len && pixel < width) {
+  while (encoded_offset < encoded_len && pixel < pixel_count) {
     uint8_t byte = encoded[encoded_offset++];
     uint16_t run_length = (byte >> 4) + 1;
     uint8_t palette_index = byte & 0x0f;
@@ -177,17 +175,59 @@ bool tile_rle_decode_indexed_row(const uint8_t *encoded, size_t encoded_len,
     }
     run_length -= skip;
     skip = 0;
-    if (run_length > width - pixel) {
-      run_length = width - pixel;
+    if (run_length > pixel_count - pixel) {
+      run_length = pixel_count - pixel;
     }
     while (run_length-- > 0) {
       if (pixel & 1) {
-        packed_row[pixel / 2] |= palette_index << 4;
+        packed[pixel / 2] |= palette_index << 4;
       } else {
-        packed_row[pixel / 2] = palette_index;
+        packed[pixel / 2] = palette_index;
       }
       pixel++;
     }
   }
-  return pixel == width;
+  return pixel == pixel_count;
+}
+
+bool tile_rle_decode_indexed_row(const uint8_t *encoded, size_t encoded_len,
+                                 const uint8_t *row_index,
+                                 size_t row_index_bytes, uint16_t width,
+                                 uint16_t height, uint16_t y,
+                                 uint8_t *packed_row,
+                                 size_t packed_row_bytes) {
+  if (width == 0 || y >= height ||
+      row_index_bytes < TILE_RLE_INDEX_BYTES(width, height)) {
+    return false;
+  }
+  size_t index_offset = (size_t)y * TILE_RLE_INDEX_COLUMNS(width) *
+      TILE_RLE_ROW_INDEX_BYTES;
+  return tile_rle_decode_indexed_span(
+      encoded, encoded_len, row_index, index_offset, width, packed_row,
+      packed_row_bytes);
+}
+
+bool tile_rle_decode_indexed_block(const uint8_t *encoded, size_t encoded_len,
+                                   const uint8_t *row_index,
+                                   size_t row_index_bytes, uint16_t width,
+                                   uint16_t height, uint16_t block,
+                                   uint16_t y, uint8_t *packed_block,
+                                   size_t packed_block_bytes) {
+  uint16_t columns = TILE_RLE_INDEX_COLUMNS(width);
+  if (!encoded || !row_index || !packed_block || width == 0 || y >= height ||
+      block >= columns ||
+      row_index_bytes < TILE_RLE_INDEX_BYTES(width, height)) {
+    return false;
+  }
+
+  uint16_t first_x = block * TILE_RLE_INDEX_BLOCK_PIXELS;
+  uint16_t pixel_count = width - first_x;
+  if (pixel_count > TILE_RLE_INDEX_BLOCK_PIXELS) {
+    pixel_count = TILE_RLE_INDEX_BLOCK_PIXELS;
+  }
+  size_t index_offset = ((size_t)y * columns + block) *
+      TILE_RLE_ROW_INDEX_BYTES;
+  return tile_rle_decode_indexed_span(
+      encoded, encoded_len, row_index, index_offset, pixel_count,
+      packed_block, packed_block_bytes);
 }

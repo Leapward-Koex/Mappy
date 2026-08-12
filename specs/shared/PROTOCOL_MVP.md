@@ -163,6 +163,11 @@ Reconnect:
   retry loop.
 - Use one AppMessage send in flight per logical phone worker.
 - GPS and control messages may be prioritized ahead of queued tile sends.
+- The watch may have at most two logical tile responses awaiting completion.
+  A successful `CMD_TILE_REQUEST` outbox callback only frees the watch outbox;
+  it does not complete that logical response. Only the matching final tile
+  chunk, terminal error, cancellation, or response timeout opens the response
+  window for another request.
 - AppMessage attempts time out after two seconds. Control, route, destination,
   navigation, and tile messages get three total attempts, delayed by 150 ms then
   400 ms. GPS gets two total attempts and supersedes older queued GPS. Logs get
@@ -225,6 +230,12 @@ MVP decision:
   for the phone.
 - The phone uses this command as notification to cancel stale queued tile work
   for the prior zoom and expect fresh `CMD_TILE_REQUEST` messages.
+- The phone must advance its internal tile-work generation and discard queued
+  prior-generation tile transfers before acknowledging this command. Provider
+  work already running may finish, but its result must fail the generation
+  check before it enters the watch send queue. The watch therefore treats the
+  `CMD_BUTTON` ACK as the cancellation barrier and does not send target-zoom
+  tile requests before that ACK.
 - If the watch handles a button purely as local menu navigation, it should not
   send `CMD_BUTTON`.
 - Touch panning on `PBL_TOUCH` platforms is not represented by `CMD_BUTTON` or
@@ -287,6 +298,18 @@ Watch assembly rules:
   key, then decode exactly one complete RLE payload.
 - The watch rejects chunks and errors whose request ID does not match the newest
   outstanding request for that coordinate.
+- A tile error without a positive `request_id` is not a matching terminal
+  response and must not retire or retry a newer flight.
+- The phone enqueues all chunks for one logical response atomically. Chunks for
+  different tile responses must not interleave; higher-priority non-tile
+  messages may be delivered between chunks.
+- A logical response is keyed by x/y/zoom, request ID, dimensions, and
+  `total_bytes`. Its chunks use that key plus `chunk_index` and `chunk_offset`.
+  A newer request ID supersedes the complete older queued response, never an
+  individual sibling chunk.
+- Chunk indices and offsets start at zero, remain contiguous, and cover exactly
+  `total_bytes`. Queue overflow or terminal delivery failure removes all
+  remaining chunks belonging to that logical response.
 
 Oversized tile rule:
 

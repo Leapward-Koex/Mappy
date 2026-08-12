@@ -21,19 +21,6 @@ const char *tile_invalidation_reason_label(TileInvalidationReason reason) {
   }
 }
 
-void init_tile_slot_diagnostics(TileSlotDiagnostics *diag) {
-  if (!diag) {
-    return;
-  }
-  diag->reason = "unknown";
-  diag->evicted = false;
-  diag->old_valid = false;
-  diag->old_pending = false;
-  diag->old_world_x = 0;
-  diag->old_world_y = 0;
-  diag->old_zoom = 0;
-}
-
 int ceil_div_i32(int value, int divisor) {
   return divisor > 0 ? (value + divisor - 1) / divisor : 0;
 }
@@ -52,14 +39,6 @@ int active_tile_cache_size(void) {
 }
 
 void reset_tile_chunk_assembly(void) {
-  if (s_tile_chunk_active && s_tiles) {
-    TileCacheEntry *entry = find_tile(s_tile_chunk_world_x,
-                                      s_tile_chunk_world_y,
-                                      s_tile_chunk_zoom);
-    if (entry && !entry->valid) {
-      release_tile_storage(entry);
-    }
-  }
   s_tile_chunk_active = false;
   s_tile_chunk_store_packed = false;
   memset(&s_tile_chunk_decoder, 0, sizeof(s_tile_chunk_decoder));
@@ -85,14 +64,14 @@ bool configure_tile_geometry(int width, int height) {
     return false;
   }
 
-  reset_tile_chunk_assembly();
+  cancel_all_tile_requests();
+  clear_zoom_fallback();
   tile_storage_arena_reset(&s_tile_storage_arena);
   if (s_tiles) {
     for (int i = 0; i < TILE_CACHE_SIZE; i++) {
       tile_storage_ref_reset(&s_tiles[i].storage);
       s_tiles[i].valid = false;
       s_tiles[i].storage_suppressed = false;
-      clear_tile_pending(&s_tiles[i]);
       s_tiles[i].animation_active = false;
       s_tiles[i].animation_mode = TILE_ANIMATION_NONE;
     }

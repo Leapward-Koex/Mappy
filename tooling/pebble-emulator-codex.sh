@@ -19,7 +19,11 @@ Commands:
   test-protocol            Check protocol constants across specs and runtimes.
   test-motion-host         Run allocation-free motion and bearing host tests.
   test-tile-cache-host     Run bounded tile codec and arena host tests.
+  test-tile-scheduler-host Run deterministic two-flight scheduler host tests.
   test-render-performance  Run fixture bearing and mixed-animation assertions.
+  test-pan-under-load [prompt]
+                           Run pan/load assertions, or only the prompt fade case.
+  test-rapid-zoom-reversal Run A-to-B-to-A fallback eviction/refetch assertions.
   test-motion-reacquire    Replay wrist motion and assert fast bearing behavior.
   build                    Build the Pebble watch app.
   build-fixture            Build with emulator fixture PKJS bundled.
@@ -51,6 +55,8 @@ Commands:
                            Enable face-forward orientation, then inject a debug compass heading.
   debug-manual-browse <degrees>
                            Enter fixture manual browse at the supplied heading.
+  debug-location-position <screen-x> <screen-y> [degrees]
+                           Project fixture GPS at a deterministic screen point.
   debug-recenter <degrees> Recenter the fixture and restore face-forward rotation.
   debug-map-settings <width> <height>
                             Send emulator map tile geometry settings to the watch.
@@ -74,6 +80,13 @@ Environment:
                            Fixture-only extra delay per requested tile.
   MAPPY_FIXTURE_TILE_ANIMATION_MODE
                            Fixture startup tile animation sync: -1, 0, 1, or 2.
+  MAPPY_FIXTURE_TILE_WIDTH Fixture tile width: 54, 72, or 108.
+  MAPPY_FIXTURE_TILE_HEIGHT
+                           Fixture tile height: 63, 84, or 126.
+  MAPPY_FIXTURE_TILE_CHUNK_BYTES
+                           Maximum deterministic tile chunk size: 128..3072.
+  MAPPY_FIXTURE_TILE_HIGH_ENTROPY
+                           Periodically inject a multi-chunk stress tile.
   MAPPY_FIXTURE_ROUTE_POINT_COUNT
                            Deterministic fixture route points: 3..128.
   MAPPY_FIXTURE_PHONE_READY_DELAY_MS
@@ -293,6 +306,8 @@ test_tooling() {
   "$(pebble_tool_python)" "$ROOT_DIR/tooling/test-pebble-development.py"
   test_motion_host
   test_tile_cache_host
+  test_tile_scheduler_host
+  test_location_edge_host
 }
 
 test_protocol() {
@@ -332,6 +347,43 @@ test_tile_cache_host() {
     "$ROOT_DIR/tooling/test-tile-storage.c" \
     "$WATCH_DIR/src/c/tile_codec.c" \
     "$WATCH_DIR/src/c/tile_storage.c" \
+    -o "$output"
+  "$output"
+  rm -f "$output"
+  trap - RETURN
+}
+
+test_tile_scheduler_host() {
+  local compiler="${CC:-cc}"
+  if ! command -v "$compiler" >/dev/null 2>&1; then
+    echo "C compiler was not found: $compiler" >&2
+    return 127
+  fi
+  local output
+  output="$(mktemp "${TMPDIR:-/tmp}/mappy-tile-scheduler-tests.XXXXXX")"
+  trap 'rm -f "$output"' RETURN
+  "$compiler" -std=c99 -Wall -Wextra -Werror -DMAPPY_H \
+    -include "$ROOT_DIR/tooling/tile-requests-host-shim.h" \
+    "$ROOT_DIR/tooling/test-tile-request-scheduler.c" \
+    "$WATCH_DIR/src/c/tile_requests.c" \
+    -o "$output"
+  "$output"
+  rm -f "$output"
+  trap - RETURN
+}
+
+test_location_edge_host() {
+  local compiler="${CC:-cc}"
+  if ! command -v "$compiler" >/dev/null 2>&1; then
+    echo "C compiler was not found: $compiler" >&2
+    return 127
+  fi
+  local output
+  output="$(mktemp "${TMPDIR:-/tmp}/mappy-location-edge-tests.XXXXXX")"
+  trap 'rm -f "$output"' RETURN
+  "$compiler" -std=c99 -Wall -Wextra -Werror \
+    "$ROOT_DIR/tooling/test-location-edge-geometry.c" \
+    "$WATCH_DIR/src/c/location_edge_geometry.c" \
     -o "$output"
   "$output"
   rm -f "$output"
@@ -455,6 +507,20 @@ send_debug_compass_manual_browse() {
     --int 50=901 52=1 60="$heading"
 }
 
+send_debug_location_position() {
+  require_pebble
+  if [[ $# -lt 2 || $# -gt 3 || ! "$1" =~ ^-?[0-9]+$ ||
+        ! "$2" =~ ^-?[0-9]+$ ]]; then
+    echo "debug-location-position requires integer screen-x screen-y and optional degrees" >&2
+    exit 2
+  fi
+  local heading
+  heading="$(debug_compass_value "${3:-35}")"
+  cd "$WATCH_DIR"
+  pebble send-app-message --emulator "$PLATFORM" --app-uuid "$(app_uuid)" \
+    --int 50=901 52=3 60="$heading" 63="$1" 64="$2"
+}
+
 send_debug_compass_recenter() {
   require_pebble
   if [[ $# -ne 1 ]]; then
@@ -466,6 +532,44 @@ send_debug_compass_recenter() {
   cd "$WATCH_DIR"
   pebble send-app-message --emulator "$PLATFORM" --app-uuid "$(app_uuid)" \
     --int 50=901 52=2 60="$heading"
+}
+
+send_fixture_map_orientation() {
+  require_pebble
+  local orientation="$1"
+  if [[ "$orientation" != "0" && "$orientation" != "1" ]]; then
+    echo "fixture map orientation must be 0 (north) or 1 (facing)" >&2
+    return 2
+  fi
+  cd "$WATCH_DIR"
+  pebble send-app-message --emulator "$PLATFORM" --app-uuid "$(app_uuid)" \
+    --int 50=205 60="$orientation"
+}
+
+send_fixture_tile_animation() {
+  require_pebble
+  local animation="$1"
+  if [[ "$animation" != "0" && "$animation" != "1" &&
+        "$animation" != "2" ]]; then
+    echo "fixture tile animation must be 0, 1, or 2" >&2
+    return 2
+  fi
+  cd "$WATCH_DIR"
+  pebble send-app-message --emulator "$PLATFORM" --app-uuid "$(app_uuid)" \
+    --int 50=206 60="$animation"
+}
+
+send_debug_pan_under_load() {
+  require_pebble
+  if [[ $# -ne 1 ]]; then
+    echo "debug pan fixture requires an action" >&2
+    return 2
+  fi
+  cd "$WATCH_DIR"
+  # Fixture-only camera control 4; width carries the action. Production
+  # protocol is unchanged.
+  pebble send-app-message --emulator "$PLATFORM" --app-uuid "$(app_uuid)" \
+    --int 50=901 51="$1" 52=4 60=0
 }
 
 send_debug_facing() {
@@ -569,6 +673,19 @@ perf_summary_value() {
   sed -nE "s/.*(^|[[:space:]])${key}=([0-9]+).*/\\2/p" <<<"$line"
 }
 
+perf_summary_pair_value() {
+  local line="$1"
+  local key="$2"
+  local component="$3"
+  local pair
+  pair="$(sed -nE "s/.*(^|[[:space:]])${key}=([0-9]+\/[0-9]+).*/\\2/p" <<<"$line")"
+  if [[ "$component" == "total" ]]; then
+    printf '%s\n' "${pair%%/*}"
+  else
+    printf '%s\n' "${pair##*/}"
+  fi
+}
+
 test_render_performance() {
   require_pebble
   set_phone_mode fixture
@@ -636,6 +753,7 @@ test_render_performance() {
   local manual_map_errors manual_projections manual_orientation_work manual_errors
   local recentered_ticks recentered_steps recentered_browse
   local recentered_orientation_work recentered_errors
+  local isolated_draw_max mixed_draw_max manual_draw_max recentered_draw_max
   isolated_draws="$(perf_summary_value "$isolated" d)"
   isolated_steps="$(perf_summary_value "$isolated" b)"
   isolated_projections="$(perf_summary_value "$isolated" p)"
@@ -661,6 +779,10 @@ test_render_performance() {
   recentered_browse="$(perf_summary_value "$recentered" u)"
   recentered_orientation_work="$(perf_summary_value "$recentered" o)"
   recentered_errors="$(perf_summary_value "$recentered" e)"
+  isolated_draw_max="$(perf_summary_pair_value "$isolated" q max)"
+  mixed_draw_max="$(perf_summary_pair_value "$mixed" q max)"
+  manual_draw_max="$(perf_summary_pair_value "$manual" q max)"
+  recentered_draw_max="$(perf_summary_pair_value "$recentered" q max)"
 
   if [[ -z "$isolated_draws" || "$isolated_draws" != "$isolated_steps" ]]; then
     echo "Bearing redraw assertion failed: $isolated" >&2
@@ -729,10 +851,516 @@ test_render_performance() {
     return 1
   fi
 
+  if [[ -z "$isolated_draw_max" || -z "$mixed_draw_max" ||
+        -z "$manual_draw_max" || -z "$recentered_draw_max" ]]; then
+    echo "Render timing summary was missing q=total/max: $recentered" >&2
+    return 1
+  fi
+  if (( isolated_draw_max > 100 || mixed_draw_max > 100 ||
+        recentered_draw_max > 100 )); then
+    echo "Facing/mixed render exceeded 100 ms: isolated=$isolated_draw_max mixed=$mixed_draw_max recentered=$recentered_draw_max" >&2
+    return 1
+  fi
+  if (( manual_draw_max > 50 )); then
+    echo "North-up manual-browse render exceeded 50 ms: $manual_draw_max" >&2
+    return 1
+  fi
+
   printf 'Isolated: %s\nMixed: %s\nManual browse: %s\nRecentered: %s\nPerformance log: %s\n' \
     "$isolated" "$mixed" "$manual" "$recentered" \
     "$(windows_path "$log_file")"
   pebble kill >/dev/null 2>&1 || true
+}
+
+run_pan_under_load_case() {
+  local width="$1"
+  local height="$2"
+  local orientation="$3"
+  local animation="$4"
+  local prompt_animation="${5:-0}"
+  local orientation_name="north"
+  if [[ "$orientation" == "1" ]]; then
+    orientation_name="facing"
+  fi
+  local label="${width}x${height}-${orientation_name}-anim${animation}"
+  if [[ "$prompt_animation" == "1" ]]; then
+    label="${label}-prompt"
+  fi
+  local log_file="$OUT_DIR/pan-under-load-${label}.log"
+  local expected_tiles=25
+  if [[ "$width" == "72" ]]; then
+    expected_tiles=16
+  elif [[ "$width" == "108" ]]; then
+    expected_tiles=9
+  fi
+  rm -f "$log_file"
+
+  cd "$WATCH_DIR"
+  PYTHONUNBUFFERED=1 pebble logs --emulator "$PLATFORM" >"$log_file" 2>&1 &
+  local log_pid=$!
+  sleep 1
+  send_fixture_map_orientation "$orientation"
+  sleep 0.15
+  send_fixture_tile_animation "$animation"
+  sleep 0.15
+  send_debug_compass_recenter 0
+  sleep 0.35
+  if [[ "$prompt_animation" == "1" ]]; then
+    send_debug_tile 0
+    local seed_deadline=$((SECONDS + 2))
+    while (( SECONDS < seed_deadline )); do
+      if grep -q 'Debug tile accept' "$log_file"; then
+        break
+      fi
+      sleep 0.05
+    done
+    if ! grep -q 'Debug tile accept' "$log_file"; then
+      kill "$log_pid" >/dev/null 2>&1 || true
+      wait "$log_pid" 2>/dev/null || true
+      echo "Prompt pan-animation tile seed failed for $label" >&2
+      return 1
+    fi
+  fi
+  local started_ms
+  started_ms="$(date +%s%3N)"
+  if [[ "$prompt_animation" == "1" ]]; then
+    send_debug_pan_under_load 3
+  else
+    send_debug_pan_under_load 0
+  fi
+  local start_deadline=$((SECONDS + 1))
+  while (( SECONDS <= start_deadline )); do
+    if grep -q 'MAPPY_PAN_START' "$log_file"; then
+      break
+    fi
+    sleep 0.01
+  done
+  local pan_start_line
+  pan_start_line="$(grep -n 'MAPPY_PAN_START' "$log_file" | tail -1 | cut -d: -f1 || true)"
+  if [[ -z "$pan_start_line" ]]; then
+    echo "Pan fixture start marker was not observed for $label" >&2
+    return 1
+  fi
+
+  if [[ "$prompt_animation" == "1" ]]; then
+    # Action 4 starts one decoded visible tile after liftoff and after the pan
+    # action message completes, so the following completion request cannot
+    # cancel the newly scheduled tick.
+    send_debug_pan_under_load 4
+    sleep 0.05
+    send_debug_pan_under_load 2
+    local prompt_deadline=$((SECONDS + 5))
+    while (( SECONDS < prompt_deadline )); do
+      if grep -q 'MAPPY_PERF' "$log_file"; then
+        break
+      fi
+      sleep 0.05
+    done
+    sleep 0.1
+    kill "$log_pid" >/dev/null 2>&1 || true
+    wait "$log_pid" 2>/dev/null || true
+
+    local prompt_summary prompt_errors prompt_tile_advances prompt_draw_max
+    prompt_summary="$(grep 'MAPPY_PERF' "$log_file" | tail -1 || true)"
+    if [[ -z "$prompt_summary" ]]; then
+      echo "Prompt pan-animation fixture did not finish: $(windows_path "$log_file")" >&2
+      return 1
+    fi
+    prompt_errors="$(perf_summary_value "$prompt_summary" e)"
+    prompt_tile_advances="$(perf_summary_value "$prompt_summary" l)"
+    prompt_draw_max="$(perf_summary_pair_value "$prompt_summary" q max)"
+    if [[ -z "$prompt_errors" || "$prompt_errors" != "0" ]]; then
+      echo "Prompt pan-animation fixture reported errors for $label: $prompt_summary" >&2
+      return 1
+    fi
+    if [[ -z "$prompt_tile_advances" ]] || (( prompt_tile_advances < 1 )); then
+      echo "Prompt post-pan tile did not animate for $label: $prompt_summary" >&2
+      return 1
+    fi
+    if [[ -z "$prompt_draw_max" ]] || (( prompt_draw_max > 100 )); then
+      echo "Prompt post-pan fade draw exceeded 100 ms for $label: $prompt_summary" >&2
+      return 1
+    fi
+    if grep -Eqi 'Tile flight expired|tile chunk reject|tile decode failed|inbox dropped' \
+        "$log_file"; then
+      echo "Prompt tile transfer error reported for $label: $(windows_path "$log_file")" >&2
+      return 1
+    fi
+
+    printf '%s: %s\n' "$label" "$prompt_summary"
+    return 0
+  fi
+
+  sleep 0.12
+  local input_frame_ms host_input_started_ms host_input_frame_ms
+  send_debug_pan_under_load 1
+  host_input_started_ms="$(date +%s%3N)"
+  local input_deadline=$((SECONDS + 1))
+  while (( SECONDS <= input_deadline )); do
+    if grep -q 'MAPPY_PAN_FRAME' "$log_file"; then
+      break
+    fi
+    sleep 0.01
+  done
+  input_frame_ms="$(perf_summary_value \
+      "$(grep 'MAPPY_PAN_FRAME' "$log_file" | tail -1 || true)" i)"
+  host_input_frame_ms=$(($(date +%s%3N) - host_input_started_ms))
+
+  local load_complete=0
+  local fill_ms=0
+  while (( $(date +%s%3N) - started_ms < 4800 )); do
+    if tail -n "+$((pan_start_line + 1))" "$log_file" | grep -q 'MAPPY_GRID'; then
+      fill_ms=$(($(date +%s%3N) - started_ms))
+      load_complete=1
+      break
+    fi
+    sleep 0.1
+  done
+  sleep 0.1
+  send_debug_pan_under_load 2
+  local deadline=$((SECONDS + 2))
+  while (( SECONDS < deadline )); do
+    if grep -q 'MAPPY_PERF' "$log_file"; then
+      break
+    fi
+    sleep 0.1
+  done
+  sleep 0.2
+  kill "$log_pid" >/dev/null 2>&1 || true
+  wait "$log_pid" 2>/dev/null || true
+
+  local perf_summary
+  perf_summary="$(grep 'MAPPY_PERF' "$log_file" | tail -1 || true)"
+  if [[ -z "$perf_summary" ]]; then
+    echo "Pan-under-load fixture did not finish: $(windows_path "$log_file")" >&2
+    return 1
+  fi
+
+  local draws draw_max
+  draws="$(perf_summary_value "$perf_summary" d)"
+  draw_max="$(perf_summary_pair_value "$perf_summary" q max)"
+
+  if [[ ! -s "$log_file" ]] ||
+      ! grep -q 'MAPPY_PAN_FRAME' "$log_file"; then
+    echo "Pan interaction assertion failed for $label: $perf_summary" >&2
+    return 1
+  fi
+  if [[ -z "$input_frame_ms" ]] || (( input_frame_ms < 0 || input_frame_ms > 100 )); then
+    echo "Pan latency exceeded 100 ms for $label: ${input_frame_ms} ms" >&2
+    return 1
+  fi
+  if (( host_input_frame_ms > 100 )); then
+    echo "Host-observed pan frame exceeded 100 ms for $label: ${host_input_frame_ms} ms" >&2
+    return 1
+  fi
+  local draw_limit=50
+  if [[ "$orientation" == "1" ]]; then
+    draw_limit=100
+  fi
+  if [[ -z "$draw_max" ]] || (( draw_max > draw_limit )); then
+    echo "Map draw exceeded ${draw_limit} ms for $label: $perf_summary" >&2
+    return 1
+  fi
+  if (( load_complete != 1 || fill_ms > 5000 )); then
+    echo "Cold tile load did not complete within 5 seconds for $label" >&2
+    return 1
+  fi
+  local draw_limit_count=$((expected_tiles + 12))
+  if (( animation != 0 )); then
+    local tile_advances
+    tile_advances="$(perf_summary_value "$perf_summary" l)"
+    if [[ -z "$tile_advances" ]] || (( tile_advances < 1 )); then
+      echo "Tile animation did not advance for $label: $perf_summary" >&2
+      return 1
+    fi
+    draw_limit_count=$((expected_tiles + tile_advances + 4))
+  fi
+  if [[ -z "$draws" ]] || (( draws > draw_limit_count )); then
+    echo "Tile redraw coalescing assertion failed for $label: $perf_summary" >&2
+    return 1
+  fi
+  local high_entropy_bytes=$((width * height))
+  if ! grep -Eq "Tile accept .*encoded=${high_entropy_bytes}([[:space:]]|$)" "$log_file"; then
+    echo "No accepted high-entropy multi-chunk tile for $label" >&2
+    return 1
+  fi
+  if grep -Eqi 'Tile flight expired|tile chunk reject|tile decode failed|inbox dropped' \
+      "$log_file"; then
+    echo "Tile transfer error reported for $label: $(windows_path "$log_file")" >&2
+    return 1
+  fi
+
+  printf '%s (%d ms watch / %d ms host input, %d ms fill): %s\n' \
+    "$label" "$input_frame_ms" "$host_input_frame_ms" "$fill_ms" \
+    "$perf_summary"
+}
+
+test_pan_under_load() {
+  require_pebble
+  local prompt_only="${1:-}"
+  if [[ -n "$prompt_only" && "$prompt_only" != "prompt" ]]; then
+    echo "test-pan-under-load argument must be 'prompt' when supplied" >&2
+    return 2
+  fi
+  if pgrep -x qemu-pebble >/dev/null 2>&1; then
+    echo "Pebble emulator is already running; retry test-pan-under-load after its owner finishes." >&2
+    return 75
+  fi
+  set_phone_mode fixture
+  export MAPPY_FIXTURE_ROUTE_POINT_COUNT=3
+  export MAPPY_FIXTURE_TILE_ANIMATION_MODE=0
+  export MAPPY_FIXTURE_TILE_DELAY_MS=0
+  export MAPPY_FIXTURE_TILE_STAGGER_MS=0
+  export MAPPY_FIXTURE_TILE_CHUNK_BYTES=3072
+  export MAPPY_FIXTURE_TILE_HIGH_ENTROPY=1
+  export MAPPY_FIXTURE_INJECT_STALE_TILE_FIRST=1
+  export MAPPY_FIXTURE_TX_SUCCESS_DELAY_MS=5
+  mkdir -p "$OUT_DIR"
+  trap 'pebble kill >/dev/null 2>&1 || true' RETURN
+
+  if [[ "$prompt_only" == "prompt" ]]; then
+    export MAPPY_FIXTURE_TILE_WIDTH=108
+    export MAPPY_FIXTURE_TILE_HEIGHT=126
+    pebble kill >/dev/null 2>&1 || true
+    install_app_with_recovery
+    sleep 6
+    run_pan_under_load_case 108 126 1 1 1
+    pebble kill >/dev/null 2>&1 || true
+    trap - RETURN
+    return
+  fi
+
+  local geometry width height orientation
+  for geometry in 54:63 72:84 108:126; do
+    width="${geometry%%:*}"
+    height="${geometry##*:}"
+    export MAPPY_FIXTURE_TILE_WIDTH="$width"
+    export MAPPY_FIXTURE_TILE_HEIGHT="$height"
+    pebble kill >/dev/null 2>&1 || true
+    install_app_with_recovery
+    sleep 6
+    for orientation in 0 1; do
+      run_pan_under_load_case "$width" "$height" "$orientation" 0
+    done
+  done
+
+  # Exercise the normal tile animation path with immediate responses. Tiles
+  # requested after touch liftoff must animate without a grace-period delay.
+  export MAPPY_FIXTURE_TILE_DELAY_MS=0
+  pebble kill >/dev/null 2>&1 || true
+  install_app_with_recovery
+  sleep 6
+  run_pan_under_load_case 108 126 1 1 1
+  run_pan_under_load_case 108 126 1 1
+  pebble kill >/dev/null 2>&1 || true
+  trap - RETURN
+  printf 'Pan-under-load logs: %s\n' \
+    "$(windows_path "$OUT_DIR/pan-under-load-*.log")"
+}
+
+test_rapid_zoom_reversal() {
+  require_pebble
+  if pgrep -x qemu-pebble >/dev/null 2>&1; then
+    echo "Pebble emulator is already running; retry test-rapid-zoom-reversal after its owner finishes." >&2
+    return 75
+  fi
+
+  set_phone_mode fixture
+  export MAPPY_FIXTURE_ROUTE_POINT_COUNT=3
+  export MAPPY_FIXTURE_TILE_ANIMATION_MODE=0
+  export MAPPY_FIXTURE_TILE_WIDTH=72
+  export MAPPY_FIXTURE_TILE_HEIGHT=84
+  export MAPPY_FIXTURE_TILE_DELAY_MS=400
+  export MAPPY_FIXTURE_TILE_STAGGER_MS=0
+  export MAPPY_FIXTURE_TILE_CHUNK_BYTES=3072
+  export MAPPY_FIXTURE_TILE_HIGH_ENTROPY=1
+  export MAPPY_FIXTURE_INJECT_STALE_TILE_FIRST=1
+  export MAPPY_FIXTURE_TX_SUCCESS_DELAY_MS=5
+
+  mkdir -p "$OUT_DIR"
+  local log_file="$OUT_DIR/rapid-zoom-reversal.log"
+  local log_pid=""
+  rm -f "$log_file"
+  trap 'if [[ -n "${log_pid:-}" ]]; then kill "$log_pid" >/dev/null 2>&1 || true; wait "$log_pid" 2>/dev/null || true; fi; pebble kill >/dev/null 2>&1 || true' RETURN
+
+  install_app_with_recovery
+  cd "$WATCH_DIR"
+  PYTHONUNBUFFERED=1 pebble logs --emulator "$PLATFORM" >"$log_file" 2>&1 &
+  log_pid=$!
+  sleep 1
+
+  # Establish one complete, north-up source grid before beginning the timed
+  # reversal. The response delay keeps this marker observable after logs attach.
+  local baseline_start_line
+  baseline_start_line="$(( $(wc -l < "$log_file") + 1 ))"
+  send_fixture_map_orientation 0
+  sleep 0.15
+  send_fixture_tile_animation 0
+  sleep 0.15
+  send_debug_compass_recenter 0
+
+  local baseline_grid_line=""
+  local baseline_deadline=$((SECONDS + 15))
+  while (( SECONDS < baseline_deadline )); do
+    baseline_grid_line="$(awk -v start="$baseline_start_line" \
+      'NR >= start && /MAPPY_GRID/ { print NR; exit }' "$log_file")"
+    if [[ -n "$baseline_grid_line" ]]; then
+      break
+    fi
+    sleep 0.05
+  done
+  if [[ -z "$baseline_grid_line" ]]; then
+    echo "Rapid zoom reversal did not establish its source grid: $(windows_path "$log_file")" >&2
+    return 1
+  fi
+
+  local source_zoom
+  source_zoom="$(sed -nE \
+    "${baseline_start_line},${baseline_grid_line}s/.*Tile accept .* z=(-?[0-9]+) encoded=.*/\\1/p" \
+    "$log_file" | tail -n 1)"
+  if [[ ! "$source_zoom" =~ ^-?[0-9]+$ ]]; then
+    echo "Rapid zoom reversal could not determine its source zoom: $(windows_path "$log_file")" >&2
+    return 1
+  fi
+
+  local max_zoom
+  max_zoom="$(sed -nE \
+    's/^[[:space:]]*#define[[:space:]]+MAX_MAP_ZOOM[[:space:]]+([0-9]+).*/\1/p' \
+    "$WATCH_DIR/src/c/mappy.h" | head -n 1)"
+  if [[ ! "$max_zoom" =~ ^[0-9]+$ ]]; then
+    echo "Rapid zoom reversal could not determine MAX_MAP_ZOOM" >&2
+    return 1
+  fi
+
+  local target_zoom=$((source_zoom + 1))
+  local first_button="up"
+  local reverse_button="down"
+  if (( source_zoom >= max_zoom )); then
+    target_zoom=$((source_zoom - 1))
+    first_button="down"
+    reverse_button="up"
+  fi
+
+  local zoom_start_line
+  zoom_start_line="$(( $(wc -l < "$log_file") + 1 ))"
+  send_button click "$first_button"
+
+  # Arena pressure at B must evict a retained A tile before B completes. Record
+  # that exact coordinate so the reversal proves it was requested and accepted
+  # again, rather than merely relying on an already-cached source grid.
+  local eviction_record=""
+  local eviction_deadline=$((SECONDS + 10))
+  while (( SECONDS < eviction_deadline )); do
+    eviction_record="$(awk -v start="$zoom_start_line" \
+      -v needle="z=${source_zoom} bytes=" \
+      'NR >= start && index($0, "Tile storage evict x=") && index($0, needle) { print NR "|" $0; exit }' \
+      "$log_file")"
+    if [[ -n "$eviction_record" ]]; then
+      break
+    fi
+    sleep 0.02
+  done
+  if [[ -z "$eviction_record" ]]; then
+    echo "Rapid zoom reversal did not evict a source fallback tile under arena pressure: $(windows_path "$log_file")" >&2
+    return 1
+  fi
+
+  local eviction_line_number="${eviction_record%%|*}"
+  local eviction_line="${eviction_record#*|}"
+  local evicted_x evicted_y
+  evicted_x="$(sed -nE \
+    's/.*Tile storage evict x=(-?[0-9]+) y=(-?[0-9]+) z=-?[0-9]+.*/\1/p' \
+    <<<"$eviction_line")"
+  evicted_y="$(sed -nE \
+    's/.*Tile storage evict x=-?[0-9]+ y=(-?[0-9]+) z=-?[0-9]+.*/\1/p' \
+    <<<"$eviction_line")"
+  if [[ ! "$evicted_x" =~ ^-?[0-9]+$ || ! "$evicted_y" =~ ^-?[0-9]+$ ]]; then
+    echo "Rapid zoom reversal could not parse the evicted source coordinate: $eviction_line" >&2
+    return 1
+  fi
+
+  local target_accept_line=""
+  local target_accept_deadline_ms=$(( $(date +%s%3N) + 250 ))
+  while (( $(date +%s%3N) < target_accept_deadline_ms )); do
+    target_accept_line="$(awk -v start="$((eviction_line_number + 1))" \
+      -v needle="z=${target_zoom} encoded=" \
+      'NR >= start && index($0, "Tile accept x=") && index($0, needle) { print NR; exit }' \
+      "$log_file")"
+    if [[ -n "$target_accept_line" ]]; then
+      break
+    fi
+    sleep 0.01
+  done
+  if [[ -z "$target_accept_line" ]]; then
+    echo "Rapid zoom reversal saw a source eviction without the corresponding target acceptance: $(windows_path "$log_file")" >&2
+    return 1
+  fi
+  if awk -v start="$zoom_start_line" \
+      'NR >= start && /MAPPY_GRID/ { found = 1 } END { exit !found }' \
+      "$log_file"; then
+    echo "Target grid completed before the rapid reversal; delayed-load coverage was not exercised" >&2
+    return 1
+  fi
+
+  local reversal_start_line
+  reversal_start_line="$(( $(wc -l < "$log_file") + 1 ))"
+  local reversal_started_ms
+  reversal_started_ms="$(date +%s%3N)"
+  send_button click "$reverse_button"
+
+  local refetch_line=""
+  local completion_grid_line=""
+  local completion_ms=-1
+  local now_ms elapsed_ms
+  while :; do
+    now_ms="$(date +%s%3N)"
+    elapsed_ms=$((now_ms - reversal_started_ms))
+    refetch_line="$(awk -v start="$reversal_start_line" \
+      -v needle="Tile accept x=${evicted_x} y=${evicted_y} z=${source_zoom} encoded=" \
+      'NR >= start && index($0, needle) { print NR; exit }' "$log_file")"
+    if [[ -n "$refetch_line" ]]; then
+      completion_grid_line="$(awk -v start="$((refetch_line + 1))" \
+        'NR >= start && /MAPPY_GRID/ { print NR; exit }' "$log_file")"
+    fi
+    if [[ -n "$completion_grid_line" && $elapsed_ms -le 5000 ]]; then
+      completion_ms="$elapsed_ms"
+      break
+    fi
+    if (( elapsed_ms >= 5000 )); then
+      break
+    fi
+    sleep 0.02
+  done
+
+  sleep 0.2
+  kill "$log_pid" >/dev/null 2>&1 || true
+  wait "$log_pid" 2>/dev/null || true
+  log_pid=""
+
+  if [[ -z "$refetch_line" ]]; then
+    echo "Evicted source tile (${evicted_x},${evicted_y},z${source_zoom}) was not accepted after reversal: $(windows_path "$log_file")" >&2
+    return 1
+  fi
+  if [[ -z "$completion_grid_line" || $completion_ms -lt 0 ]]; then
+    echo "Source grid did not complete strictly within 5 seconds of reversal: $(windows_path "$log_file")" >&2
+    return 1
+  fi
+  if ! grep -Eq 'Tile accept .*encoded=6048([[:space:]]|$)' "$log_file"; then
+    echo "Rapid zoom reversal did not accept a genuine 72x84 multi-chunk tile" >&2
+    return 1
+  fi
+  local health_failure_pattern='Tile flight expired|tile chunk reject|tile decode failed|inbox dropped|Outbox failed cmd=202'
+  health_failure_pattern+='|(^|[^[:alnum:]])fault([^[:alnum:]]|$)|faulted|hardfault|appfault|crash(ed|ing)?'
+  if grep -Eqi "$health_failure_pattern" "$log_file"; then
+    echo "Tile transfer error reported during rapid zoom reversal: $(windows_path "$log_file")" >&2
+    return 1
+  fi
+
+  pebble kill >/dev/null 2>&1 || true
+  trap - RETURN
+  printf 'Rapid zoom reversal z%d -> z%d -> z%d: refetched (%s,%s) and completed in %d ms\nLog: %s\n' \
+    "$source_zoom" "$target_zoom" "$source_zoom" "$evicted_x" "$evicted_y" \
+    "$completion_ms" "$(windows_path "$log_file")"
 }
 
 test_motion_reacquire() {
@@ -877,8 +1505,17 @@ main() {
     test-tile-cache-host)
       test_tile_cache_host
       ;;
+    test-tile-scheduler-host)
+      test_tile_scheduler_host
+      ;;
     test-render-performance)
       test_render_performance
+      ;;
+    test-pan-under-load)
+      test_pan_under_load "$@"
+      ;;
+    test-rapid-zoom-reversal)
+      test_rapid_zoom_reversal
       ;;
     test-motion-reacquire)
       test_motion_reacquire
@@ -966,6 +1603,9 @@ main() {
       ;;
     debug-manual-browse)
       send_debug_compass_manual_browse "$@"
+      ;;
+    debug-location-position)
+      send_debug_location_position "$@"
       ;;
     debug-recenter)
       send_debug_compass_recenter "$@"

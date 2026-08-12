@@ -7,6 +7,15 @@
 #include "../apps/pebble-watch/src/c/tile_codec.h"
 #include "../apps/pebble-watch/src/c/tile_storage.h"
 
+// Compile the production pressure selector without the Pebble-dependent cache
+// implementation.  This keeps the eviction-order regressions in the bounded
+// host test while exercising the exact policy used on the watch.
+#define MAPPY_H
+#define MAPPY_TILE_CACHE_POLICY_HOST_TEST
+#include "../apps/pebble-watch/src/c/tile_cache.c"
+#undef MAPPY_TILE_CACHE_POLICY_HOST_TEST
+#undef MAPPY_H
+
 #define ARENA_BYTES (32 * 1024)
 #define MAX_PIXELS (108 * 126)
 #define MAX_PACKED ((MAX_PIXELS + 1) / 2)
@@ -52,6 +61,7 @@ static void test_geometry_round_trips(void) {
   uint8_t expected[MAX_PIXELS];
   uint8_t row_index[MAX_INDEX_BYTES];
   uint8_t packed_row[(108 + 1) / 2];
+  uint8_t packed_block[TILE_RLE_INDEX_BLOCK_PIXELS / 2];
   for (size_t geometry = 0; geometry < 3; geometry++) {
     int width = geometries[geometry][0];
     int height = geometries[geometry][1];
@@ -74,6 +84,25 @@ static void test_geometry_round_trips(void) {
                                   packed_row[x / 2] & 0x0f;
         CHECK(value == expected[row * width + x],
               "indexed row and source pixels should be identical");
+      }
+      int columns = TILE_RLE_INDEX_COLUMNS(width);
+      for (int block = 0; block < columns; block++) {
+        CHECK(tile_rle_decode_indexed_block(
+                  encoded, encoded_len, row_index,
+                  TILE_RLE_INDEX_BYTES(width, height), width, height, block,
+                  row, packed_block, sizeof(packed_block)),
+              "indexed RLE geometry should decode each block");
+        int first_x = block * TILE_RLE_INDEX_BLOCK_PIXELS;
+        int block_pixels = width - first_x;
+        if (block_pixels > TILE_RLE_INDEX_BLOCK_PIXELS) {
+          block_pixels = TILE_RLE_INDEX_BLOCK_PIXELS;
+        }
+        for (int x = 0; x < block_pixels; x++) {
+          uint8_t value = (x & 1) ? packed_block[x / 2] >> 4 :
+                                    packed_block[x / 2] & 0x0f;
+          CHECK(value == expected[row * width + first_x + x],
+                "indexed block and source pixels should be identical");
+        }
       }
     }
     for (int i = 0; i < pixels; i++) {
@@ -122,6 +151,7 @@ static void test_high_entropy_packed_fallback(void) {
 static void test_malformed_rle(void) {
   uint8_t packed[8];
   uint8_t row_index[2 * TILE_RLE_ROW_INDEX_BYTES];
+  uint8_t packed_block[TILE_RLE_INDEX_BLOCK_PIXELS / 2];
   const uint8_t underfill[] = {0x31};
   const uint8_t overfill[] = {0xf1};
   CHECK(!tile_rle_decode(underfill, sizeof(underfill), 8, packed,
@@ -136,6 +166,10 @@ static void test_malformed_rle(void) {
   CHECK(!tile_rle_build_row_index(overfill, sizeof(overfill), 4, 2,
                                   row_index, sizeof(row_index)),
         "overfilled RLE should not build a row index");
+  CHECK(!tile_rle_decode_indexed_block(
+            underfill, sizeof(underfill), row_index, sizeof(row_index), 4, 2,
+            1, 0, packed_block, sizeof(packed_block)),
+        "indexed block should reject an out-of-range block");
 }
 
 static void test_arena_compaction_and_bound(void) {
@@ -204,12 +238,89 @@ static void test_eviction_policy(void) {
         "eviction should report no eligible entry");
 }
 
+static void test_cache_pressure_prefers_zoom_fallback(void) {
+  TileCachePressureCandidate candidates[] = {
+    {
+      .priority = TileCachePressureLessImportantVisible,
+      .distance_sq = 400,
+      .last_used = 1,
+    },
+    {
+      .priority = TileCachePressureFallback,
+      .distance_sq = 100,
+      .last_used = 20,
+    },
+    {
+      .priority = TileCachePressureCoveredFallback,
+      .distance_sq = 200,
+      .last_used = 30,
+    },
+  };
+  CHECK(tile_cache_select_pressure_candidate(candidates, 3, 25) == 2,
+        "covered zoom fallback should be evicted before a visible current tile");
+
+  candidates[2].priority = TileCachePressureIneligible;
+  CHECK(tile_cache_select_pressure_candidate(candidates, 3, 25) == 1,
+        "any retained zoom fallback should be evicted before visible current imagery");
+}
+
+static void test_cache_pressure_preserves_more_important_visible_tiles(void) {
+  TileCachePressureCandidate candidates[] = {
+    {
+      .priority = TileCachePressureLessImportantVisible,
+      .distance_sq = 25,
+      .last_used = 1,
+    },
+    {
+      .priority = TileCachePressureLessImportantVisible,
+      .distance_sq = 400,
+      .last_used = 2,
+    },
+  };
+  CHECK(tile_cache_select_pressure_candidate(candidates, 2, 625) == -1,
+        "a fringe arrival must not evict a more central rendered tile");
+  CHECK(tile_cache_select_pressure_candidate(candidates, 2, 16) == 1,
+        "a central arrival may replace the farthest less-important tile");
+
+  candidates[0].distance_sq = 400;
+  CHECK(tile_cache_select_pressure_candidate(candidates, 2, 400) == -1,
+        "equal-importance visible tiles should not churn under pressure");
+}
+
+static void test_cache_pressure_reuses_existing_holes_first(void) {
+  TileCachePressureCandidate candidates[] = {
+    {
+      .priority = TileCachePressureLessImportantVisible,
+      .distance_sq = 900,
+      .last_used = 1,
+    },
+    {
+      .priority = TileCachePressureSuppressedVisible,
+      .distance_sq = 25,
+      .last_used = 50,
+    },
+    {
+      .priority = TileCachePressureOffscreen,
+      .distance_sq = 100,
+      .last_used = 60,
+    },
+  };
+  CHECK(tile_cache_select_pressure_candidate(candidates, 3, 4) == 2,
+        "offscreen storage should remain the first pressure victim");
+  candidates[2].priority = TileCachePressureIneligible;
+  CHECK(tile_cache_select_pressure_candidate(candidates, 3, 4) == 1,
+        "an existing visible hole should be reused before making another one");
+}
+
 int main(void) {
   test_geometry_round_trips();
   test_high_entropy_packed_fallback();
   test_malformed_rle();
   test_arena_compaction_and_bound();
   test_eviction_policy();
+  test_cache_pressure_prefers_zoom_fallback();
+  test_cache_pressure_preserves_more_important_visible_tiles();
+  test_cache_pressure_reuses_existing_holes_first();
   if (s_failures > 0) {
     fprintf(stderr, "tile storage tests: %d failure(s)\n", s_failures);
     return 1;

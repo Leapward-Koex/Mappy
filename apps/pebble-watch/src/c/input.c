@@ -39,26 +39,6 @@ void reset_touch_state(void) {
   s_transient_zoom_scale_q8 = TRANSIENT_SCALE_Q8_ONE;
 }
 
-void mark_touch_interaction_ended(void) {
-  time_ms(&s_last_touch_ended_s, &s_last_touch_ended_ms);
-}
-
-bool touch_interaction_recent(void) {
-  if (s_touch_active) {
-    return true;
-  }
-  if (s_last_touch_ended_s == 0 && s_last_touch_ended_ms == 0) {
-    return false;
-  }
-
-  time_t now_s;
-  uint16_t now_ms;
-  time_ms(&now_s, &now_ms);
-  int32_t elapsed = (int32_t)(now_s - s_last_touch_ended_s) * 1000 +
-      (int32_t)now_ms - (int32_t)s_last_touch_ended_ms;
-  return elapsed >= 0 && elapsed < TOUCH_TILE_ANIMATION_SUPPRESS_MS;
-}
-
 void log_touch_disabled_once(void) {
   if (!s_touch_disabled_logged) {
     s_touch_disabled_logged = true;
@@ -73,6 +53,85 @@ void log_pinch_unavailable_once(void) {
   }
 }
 
+static bool apply_pan_interaction_position(int16_t screen_x, int16_t screen_y,
+                                           bool mark_dirty) {
+  if (!s_touch_active) {
+    return false;
+  }
+#ifdef MAPPY_WATCH_HARDWARE_PERF
+  time_t hardware_perf_input_seconds;
+  uint16_t hardware_perf_input_ms =
+      time_ms(&hardware_perf_input_seconds, NULL);
+#endif
+  int32_t world_dx;
+  int32_t world_dy;
+  screen_delta_to_world_delta(screen_x - s_touch_start_x,
+                              screen_y - s_touch_start_y,
+                              &world_dx, &world_dy);
+  int32_t next_viewport_x = s_touch_start_viewport_x - world_dx;
+  int32_t next_viewport_y = s_touch_start_viewport_y - world_dy;
+  if (next_viewport_x == s_viewport_x && next_viewport_y == s_viewport_y) {
+    return false;
+  }
+  s_viewport_x = next_viewport_x;
+  s_viewport_y = next_viewport_y;
+#ifdef MAPPY_WATCH_HARDWARE_PERF
+  hardware_perf_note_pan_input(hardware_perf_input_seconds,
+                               hardware_perf_input_ms);
+#endif
+  if (mark_dirty && s_map_layer) {
+    layer_mark_dirty(s_map_layer);
+  }
+  return true;
+}
+
+static void finish_touch_pan(bool apply_final_position, int16_t screen_x,
+                             int16_t screen_y) {
+  if (!s_touch_active) {
+    return;
+  }
+  if (apply_final_position) {
+    apply_pan_interaction_position(screen_x, screen_y, false);
+  }
+  reset_touch_state();
+  s_manual_pan = true;
+  sync_map_bearing_smoothing(false);
+  update_state_after_map_change();
+  resume_tile_requests_after_interaction();
+  refresh_motion_detection_service();
+  if (s_map_layer) {
+    layer_mark_dirty(s_map_layer);
+  }
+}
+
+void begin_pan_interaction(int16_t screen_x, int16_t screen_y) {
+#ifdef MAPPY_WATCH_HARDWARE_PERF
+  hardware_perf_begin_pan();
+#endif
+  pause_tile_requests_for_interaction();
+  complete_gps_smoothing();
+  s_touch_active = true;
+  s_touch_start_x = screen_x;
+  s_touch_start_y = screen_y;
+  s_touch_start_viewport_x = s_viewport_x;
+  s_touch_start_viewport_y = s_viewport_y;
+  s_manual_pan = true;
+  refresh_motion_detection_service();
+  sync_map_bearing_smoothing(false);
+  if (s_map_layer) {
+    layer_mark_dirty(s_map_layer);
+  }
+}
+
+void update_pan_interaction(int16_t screen_x, int16_t screen_y) {
+  // Keep drag frames cheap; tile and route requests are finalized on liftoff.
+  apply_pan_interaction_position(screen_x, screen_y, true);
+}
+
+void end_pan_interaction(int16_t screen_x, int16_t screen_y) {
+  finish_touch_pan(true, screen_x, screen_y);
+}
+
 void touch_handler(const TouchEvent *event, void *context) {
   if (!event || s_menu_mode != MenuNone || !touch_service_is_enabled()) {
     if (event && !touch_service_is_enabled()) {
@@ -83,49 +142,21 @@ void touch_handler(const TouchEvent *event, void *context) {
 
   switch (event->type) {
     case TouchEvent_Touchdown:
-      complete_tile_animations();
-      complete_gps_smoothing();
-      s_touch_active = true;
-      s_touch_start_x = event->x;
-      s_touch_start_y = event->y;
-      s_touch_start_viewport_x = s_viewport_x;
-      s_touch_start_viewport_y = s_viewport_y;
-      s_manual_pan = true;
-      refresh_motion_detection_service();
-      sync_map_bearing_smoothing(false);
-      layer_mark_dirty(s_map_layer);
+      begin_pan_interaction(event->x, event->y);
       break;
     case TouchEvent_PositionUpdate:
       if (!s_touch_active) {
         return;
       }
-      int32_t world_dx;
-      int32_t world_dy;
-      screen_delta_to_world_delta(event->x - s_touch_start_x,
-                                  event->y - s_touch_start_y,
-                                  &world_dx, &world_dy);
-      int32_t next_viewport_x = s_touch_start_viewport_x - world_dx;
-      int32_t next_viewport_y = s_touch_start_viewport_y - world_dy;
-      if (next_viewport_x == s_viewport_x && next_viewport_y == s_viewport_y) {
-        return;
-      }
-      // Keep drag frames cheap; tile and route requests are finalized on liftoff.
-      s_viewport_x = next_viewport_x;
-      s_viewport_y = next_viewport_y;
-      layer_mark_dirty(s_map_layer);
+      update_pan_interaction(event->x, event->y);
       break;
     case TouchEvent_Liftoff:
       if (!s_touch_active) {
         return;
       }
-      mark_touch_interaction_ended();
-      reset_touch_state();
-      s_manual_pan = true;
-      sync_map_bearing_smoothing(false);
-      update_state_after_map_change();
-      queue_visible_tiles();
-      refresh_motion_detection_service();
-      layer_mark_dirty(s_map_layer);
+      // Liftoff coordinates can be newer than the last position event when the
+      // event loop was busy. Apply them before ending the gesture.
+      end_pan_interaction(event->x, event->y);
       break;
   }
 }
@@ -140,6 +171,11 @@ void update_touch_subscription(void) {
     log_pinch_unavailable_once();
 #endif
   } else if ((!touch_enabled || !should_subscribe) && s_touch_subscribed) {
+    if (s_touch_active) {
+      // Menu transitions and service loss finalize the last accepted position
+      // through the same scheduler path so tile dispatch cannot remain paused.
+      finish_touch_pan(false, 0, 0);
+    }
     touch_service_unsubscribe();
     s_touch_subscribed = false;
     reset_touch_state();
@@ -467,8 +503,15 @@ bool set_viewport_zoom(int next_zoom, int notification_delta) {
   s_viewport_x = scale_world_to_zoom(s_viewport_x, s_viewport_zoom, next_zoom);
   s_viewport_y = scale_world_to_zoom(s_viewport_y, s_viewport_zoom, next_zoom);
   s_viewport_zoom = next_zoom;
+#ifdef MAPPY_WATCH_HARDWARE_PERF
+  hardware_perf_begin_zoom();
+#endif
   persist_write_int(PERSIST_ZOOM, s_viewport_zoom);
-  invalidate_tiles_with_reason(TileInvalidateZoom);
+  complete_tile_animations();
+  cancel_tile_redraw();
+  cancel_all_tile_requests();
+  invalidate_orientation_tile_coverage();
+  begin_zoom_fallback(previous_zoom);
   update_state_after_map_change();
   if (notification_delta != 0) {
     send_zoom_button(notification_delta > 0 ? 1 : -1);

@@ -79,7 +79,7 @@
 #define GRID_COLS 7
 #define GRID_ROWS 6
 #define TILE_CACHE_SIZE (GRID_COLS * GRID_ROWS)
-#define TILE_STORAGE_ARENA_BYTES (32 * 1024)
+#define TILE_STORAGE_ARENA_BYTES (46 * 1024)
 #define MAX_RLE_BYTES MAX_TILE_PIXELS
 #define MAX_ROUTE_POINTS 128
 #define MAX_INSTRUCTION_BYTES 47
@@ -143,9 +143,11 @@
 #define TILE_ANIMATION_FADE_ZOOM_MS 640
 #define VISUAL_ANIMATION_TICK_MS 30
 #define TILE_ANIMATION_ZOOM_START_Q8 205
-#define TOUCH_TILE_ANIMATION_SUPPRESS_MS 900
 #define TILE_REQUEST_STALE_MS 8000
 #define TILE_REQUEST_WATCHDOG_MS 1000
+#define TILE_REQUEST_MAX_FLIGHTS 2
+#define TILE_REQUEST_TOUCH_RESUME_MS 100
+#define TILE_REDRAW_COALESCE_MS 60
 #define COMPASS_HEADING_FILTER_DEGREES 2
 #define GPS_SMOOTHING_NONE 0
 #define GPS_SMOOTHING_LOCATION 1
@@ -170,6 +172,10 @@
 #define LOCATION_CONE_OUTLINE_SEGMENTS 8
 #define LOCATION_CONE_OUTLINE_HALO_WIDTH 4
 #define LOCATION_CONE_OUTLINE_WIDTH 2
+#define LOCATION_EDGE_LENGTH_DIVISOR 3
+#define LOCATION_EDGE_GAP 3
+#define LOCATION_EDGE_INSET \
+  (LOCATION_EDGE_GAP + LOCATION_CONE_OUTLINE_HALO_WIDTH / 2)
 
 #ifdef MAPPY_WATCH_PHONE_MODE_FIXTURE
 #define MAPPY_PHONE_MODE_LABEL "fixture"
@@ -195,10 +201,6 @@ typedef struct {
   int32_t world_y;
   int8_t zoom;
   bool valid;
-  bool pending;
-  int32_t pending_request_id;
-  time_t pending_started_s;
-  uint16_t pending_started_ms;
   bool animation_active;
   uint8_t animation_mode;
   time_t animation_started_s;
@@ -215,6 +217,25 @@ typedef struct {
   int8_t zoom;
 } TileRequest;
 
+typedef struct {
+  TileRequest request;
+  int32_t request_id;
+  time_t started_s;
+  uint16_t started_ms;
+  uint8_t retry_attempt;
+  bool active;
+  bool discard_only;
+} TileFlight;
+
+typedef enum {
+  TileApplyIgnored,
+  TileApplyIncomplete,
+  TileApplyCompletedVisible,
+  TileApplyCompletedOffscreen,
+  TileApplyDiscarded,
+  TileApplyRejected,
+} TileApplyResult;
+
 typedef enum {
   TileInvalidateUnknown,
   TileInvalidateTheme,
@@ -224,12 +245,6 @@ typedef enum {
 
 typedef struct {
   const char *reason;
-  bool evicted;
-  bool old_valid;
-  bool old_pending;
-  int32_t old_world_x;
-  int32_t old_world_y;
-  int8_t old_zoom;
 } TileSlotDiagnostics;
 
 typedef struct {
@@ -305,9 +320,15 @@ extern uint8_t *s_tile_decode_scratch;
 extern TileStorageArena s_tile_storage_arena;
 extern int s_tile_cache_size;
 extern TileRequest s_request_queue[TILE_CACHE_SIZE];
+extern uint8_t s_request_retry_attempts[TILE_CACHE_SIZE];
 extern int s_request_count;
 extern int s_request_index;
-extern TileRequest s_inflight_request;
+extern int32_t s_inflight_tile_request_id;
+extern TileFlight s_tile_flights[TILE_REQUEST_MAX_FLIGHTS];
+extern bool s_tile_requests_interaction_paused;
+extern bool s_tile_requests_setup_paused;
+extern AppTimer *s_tile_request_resume_timer;
+extern AppTimer *s_tile_redraw_timer;
 extern TileRequest s_orientation_tile_origins[TILE_CACHE_SIZE];
 extern int s_orientation_tile_origin_count;
 extern bool s_orientation_tile_origins_valid;
@@ -455,8 +476,6 @@ extern int16_t s_touch_start_x;
 extern int16_t s_touch_start_y;
 extern int32_t s_touch_start_viewport_x;
 extern int32_t s_touch_start_viewport_y;
-extern time_t s_last_touch_ended_s;
-extern uint16_t s_last_touch_ended_ms;
 extern bool s_touch_disabled_logged;
 extern bool s_pinch_unavailable_logged;
 #endif
@@ -478,6 +497,8 @@ void set_bottom_text(const char *text);
 void sanitize_payload_text(char *dest, size_t dest_size, const uint8_t *src, uint8_t src_len);
 int32_t floor_div_i32(int32_t value, int32_t divisor);
 int32_t scale_world_to_zoom(int32_t value, int8_t from_zoom, int8_t to_zoom);
+int32_t scale_world_extent_end_to_zoom(int32_t value, int8_t from_zoom,
+                                       int8_t to_zoom);
 int32_t clamp_i32_to_i16(int32_t value);
 int32_t normalize_degrees(int32_t degrees);
 bool phone_heading_is_valid(void);
@@ -537,16 +558,13 @@ void start_compass_service(void);
 void stop_compass_service(void);
 int normalize_tile_animation_mode(int mode);
 const char *tile_invalidation_reason_label(TileInvalidationReason reason);
-void init_tile_slot_diagnostics(TileSlotDiagnostics *diag);
 int ceil_div_i32(int value, int divisor);
 bool is_supported_tile_geometry(int width, int height);
 int active_tile_cache_size(void);
 void reset_tile_chunk_assembly(void);
 bool configure_tile_geometry(int width, int height);
-void mark_tile_pending(TileCacheEntry *entry);
-void clear_tile_pending(TileCacheEntry *entry);
-uint16_t tile_pending_elapsed_ms(const TileCacheEntry *entry);
 bool any_pending_tile_requests(void);
+int active_tile_flight_count(void);
 bool expire_stale_tile_requests(void);
 void tile_request_watchdog_callback(void *data);
 void schedule_tile_request_watchdog(void);
@@ -555,10 +573,29 @@ void invalidate_tiles_with_reason(TileInvalidationReason reason);
 bool tile_matches(const TileCacheEntry *entry, int32_t world_x, int32_t world_y, int8_t zoom);
 TileCacheEntry *find_tile(int32_t world_x, int32_t world_y, int8_t zoom);
 int visible_tile_origins(TileRequest *origins, int max_count);
+bool tile_origin_list_contains(const TileRequest *origins, int count,
+                               int32_t world_x, int32_t world_y, int8_t zoom);
 bool tile_is_visible(const TileCacheEntry *entry);
 bool tile_coordinates_visible(int32_t world_x, int32_t world_y, int8_t zoom);
 void clear_offscreen_pending_tile_requests(void);
 void clear_unsent_tile_requests(void);
+TileFlight *find_tile_flight(int32_t world_x, int32_t world_y, int8_t zoom,
+                            int32_t request_id);
+void complete_tile_flight(TileFlight *flight);
+void retry_tile_flight(TileFlight *flight, bool retry_immediately);
+void handle_tile_request_error(int32_t world_x, int32_t world_y, int8_t zoom,
+                               int32_t request_id, bool setup_required,
+                               bool retry_immediately);
+void handle_tile_request_outbox_failure(AppMessageResult reason);
+bool tile_request_is_suppressed(int32_t world_x, int32_t world_y, int8_t zoom);
+void suppress_tile_request(int32_t world_x, int32_t world_y, int8_t zoom);
+void cancel_all_tile_requests(void);
+void pause_tile_requests_for_interaction(void);
+void resume_tile_requests_after_interaction(void);
+void resume_tile_requests_after_phone_ready(void);
+bool tile_requests_paused(void);
+void cancel_tile_redraw(void);
+void schedule_tile_redraw(bool immediate);
 void invalidate_orientation_tile_coverage(void);
 void remember_orientation_tile_origins(const TileRequest *origins, int count);
 bool orientation_tile_coverage_changed(void);
@@ -579,15 +616,23 @@ bool reserve_tile_storage(TileCacheEntry *entry, uint16_t length,
                           TileStorageFormat format);
 int valid_visible_tile_count(void);
 bool visible_grid_has_missing_tiles(void);
+bool visible_grid_is_complete(void);
+bool zoom_fallback_active(void);
+int8_t zoom_fallback_source_zoom(void);
+bool zoom_fallback_retains_entry(const TileCacheEntry *entry);
+void zoom_fallback_release_entry(TileCacheEntry *entry);
+void clear_zoom_fallback(void);
+void begin_zoom_fallback(int8_t previous_zoom);
+bool zoom_fallback_entry_fully_covered(const TileCacheEntry *entry);
+bool zoom_fallback_entry_covered_by_tile(const TileCacheEntry *entry,
+                                         int32_t world_x, int32_t world_y,
+                                         int8_t zoom);
+void zoom_fallback_maybe_finish(void);
 void queue_visible_tiles(void);
 void send_next_tile_request(void);
-bool decode_tile_rle(const uint8_t *encoded, uint16_t encoded_len, uint8_t *decoded);
-bool decode_cached_tile(const TileCacheEntry *entry, uint8_t *decoded);
-bool sample_cached_tile_palette_index(const TileCacheEntry *entry, int local_x,
-                                      int local_y, uint8_t *palette_index);
 bool decode_cached_tile_row(const TileCacheEntry *entry, int row,
                             uint8_t *packed_row, size_t packed_row_bytes);
-void apply_tile(DictionaryIterator *iter);
+TileApplyResult apply_tile(DictionaryIterator *iter);
 void apply_theme(DictionaryIterator *iter);
 void apply_map_settings(DictionaryIterator *iter);
 void apply_map_orientation(DictionaryIterator *iter);
@@ -645,7 +690,7 @@ void apply_debug_compass(DictionaryIterator *iter);
 void apply_debug_tile(DictionaryIterator *iter);
 void apply_debug_route_progress(DictionaryIterator *iter);
 void apply_travel_mode(DictionaryIterator *iter);
-void apply_error(DictionaryIterator *iter);
+bool apply_error(DictionaryIterator *iter);
 void inbox_received(DictionaryIterator *iter, void *context);
 void inbox_dropped(AppMessageResult reason, void *context);
 void outbox_sent(DictionaryIterator *iter, void *context);
@@ -693,7 +738,7 @@ bool draw_tiles_framebuffer_fast(GContext *ctx, const GColor *palette,
                                  TileCacheEntry **entries, int entry_count,
                                  uint8_t background_argb);
 void draw_tile_entry_slow(GContext *ctx, TileCacheEntry *entry,
-                          const uint8_t *decoded, const GColor *palette);
+                          const GColor *palette);
 void draw_tiles(GContext *ctx, GColor background, bool fill_background);
 void draw_route(GContext *ctx, const MapRenderTransform *transform);
 void draw_destination_marker(GContext *ctx, const MapRenderTransform *transform);
@@ -729,7 +774,16 @@ void fixture_perf_orientation_work(void);
 void fixture_perf_route_segment(bool submitted);
 void fixture_perf_start_mixed_sources(void);
 void fixture_perf_enter_manual_browse(void);
+void fixture_set_location_screen_position(int32_t screen_x, int32_t screen_y);
+void fixture_perf_pan_under_load(int action);
 void fixture_perf_maybe_emit(void);
+#endif
+#ifdef MAPPY_WATCH_HARDWARE_PERF
+void hardware_perf_begin_zoom(void);
+void hardware_perf_begin_pan(void);
+void hardware_perf_note_pan_input(time_t seconds, uint16_t milliseconds);
+void hardware_perf_map_draw_begin(void);
+void hardware_perf_map_draw_complete(void);
 #endif
 void window_load(Window *window);
 void window_unload(Window *window);
@@ -739,10 +793,11 @@ void deinit(void);
 
 #ifdef PBL_TOUCH
 void reset_touch_state(void);
-void mark_touch_interaction_ended(void);
-bool touch_interaction_recent(void);
 void log_touch_disabled_once(void);
 void log_pinch_unavailable_once(void);
+void begin_pan_interaction(int16_t screen_x, int16_t screen_y);
+void update_pan_interaction(int16_t screen_x, int16_t screen_y);
+void end_pan_interaction(int16_t screen_x, int16_t screen_y);
 void touch_handler(const TouchEvent *event, void *context);
 #endif
 

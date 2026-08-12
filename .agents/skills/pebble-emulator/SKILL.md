@@ -83,6 +83,7 @@ button <action> <button>
 debug-facing <degrees>
 debug-compass <degrees|clear>
 debug-manual-browse <degrees>
+debug-location-position <screen-x> <screen-y> [degrees]
 debug-recenter <degrees>
 debug-map-settings <width> <height>
 debug-tile [index]

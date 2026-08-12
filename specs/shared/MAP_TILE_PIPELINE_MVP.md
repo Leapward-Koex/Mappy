@@ -199,14 +199,14 @@ grid_cols = ceil(screen_width / tile_width) + 1
 grid_rows = ceil(screen_height / tile_height) + 1
 visible_cache_entries = grid_cols * grid_rows
 packed_tile_bytes = ceil(tile_width * tile_height / 2)
-compressed_arena_bytes = 32768
+compressed_arena_bytes = 47104
 decode_scratch_bytes = 6804
 tile_request_queue_len >= visible_cache_entries
 ```
 
 For the MVP `emery` baseline at `54x63`, this evaluates to `5 x 5`, `25`
 visible entries, and `1701` packed bytes for one decoded tile. Cached imagery
-is not held as 25 decoded buffers. It is stored in a fixed 32 KiB compressed
+is not held as 25 decoded buffers. It is stored in a fixed 46 KiB compressed
 arena, with one 6,804-byte scratch buffer sized for the largest supported tile.
 Larger rendered tiles reduce `grid_cols` and `grid_rows`, but increase both the
 packed fallback size and typical encoded bytes per response.
@@ -218,9 +218,13 @@ Each valid entry stores the smaller of:
 - the lossless packed 4-bit palette pixels when indexed RLE is not smaller.
 
 Arena segments are contiguous and compact after eviction. Storage pressure
-prefers offscreen/LRU entries. A visible entry evicted only for byte pressure is
-suppressed from re-request until it leaves the viewport, preventing a
-request/eviction loop for high-entropy imagery.
+prefers offscreen/LRU entries, then retained source-zoom fallback imagery
+(already-covered fallback first), before considering a current visible tile.
+If pressure remains, an incoming tile may replace only a current tile farther
+from the viewport center; a fringe arrival cannot punch a more central hole.
+A visible entry evicted only for unavoidable byte pressure is suppressed from
+re-request until it leaves the viewport, preventing a request/eviction loop for
+high-entropy imagery.
 
 The grid origin is computed from the viewport:
 
@@ -251,7 +255,8 @@ north-up grid even when the stored centered-map preference is face-forward.
 The watch must suppress duplicate requests already present in:
 
 - the valid compressed tile cache, or
-- the outbound request queue.
+- the outbound request queue, or
+- the two-entry active-response window.
 
 The request queue must either hold at least `grid_cols * grid_rows` entries, or
 the watch must run a refill scheduler after each send/timeout so all visible
@@ -260,6 +265,19 @@ tiles are eventually requested. The default `54x63` preset therefore uses a
 `tile_request_queue_len >= visible_cache_entries`.
 
 The watch may display stale prior tiles while replacements are loading.
+
+Queued coordinates do not reserve cache entries and do not start their response
+timeout. Cache allocation happens only after a complete current response has
+validated. Tile loading pauses during touch interaction and resumes after a
+100 ms post-liftoff grace period; AppMessage callbacks for obsolete responses
+must not decode, store, or dirty the map.
+
+Accepted visible tiles share a non-sliding 60 ms redraw window; the first tile
+on an empty map and completion of the visible grid may flush immediately. On
+Emery hardware, accepted input must reach a changed frame within 100 ms at p95
+with no interaction stall above 150 ms. North-up map draws must remain at or
+below 50 ms, facing-up draws at or below 100 ms, and a healthy deterministic
+cold load must complete within five seconds.
 
 Zoom transitions must preserve the previously visible compressed tiles as
 transient coverage instead of immediately unloading or blanking them. While the
@@ -310,6 +328,12 @@ crosses_y = offset_y + watch_tile_height > 256
 10. RLE-pack the `watch_tile_width * watch_tile_height` palette indexes.
 11. Queue one logical `CMD_TILE` response, split into ordered chunks when the
   encoded tile does not fit in one AppMessage.
+
+The send queue treats that logical response as an atomic group. It validates
+consistent metadata and exact contiguous payload coverage before enqueueing,
+keeps sibling chunks ordered, and waits 30 ms after the final chunk ACK before
+starting another tile response. GPS and control delivery bypass this tile-only
+cooldown.
 
 The phone should maintain:
 
@@ -494,7 +518,7 @@ The watch must support:
 - A golden 54x63 palette-index grid RLE-encodes and decodes without loss, and
   the same RLE, indexed-RLE, and packed paths pass for every supported watch
   tile size.
-- Compressed arena usage never exceeds 32 KiB; compaction preserves remaining
+- Compressed arena usage never exceeds 46 KiB; compaction preserves remaining
   segments and byte-pressure eviction cannot cause an immediate visible-tile
   re-request loop.
 - A crop crossing a 256x256 logical source-tile boundary composites from the

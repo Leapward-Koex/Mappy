@@ -1,8 +1,27 @@
 #include "mappy.h"
+#include "location_edge_geometry.h"
 
 // Map, route, location, status chrome, and menu rendering.
 
-static TileRequest s_render_tile_origins[TILE_CACHE_SIZE];
+#define ROTATED_RLE_BLOCK_CACHE_SIZE 16
+#define ROTATED_RLE_BLOCK_BYTES (TILE_RLE_INDEX_BLOCK_PIXELS / 2)
+
+typedef struct {
+  uint8_t cell_index;
+  uint8_t row;
+  uint8_t block;
+  uint8_t packed[ROTATED_RLE_BLOCK_BYTES];
+} RotatedRleBlockCacheEntry;
+
+typedef union {
+  TileRequest origins[TILE_CACHE_SIZE];
+  TileCacheEntry *fallback_entries[TILE_CACHE_SIZE];
+  RotatedRleBlockCacheEntry rle_block_cache[ROTATED_RLE_BLOCK_CACHE_SIZE];
+} RenderTileScratch;
+
+static RenderTileScratch s_render_tile_scratch;
+#define s_render_tile_origins s_render_tile_scratch.origins
+#define s_render_fallback_entries s_render_tile_scratch.fallback_entries
 static TileCacheEntry *s_render_tile_entries[TILE_CACHE_SIZE];
 #ifdef MAPPY_WATCH_PHONE_MODE_FIXTURE
 static int s_last_rotated_log_entry_count = -1;
@@ -127,72 +146,6 @@ static int32_t q8_to_nearest_int(int32_t value) {
   return -((-value + 128) / 256);
 }
 
-static int visible_tile_entry_index(TileCacheEntry **entries, int entry_count,
-                                    int32_t world_x, int32_t world_y,
-                                    int8_t zoom) {
-  int32_t origin_x = floor_div_i32(world_x, s_tile_width) * s_tile_width;
-  int32_t origin_y = floor_div_i32(world_y, s_tile_height) * s_tile_height;
-  for (int i = 0; i < entry_count; i++) {
-    TileCacheEntry *entry = entries[i];
-    if (entry && entry->valid && tile_matches(entry, origin_x, origin_y, zoom)) {
-      return i;
-    }
-  }
-  return -1;
-}
-
-static bool sample_visible_tile_palette_index(TileCacheEntry **entries,
-                                              int entry_count,
-                                              const uint16_t *animation_progress_q8,
-                                              const uint16_t *animation_scale_q8,
-                                              int32_t world_x,
-                                              int32_t world_y,
-                                              int8_t zoom,
-                                              uint8_t *palette_index) {
-  int entry_index = visible_tile_entry_index(entries, entry_count, world_x,
-                                             world_y, zoom);
-  if (entry_index < 0) {
-    return false;
-  }
-
-  TileCacheEntry *entry = entries[entry_index];
-  int local_x = (int)(world_x - entry->world_x);
-  int local_y = (int)(world_y - entry->world_y);
-  if (local_x < 0 || local_x >= s_tile_width ||
-      local_y < 0 || local_y >= s_tile_height) {
-    return false;
-  }
-
-  int sample_x = local_x;
-  int sample_y = local_y;
-  uint16_t progress_q8 =
-      animation_progress_q8 ? animation_progress_q8[entry_index] : 256;
-  if (progress_q8 < 256) {
-    uint16_t scale_q8 =
-        animation_scale_q8 ? animation_scale_q8[entry_index] : 256;
-    if (scale_q8 < 256) {
-      int32_t center_x_q8 = ((int32_t)s_tile_width * 256) / 2;
-      int32_t center_y_q8 = ((int32_t)s_tile_height * 256) / 2;
-      int32_t local_x_q8 = ((int32_t)local_x * 256) - center_x_q8;
-      int32_t local_y_q8 = ((int32_t)local_y * 256) - center_y_q8;
-      sample_x = q8_to_nearest_int(center_x_q8 +
-                                   (local_x_q8 * 256) / scale_q8);
-      sample_y = q8_to_nearest_int(center_y_q8 +
-                                   (local_y_q8 * 256) / scale_q8);
-      if (sample_x < 0 || sample_x >= s_tile_width ||
-          sample_y < 0 || sample_y >= s_tile_height) {
-        return false;
-      }
-    }
-    if (!tile_animation_draws_pixel(sample_x, sample_y, progress_q8)) {
-      return false;
-    }
-  }
-
-  return sample_cached_tile_palette_index(entry, sample_x, sample_y,
-                                          palette_index);
-}
-
 typedef struct {
   TileCacheEntry *entry;
   const uint8_t *stored;
@@ -210,6 +163,8 @@ typedef struct {
 } RotatedTileLookup;
 
 static RotatedTileLookup s_rotated_tile_lookup;
+
+#define s_rotated_rle_block_cache s_render_tile_scratch.rle_block_cache
 
 static bool prepare_rotated_tile_lookup(TileCacheEntry **entries, int entry_count,
                                         RotatedTileLookup *lookup) {
@@ -343,7 +298,8 @@ static inline bool sample_rotated_tile_lookup_palette_index(
     return false;
   }
 
-  const RotatedTileCell *cell = &lookup->cells[row * lookup->cols + col];
+  uint8_t cell_index = (uint8_t)(row * lookup->cols + col);
+  const RotatedTileCell *cell = &lookup->cells[cell_index];
   TileCacheEntry *entry = cell->entry;
   if (!entry || !entry->valid || !cell->stored) {
     return false;
@@ -383,29 +339,31 @@ static inline bool sample_rotated_tile_lookup_palette_index(
     return false;
   }
 
-  uint16_t columns = TILE_RLE_INDEX_COLUMNS(s_tile_width);
-  uint16_t column = (uint16_t)sample_x >> 5;
-  size_t index_offset = ((size_t)sample_y * columns + column) *
-      TILE_RLE_ROW_INDEX_BYTES;
-  const uint8_t *index = cell->stored + entry->encoded_length + index_offset;
-  size_t encoded_offset = index[0] | ((size_t)index[1] << 8);
-  uint8_t skip = index[2];
-  uint16_t remaining_x = (uint16_t)sample_x & 31;
-  while (encoded_offset < entry->encoded_length) {
-    uint8_t byte = cell->stored[encoded_offset++];
-    uint16_t run_length = (byte >> 4) + 1;
-    if (skip >= run_length) {
+  uint8_t block = (uint16_t)sample_x / TILE_RLE_INDEX_BLOCK_PIXELS;
+  uint8_t slot = (uint8_t)(((cell_index * 7) +
+                            (uint16_t)sample_y * 5 + block * 11) &
+                           (ROTATED_RLE_BLOCK_CACHE_SIZE - 1));
+  RotatedRleBlockCacheEntry *cached = &s_rotated_rle_block_cache[slot];
+  if (cached->cell_index != cell_index || cached->row != (uint8_t)sample_y ||
+      cached->block != block) {
+    const uint8_t *row_index = cell->stored + entry->encoded_length;
+    size_t row_index_bytes = entry->storage.length - entry->encoded_length;
+    if (!tile_rle_decode_indexed_block(
+            cell->stored, entry->encoded_length, row_index, row_index_bytes,
+            (uint16_t)s_tile_width, (uint16_t)s_tile_height, block,
+            (uint16_t)sample_y, cached->packed, sizeof(cached->packed))) {
+      cached->cell_index = UINT8_MAX;
       return false;
     }
-    run_length -= skip;
-    skip = 0;
-    if (remaining_x < run_length) {
-      *palette_index = byte & 0x0f;
-      return true;
-    }
-    remaining_x -= run_length;
+    cached->cell_index = cell_index;
+    cached->row = (uint8_t)sample_y;
+    cached->block = block;
   }
-  return false;
+
+  uint8_t block_x = (uint16_t)sample_x % TILE_RLE_INDEX_BLOCK_PIXELS;
+  uint8_t packed = cached->packed[block_x / 2];
+  *palette_index = (block_x & 1) ? packed >> 4 : packed & 0x0f;
+  return true;
 }
 
 static inline void rotated_lookup_position(const RotatedTileLookup *lookup,
@@ -422,83 +380,17 @@ static inline void rotated_lookup_position(const RotatedTileLookup *lookup,
 
 static inline void advance_rotated_lookup_axis(int delta, int tile_size,
                                                int *cell_index, int *local) {
-  // At 1:1 scale, one screen pixel can advance by at most one world pixel.
   *local += delta;
-  if (*local < 0) {
-    *local += tile_size;
-    (*cell_index)--;
-  } else if (*local >= tile_size) {
-    *local -= tile_size;
-    (*cell_index)++;
+  if (*local < 0 || *local >= tile_size) {
+    // A retained fallback can be several power-of-two zoom levels away from
+    // the current grid, so one screen pixel may cross multiple source tiles.
+    int crossed = floor_div_i32(*local, tile_size);
+    *local -= crossed * tile_size;
+    *cell_index += crossed;
   }
 }
 
-static void draw_rotated_tiles_framebuffer_linear(uint8_t *framebuffer_data,
-                                                  int16_t bytes_per_row,
-                                                  uint8_t background_argb,
-                                                  const uint8_t *palette_argb,
-                                                  TileCacheEntry **entries,
-                                                  int entry_count,
-                                                  int screen_w,
-                                                  int screen_h,
-                                                  int center_x,
-                                                  int center_y,
-                                                  int32_t sin_value,
-                                                  int32_t cos_value) {
-  uint16_t animation_progress_q8[TILE_CACHE_SIZE];
-  uint16_t animation_scale_q8[TILE_CACHE_SIZE];
-  for (int i = 0; i < entry_count; i++) {
-    TileCacheEntry *entry = entries[i];
-    animation_progress_q8[i] = 256;
-    animation_scale_q8[i] = 256;
-    if (!entry || !entry->valid) {
-      continue;
-    }
-
-    entry->last_used = ++s_access_counter;
-    if (entry->animation_active) {
-      uint16_t progress_q8 = tile_animation_progress_q8(entry);
-      if (progress_q8 >= 256) {
-        complete_tile_animation(entry);
-      } else {
-        animation_progress_q8[i] = progress_q8;
-        if (entry->animation_mode == TILE_ANIMATION_FADE_ZOOM) {
-          uint16_t eased_q8 = tile_animation_eased_q8(progress_q8);
-          animation_scale_q8[i] = TILE_ANIMATION_ZOOM_START_Q8 +
-              (((256 - TILE_ANIMATION_ZOOM_START_Q8) * eased_q8) / 256);
-        }
-      }
-    }
-  }
-
-  for (int screen_y = 0; screen_y < screen_h; screen_y++) {
-    int32_t sy = screen_y - center_y;
-    int32_t sx = -center_x;
-    int32_t world_x_num = sx * cos_value - sy * sin_value;
-    int32_t world_y_num = sx * sin_value + sy * cos_value;
-    int32_t viewport_x = render_viewport_x();
-    int32_t viewport_y = render_viewport_y();
-    uint8_t *dst_row = framebuffer_data + (screen_y * bytes_per_row);
-    for (int screen_x = 0; screen_x < screen_w; screen_x++) {
-      int32_t world_x = viewport_x + trig_ratio_to_nearest_int(world_x_num);
-      int32_t world_y = viewport_y + trig_ratio_to_nearest_int(world_y_num);
-      uint8_t palette_index;
-      if (sample_visible_tile_palette_index(entries, entry_count,
-                                            animation_progress_q8,
-                                            animation_scale_q8,
-                                            world_x, world_y, s_viewport_zoom,
-                                            &palette_index)) {
-        dst_row[screen_x] = palette_argb[palette_index & 0x0f];
-      } else {
-        dst_row[screen_x] = background_argb;
-      }
-      world_x_num += cos_value;
-      world_y_num += sin_value;
-    }
-  }
-}
-
-static void draw_rotated_tiles_framebuffer_sampled(uint8_t *framebuffer_data,
+static bool draw_rotated_tiles_framebuffer_sampled(uint8_t *framebuffer_data,
                                                    int16_t bytes_per_row,
                                                    uint8_t background_argb,
                                                    const uint8_t *palette_argb,
@@ -509,28 +401,37 @@ static void draw_rotated_tiles_framebuffer_sampled(uint8_t *framebuffer_data,
                                                    int center_x,
                                                    int center_y,
                                                    int32_t sin_value,
-                                                   int32_t cos_value) {
+                                                   int32_t cos_value,
+                                                   int8_t sample_zoom,
+  bool fill_missing) {
   RotatedTileLookup *lookup = &s_rotated_tile_lookup;
   if (!prepare_rotated_tile_lookup(entries, entry_count, lookup)) {
     APP_LOG(APP_LOG_LEVEL_WARNING,
             "Rotated render lookup fallback entries=%d tile=%dx%d cache=%d",
             entry_count, s_tile_width, s_tile_height, active_tile_cache_size());
-    draw_rotated_tiles_framebuffer_linear(framebuffer_data, bytes_per_row,
-                                          background_argb, palette_argb,
-                                          entries, entry_count, screen_w,
-                                          screen_h, center_x, center_y,
-                                          sin_value, cos_value);
-    return;
+    if (fill_missing) {
+      for (int screen_y = 0; screen_y < screen_h; screen_y++) {
+        memset(framebuffer_data + (screen_y * bytes_per_row), background_argb,
+               screen_w);
+      }
+    }
+    return false;
   }
+  memset(s_rotated_rle_block_cache, 0xff,
+         sizeof(s_render_tile_scratch.rle_block_cache));
 #ifdef MAPPY_WATCH_PHONE_MODE_FIXTURE
-  log_rotated_render_signature(entry_count, lookup);
+  if (sample_zoom == s_viewport_zoom) {
+    log_rotated_render_signature(entry_count, lookup);
+  }
 #endif
   if (lookup->cols <= 0 || lookup->rows <= 0) {
-    for (int screen_y = 0; screen_y < screen_h; screen_y++) {
-      memset(framebuffer_data + (screen_y * bytes_per_row), background_argb,
-             screen_w);
+    if (fill_missing) {
+      for (int screen_y = 0; screen_y < screen_h; screen_y++) {
+        memset(framebuffer_data + (screen_y * bytes_per_row), background_argb,
+               screen_w);
+      }
     }
-    return;
+    return true;
   }
   for (int screen_y = 0; screen_y < screen_h; screen_y++) {
     int32_t sy = screen_y - center_y;
@@ -540,13 +441,17 @@ static void draw_rotated_tiles_framebuffer_sampled(uint8_t *framebuffer_data,
     uint8_t *dst_row = framebuffer_data + (screen_y * bytes_per_row);
     int32_t viewport_x = render_viewport_x();
     int32_t viewport_y = render_viewport_y();
-    int32_t world_x = viewport_x + trig_ratio_to_nearest_int(world_x_num);
-    int32_t world_y = viewport_y + trig_ratio_to_nearest_int(world_y_num);
+    int32_t sample_world_x = scale_world_to_zoom(
+        viewport_x + trig_ratio_to_nearest_int(world_x_num),
+        s_viewport_zoom, sample_zoom);
+    int32_t sample_world_y = scale_world_to_zoom(
+        viewport_y + trig_ratio_to_nearest_int(world_y_num),
+        s_viewport_zoom, sample_zoom);
     int col;
     int row;
     int local_x;
     int local_y;
-    rotated_lookup_position(lookup, world_x, world_y, &col, &row,
+    rotated_lookup_position(lookup, sample_world_x, sample_world_y, &col, &row,
                             &local_x, &local_y);
     for (int screen_x = 0; screen_x < screen_w; screen_x++) {
       uint8_t palette_index;
@@ -554,34 +459,161 @@ static void draw_rotated_tiles_framebuffer_sampled(uint8_t *framebuffer_data,
                                                    local_x, local_y,
                                                    &palette_index)) {
         dst_row[screen_x] = palette_argb[palette_index & 0x0f];
-      } else {
+      } else if (fill_missing) {
         dst_row[screen_x] = background_argb;
       }
       world_x_num += cos_value;
       world_y_num += sin_value;
       int32_t next_world_x = viewport_x + trig_ratio_to_nearest_int(world_x_num);
       int32_t next_world_y = viewport_y + trig_ratio_to_nearest_int(world_y_num);
-      advance_rotated_lookup_axis((int)(next_world_x - world_x), s_tile_width,
+      int32_t next_sample_world_x = scale_world_to_zoom(
+          next_world_x, s_viewport_zoom, sample_zoom);
+      int32_t next_sample_world_y = scale_world_to_zoom(
+          next_world_y, s_viewport_zoom, sample_zoom);
+      advance_rotated_lookup_axis(
+          (int)(next_sample_world_x - sample_world_x), s_tile_width,
                                   &col, &local_x);
-      advance_rotated_lookup_axis((int)(next_world_y - world_y), s_tile_height,
+      advance_rotated_lookup_axis(
+          (int)(next_sample_world_y - sample_world_y), s_tile_height,
                                   &row, &local_y);
-      world_x = next_world_x;
-      world_y = next_world_y;
+      sample_world_x = next_sample_world_x;
+      sample_world_y = next_sample_world_y;
+    }
+  }
+  return true;
+}
+
+static bool cached_tile_packed_row(const TileCacheEntry *entry, int row,
+                                   uint8_t *scratch, size_t scratch_bytes,
+                                   const uint8_t **packed_row) {
+  if (!entry || !entry->valid || !scratch || !packed_row || row < 0 ||
+      row >= s_tile_height || !tile_storage_ref_valid(&entry->storage)) {
+    return false;
+  }
+
+  size_t row_bytes = ((size_t)s_tile_width + 1) / 2;
+  if (scratch_bytes < row_bytes) {
+    return false;
+  }
+  const uint8_t *stored = tile_storage_data(&s_tile_storage_arena,
+                                            &entry->storage);
+  if (!stored) {
+    return false;
+  }
+  if (entry->storage.format == TileStoragePacked) {
+    if (entry->storage.length != s_tile_bytes) {
+      return false;
+    }
+    *packed_row = stored + (size_t)row * row_bytes;
+    return true;
+  } else if (entry->storage.format != TileStorageIndexedRle) {
+    return false;
+  }
+
+  if (!decode_cached_tile_row(entry, row, scratch, scratch_bytes)) {
+    return false;
+  }
+  *packed_row = scratch;
+  return true;
+}
+
+static int collect_zoom_fallback_entries(void) {
+  if (!zoom_fallback_active() || !s_tiles) {
+    return 0;
+  }
+  int count = 0;
+  int capacity = active_tile_cache_size();
+  for (int i = 0; i < capacity && count < TILE_CACHE_SIZE; i++) {
+    if (zoom_fallback_retains_entry(&s_tiles[i])) {
+      s_render_fallback_entries[count++] = &s_tiles[i];
+    }
+  }
+  return count;
+}
+
+static void draw_zoom_fallback_north(uint8_t *framebuffer_data,
+                                     int16_t bytes_per_row,
+                                     const uint8_t *palette_argb,
+                                     int screen_w, int screen_h,
+                                     int center_x, int center_y,
+                                     int fallback_count,
+                                     uint8_t *row_scratch,
+                                     size_t row_scratch_bytes) {
+  int32_t viewport_x = render_viewport_x();
+  int32_t viewport_y = render_viewport_y();
+  for (int i = 0; i < fallback_count; i++) {
+    TileCacheEntry *entry = s_render_fallback_entries[i];
+    if (!zoom_fallback_retains_entry(entry)) {
+      continue;
+    }
+    int32_t target_left = scale_world_to_zoom(entry->world_x, entry->zoom,
+                                              s_viewport_zoom);
+    int32_t target_top = scale_world_to_zoom(entry->world_y, entry->zoom,
+                                             s_viewport_zoom);
+    int32_t target_right = scale_world_extent_end_to_zoom(
+        entry->world_x + s_tile_width, entry->zoom, s_viewport_zoom);
+    int32_t target_bottom = scale_world_extent_end_to_zoom(
+        entry->world_y + s_tile_height, entry->zoom, s_viewport_zoom);
+    int dst_left = center_x + (int)(target_left - viewport_x);
+    int dst_top = center_y + (int)(target_top - viewport_y);
+    int dst_right = center_x + (int)(target_right - viewport_x);
+    int dst_bottom = center_y + (int)(target_bottom - viewport_y);
+    if (dst_right <= 0 || dst_bottom <= 0 || dst_left >= screen_w ||
+        dst_top >= screen_h || dst_right <= dst_left || dst_bottom <= dst_top) {
+      continue;
+    }
+    int first_x = dst_left < 0 ? 0 : dst_left;
+    int last_x = dst_right > screen_w ? screen_w : dst_right;
+    int first_y = dst_top < 0 ? 0 : dst_top;
+    int last_y = dst_bottom > screen_h ? screen_h : dst_bottom;
+    int previous_source_y = -1;
+    const uint8_t *packed_row = NULL;
+    entry->last_used = ++s_access_counter;
+    for (int dst_y = first_y; dst_y < last_y; dst_y++) {
+      int32_t current_world_y = viewport_y + (dst_y - center_y);
+      int source_y = (int)(scale_world_to_zoom(
+          current_world_y, s_viewport_zoom, entry->zoom) - entry->world_y);
+      if (source_y < 0 || source_y >= s_tile_height) {
+        continue;
+      }
+      if (source_y != previous_source_y) {
+        if (!cached_tile_packed_row(entry, source_y, row_scratch,
+                                    row_scratch_bytes, &packed_row)) {
+          packed_row = NULL;
+          continue;
+        }
+        previous_source_y = source_y;
+      }
+      if (!packed_row) {
+        continue;
+      }
+      uint8_t *dst_row = framebuffer_data + (dst_y * bytes_per_row);
+      for (int dst_x = first_x; dst_x < last_x; dst_x++) {
+        int32_t current_world_x = viewport_x + (dst_x - center_x);
+        int source_x = (int)(scale_world_to_zoom(
+            current_world_x, s_viewport_zoom, entry->zoom) - entry->world_x);
+        if (source_x < 0 || source_x >= s_tile_width) {
+          continue;
+        }
+        uint8_t packed = packed_row[source_x / 2];
+        uint8_t palette_index = (source_x & 1) ? packed >> 4 : packed & 0x0f;
+        dst_row[dst_x] = palette_argb[palette_index & 0x0f];
+      }
     }
   }
 }
 
-static void draw_tile_row_unscaled(uint8_t *dst_row, const uint8_t *decoded,
-                                   int pixel_index, int draw_w,
+static void draw_tile_row_unscaled(uint8_t *dst_row, const uint8_t *packed_row,
+                                   int src_x, int draw_w,
                                    const uint8_t *palette_argb) {
   int col = 0;
-  if ((pixel_index & 1) && draw_w > 0) {
-    uint8_t packed = decoded[pixel_index / 2];
+  if ((src_x & 1) && draw_w > 0) {
+    uint8_t packed = packed_row[src_x / 2];
     dst_row[col++] = palette_argb[packed >> 4];
-    pixel_index++;
+    src_x++;
   }
 
-  const uint8_t *src = decoded + (pixel_index / 2);
+  const uint8_t *src = packed_row + (src_x / 2);
   while (col + 1 < draw_w) {
     uint8_t packed = *src++;
     dst_row[col++] = palette_argb[packed & 0x0f];
@@ -596,14 +628,15 @@ static void draw_tile_row_unscaled(uint8_t *dst_row, const uint8_t *decoded,
 static void draw_tile_framebuffer_animated(uint8_t *framebuffer_data,
                                            int16_t bytes_per_row,
                                            const uint8_t *palette_argb,
-                                           const uint8_t *decoded,
                                            const TileCacheEntry *entry,
                                            int dst_origin_x,
                                            int dst_origin_y,
                                            int screen_w,
                                            int screen_h,
                                            uint16_t progress_q8,
-                                           uint16_t scale_q8) {
+                                           uint16_t scale_q8,
+                                           uint8_t *row_scratch,
+                                           size_t row_scratch_bytes) {
   for (int py = 0; py < s_tile_height; py++) {
     int dst_y = dst_origin_y + py;
     if (scale_q8 < 256) {
@@ -614,6 +647,11 @@ static void draw_tile_framebuffer_animated(uint8_t *framebuffer_data,
       continue;
     }
 
+    const uint8_t *packed_row;
+    if (!cached_tile_packed_row(entry, py, row_scratch, row_scratch_bytes,
+                                &packed_row)) {
+      continue;
+    }
     uint8_t *dst_row = framebuffer_data + (dst_y * bytes_per_row);
     for (int px = 0; px < s_tile_width; px++) {
       if (!tile_animation_draws_pixel(px, py, progress_q8)) {
@@ -629,11 +667,42 @@ static void draw_tile_framebuffer_animated(uint8_t *framebuffer_data,
         continue;
       }
 
-      int pixel_index = py * s_tile_width + px;
-      uint8_t packed = decoded[pixel_index / 2];
-      uint8_t palette_index =
-          (pixel_index & 1) ? (packed >> 4) : (packed & 0x0f);
+      uint8_t packed = packed_row[px / 2];
+      uint8_t palette_index = (px & 1) ? (packed >> 4) : (packed & 0x0f);
       dst_row[dst_x] = palette_argb[palette_index & 0x0f];
+    }
+  }
+}
+
+static void render_viewport_world_envelope(int32_t *min_x, int32_t *max_x,
+                                           int32_t *min_y, int32_t *max_y) {
+  int32_t half_w = s_screen_bounds.size.w / 2;
+  int32_t half_h = s_screen_bounds.size.h / 2;
+  int32_t center_x = render_viewport_x();
+  int32_t center_y = render_viewport_y();
+  *min_x = INT32_MAX;
+  *max_x = INT32_MIN;
+  *min_y = INT32_MAX;
+  *max_y = INT32_MIN;
+  for (int corner = 0; corner < 4; corner++) {
+    int32_t world_dx;
+    int32_t world_dy;
+    screen_delta_to_world_delta((corner & 1) ? half_w : -half_w,
+                                (corner & 2) ? half_h : -half_h,
+                                &world_dx, &world_dy);
+    int32_t world_x = center_x + world_dx;
+    int32_t world_y = center_y + world_dy;
+    if (world_x < *min_x) {
+      *min_x = world_x;
+    }
+    if (world_x > *max_x) {
+      *max_x = world_x;
+    }
+    if (world_y < *min_y) {
+      *min_y = world_y;
+    }
+    if (world_y > *max_y) {
+      *max_y = world_y;
     }
   }
 }
@@ -678,21 +747,39 @@ bool draw_tiles_framebuffer_fast(GContext *ctx, const GColor *palette,
     int32_t angle = active_map_bearing_angle();
     sin_value = sin_lookup(angle);
     cos_value = cos_lookup(angle);
-    draw_rotated_tiles_framebuffer_sampled(framebuffer_data, bytes_per_row,
-                                           background_argb, palette_argb,
-                                           entries, entry_count, screen_w,
-                                           screen_h, center_x, center_y,
-                                           sin_value, cos_value);
+    int fallback_count = collect_zoom_fallback_entries();
+    bool rendered;
+    if (fallback_count > 0) {
+      rendered = draw_rotated_tiles_framebuffer_sampled(
+          framebuffer_data, bytes_per_row, background_argb, palette_argb,
+          s_render_fallback_entries, fallback_count, screen_w, screen_h,
+          center_x, center_y, sin_value, cos_value,
+          zoom_fallback_source_zoom(), true) &&
+          draw_rotated_tiles_framebuffer_sampled(
+          framebuffer_data, bytes_per_row, background_argb, palette_argb,
+          entries, entry_count, screen_w, screen_h, center_x, center_y,
+          sin_value, cos_value, s_viewport_zoom, false);
+    } else {
+      rendered = draw_rotated_tiles_framebuffer_sampled(
+          framebuffer_data, bytes_per_row, background_argb, palette_argb,
+          entries, entry_count, screen_w, screen_h, center_x, center_y,
+          sin_value, cos_value, s_viewport_zoom, true);
+    }
     graphics_release_frame_buffer(ctx, framebuffer);
-    return true;
+    return rendered;
   }
 
+  uint8_t row_scratch[(MAX_TILE_W + 1) / 2];
+  int fallback_count = collect_zoom_fallback_entries();
+  if (fallback_count > 0) {
+    draw_zoom_fallback_north(framebuffer_data, bytes_per_row, palette_argb,
+                             screen_w, screen_h, center_x, center_y,
+                             fallback_count, row_scratch,
+                             sizeof(row_scratch));
+  }
   for (int i = 0; i < entry_count; i++) {
     TileCacheEntry *entry = entries[i];
     if (!entry || !entry->valid) {
-      continue;
-    }
-    if (!decode_cached_tile(entry, s_tile_decode_scratch)) {
       continue;
     }
 
@@ -712,10 +799,10 @@ bool draw_tiles_framebuffer_fast(GContext *ctx, const GColor *palette,
               (((256 - TILE_ANIMATION_ZOOM_START_Q8) * eased_q8) / 256);
         }
         draw_tile_framebuffer_animated(framebuffer_data, bytes_per_row,
-                                       palette_argb, s_tile_decode_scratch,
-                                       entry, dst_origin_x,
+                                       palette_argb, entry, dst_origin_x,
                                        dst_origin_y, screen_w, screen_h,
-                                       progress_q8, scale_q8);
+                                       progress_q8, scale_q8, row_scratch,
+                                       sizeof(row_scratch));
         continue;
       }
     }
@@ -748,9 +835,13 @@ bool draw_tiles_framebuffer_fast(GContext *ctx, const GColor *palette,
     }
 
     for (int row = 0; row < draw_h; row++) {
-      int pixel_index = (src_y + row) * s_tile_width + src_x;
+      const uint8_t *packed_row;
+      if (!cached_tile_packed_row(entry, src_y + row, row_scratch,
+                                  sizeof(row_scratch), &packed_row)) {
+        continue;
+      }
       uint8_t *dst_row = framebuffer_data + ((dst_y + row) * bytes_per_row) + dst_x;
-      draw_tile_row_unscaled(dst_row, s_tile_decode_scratch, pixel_index,
+      draw_tile_row_unscaled(dst_row, packed_row, src_x,
                              draw_w, palette_argb);
     }
   }
@@ -760,11 +851,10 @@ bool draw_tiles_framebuffer_fast(GContext *ctx, const GColor *palette,
 }
 
 void draw_tile_entry_slow(GContext *ctx, TileCacheEntry *entry,
-                          const uint8_t *decoded, const GColor *palette) {
-  if (!ctx || !entry || !decoded || !palette || !entry->valid) {
+                          const GColor *palette) {
+  if (!ctx || !entry || !palette || !entry->valid) {
     return;
   }
-
   entry->last_used = ++s_access_counter;
   uint16_t progress_q8 = tile_animation_progress_q8(entry);
   if (entry->animation_active && progress_q8 >= 256) {
@@ -778,7 +868,13 @@ void draw_tile_entry_slow(GContext *ctx, TileCacheEntry *entry,
         (((256 - TILE_ANIMATION_ZOOM_START_Q8) * zoom_eased_q8) / 256);
   }
 
+  uint8_t row_scratch[(MAX_TILE_W + 1) / 2];
   for (int py = 0; py < s_tile_height; py++) {
+    const uint8_t *packed_row;
+    if (!cached_tile_packed_row(entry, py, row_scratch,
+                                sizeof(row_scratch), &packed_row)) {
+      continue;
+    }
     for (int px = 0; px < s_tile_width; px++) {
       if (entry->animation_active && !tile_animation_draws_pixel(px, py, progress_q8)) {
         continue;
@@ -796,9 +892,8 @@ void draw_tile_entry_slow(GContext *ctx, TileCacheEntry *entry,
           point.y < 0 || point.y >= s_screen_bounds.size.h) {
         continue;
       }
-      int pixel_index = py * s_tile_width + px;
-      uint8_t packed = decoded[pixel_index / 2];
-      uint8_t palette_index = (pixel_index & 1) ? (packed >> 4) : (packed & 0x0f);
+      uint8_t packed = packed_row[px / 2];
+      uint8_t palette_index = (px & 1) ? (packed >> 4) : (packed & 0x0f);
       graphics_context_set_fill_color(ctx, palette[palette_index & 0x0f]);
       graphics_fill_rect(ctx, GRect(point.x, point.y, scaled_length(1),
                                     scaled_length(1)), 0, GCornerNone);
@@ -826,8 +921,25 @@ void draw_tiles(GContext *ctx, GColor background, bool fill_background) {
   }
 
   if (render_full_cache) {
+    int32_t min_x;
+    int32_t max_x;
+    int32_t min_y;
+    int32_t max_y;
+    render_viewport_world_envelope(&min_x, &max_x, &min_y, &max_y);
     for (int i = 0; i < origin_count; i++) {
-      s_render_tile_entries[i] = &s_tiles[i];
+      // Zoom continuity deliberately keeps source-zoom tiles valid.  They are
+      // rendered by the fallback pass in their own coordinate space and must
+      // not be mixed into the current-zoom lookup while map smoothing asks us
+      // to render the full cache.  Also exclude historical same-zoom tiles
+      // outside the interpolated viewport envelope: otherwise a sparse trail
+      // can make the dense facing lookup exceed its 42-cell bound and force a
+      // very slow per-pixel fallback.
+      bool intersects = s_tiles[i].world_x <= max_x &&
+          s_tiles[i].world_x + s_tile_width > min_x &&
+          s_tiles[i].world_y <= max_y &&
+          s_tiles[i].world_y + s_tile_height > min_y;
+      s_render_tile_entries[i] =
+          s_tiles[i].zoom == s_viewport_zoom && intersects ? &s_tiles[i] : NULL;
     }
   } else {
     for (int i = 0; i < origin_count; i++) {
@@ -850,9 +962,7 @@ void draw_tiles(GContext *ctx, GColor background, bool fill_background) {
     if (!entry || !entry->valid) {
       continue;
     }
-    if (decode_cached_tile(entry, s_tile_decode_scratch)) {
-      draw_tile_entry_slow(ctx, entry, s_tile_decode_scratch, palette);
-    }
+    draw_tile_entry_slow(ctx, entry, palette);
   }
 }
 
@@ -1299,6 +1409,37 @@ void draw_current_location_cone(GContext *ctx, GPoint point, int32_t display_hea
   graphics_context_set_stroke_width(ctx, 1);
 }
 
+static void draw_location_edge_path_layer(GContext *ctx,
+                                          const LocationEdgePath *path,
+                                          GColor color, uint8_t width) {
+  graphics_context_set_stroke_color(ctx, color);
+  graphics_context_set_stroke_width(ctx, width);
+  graphics_context_set_fill_color(ctx, color);
+
+  for (uint8_t i = 1; i < path->point_count; i++) {
+    LocationEdgePoint previous = path->points[i - 1];
+    LocationEdgePoint next = path->points[i];
+    graphics_draw_line(ctx, GPoint(previous.x, previous.y),
+                       GPoint(next.x, next.y));
+  }
+
+  int16_t radius = width / 2;
+  for (uint8_t i = 0; i < path->point_count; i++) {
+    graphics_fill_circle(ctx, GPoint(path->points[i].x, path->points[i].y),
+                         radius);
+  }
+}
+
+static void draw_current_location_edge(GContext *ctx,
+                                       const LocationEdgePath *path) {
+  draw_location_edge_path_layer(ctx, path, GColorWhite,
+                                LOCATION_CONE_OUTLINE_HALO_WIDTH);
+  draw_location_edge_path_layer(ctx, path,
+                                GColorFromHEX(LOCATION_BLUE_HEX),
+                                LOCATION_CONE_OUTLINE_WIDTH);
+  graphics_context_set_stroke_width(ctx, 1);
+}
+
 void draw_current_location(GContext *ctx,
                            const MapRenderTransform *transform) {
   if (!s_has_gps) {
@@ -1307,6 +1448,15 @@ void draw_current_location(GContext *ctx,
 
   GPoint point = map_transform_point(transform, display_gps_world_x(),
                                      display_gps_world_y(), s_gps_zoom);
+  LocationEdgePath edge_path;
+  if (location_edge_build_path(
+          point.x, point.y, s_screen_bounds.size.w, s_screen_bounds.size.h,
+          LOCATION_HALO_RADIUS, LOCATION_EDGE_INSET,
+          s_screen_bounds.size.w / LOCATION_EDGE_LENGTH_DIVISOR, &edge_path)) {
+    draw_current_location_edge(ctx, &edge_path);
+    return;
+  }
+
   int32_t facing_heading;
   if (active_facing_heading_degrees(&facing_heading)) {
     int32_t display_heading = normalize_degrees(
@@ -1541,6 +1691,9 @@ void draw_menu(GContext *ctx) {
 
 
 void map_layer_update(Layer *layer, GContext *ctx) {
+#ifdef MAPPY_WATCH_HARDWARE_PERF
+  hardware_perf_map_draw_begin();
+#endif
 #ifdef MAPPY_WATCH_PHONE_MODE_FIXTURE
   fixture_perf_map_draw();
 #endif
@@ -1566,5 +1719,8 @@ void map_layer_update(Layer *layer, GContext *ctx) {
 #ifdef MAPPY_WATCH_PHONE_MODE_FIXTURE
   fixture_perf_map_draw_complete();
   fixture_perf_maybe_emit();
+#endif
+#ifdef MAPPY_WATCH_HARDWARE_PERF
+  hardware_perf_map_draw_complete();
 #endif
 }
