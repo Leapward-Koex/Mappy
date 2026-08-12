@@ -1062,6 +1062,7 @@ void inbox_received(DictionaryIterator *iter, void *context) {
     }
     case CMD_GPS:
       apply_gps(iter);
+      mark_dirty_after_dispatch = false;
       break;
     case CMD_TILE:
       apply_tile(iter);

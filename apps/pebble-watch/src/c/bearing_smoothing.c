@@ -62,3 +62,30 @@ int32_t bearing_smoothing_advance(int32_t current_centi,
   }
   return normalize_centi_degrees(current_centi + (delta > 0 ? step : -step));
 }
+
+int32_t bearing_smoothing_advance_ticks(int32_t current_centi,
+                                        int32_t target_centi,
+                                        bool fast_reacquire,
+                                        uint8_t tick_count) {
+  while (tick_count-- > 0 && bearing_smoothing_shortest_delta(
+                                  current_centi, target_centi) != 0) {
+    current_centi = bearing_smoothing_advance(current_centi, target_centi,
+                                               fast_reacquire);
+  }
+  return current_centi;
+}
+
+uint8_t bearing_smoothing_consume_elapsed_ticks(uint32_t *accumulated_ms,
+                                                uint32_t elapsed_ms,
+                                                uint16_t tick_ms,
+                                                uint8_t max_ticks) {
+  if (!accumulated_ms || tick_ms == 0 || max_ticks == 0) {
+    return 0;
+  }
+  uint64_t total = (uint64_t)*accumulated_ms + elapsed_ms;
+  *accumulated_ms = total > UINT32_MAX ? UINT32_MAX : (uint32_t)total;
+  uint32_t ready = *accumulated_ms / tick_ms;
+  uint8_t consumed = ready > max_ticks ? max_ticks : (uint8_t)ready;
+  *accumulated_ms -= (uint32_t)consumed * tick_ms;
+  return consumed;
+}

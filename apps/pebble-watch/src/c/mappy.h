@@ -142,6 +142,7 @@
 #define TILE_ANIMATION_FADE_MS 480
 #define TILE_ANIMATION_FADE_ZOOM_MS 640
 #define VISUAL_ANIMATION_TICK_MS 30
+#define BEARING_SMOOTHING_MAX_CATCHUP_TICKS 4
 #define TILE_ANIMATION_ZOOM_START_Q8 205
 #define TILE_REQUEST_STALE_MS 8000
 #define TILE_REQUEST_WATCHDOG_MS 1000
@@ -216,6 +217,15 @@ typedef struct {
   int32_t world_y;
   int8_t zoom;
 } TileRequest;
+
+typedef struct {
+  int32_t start_x;
+  int32_t end_x;
+  int32_t start_y;
+  int32_t end_y;
+  int8_t zoom;
+  bool valid;
+} TileCoverageEnvelope;
 
 typedef struct {
   TileRequest request;
@@ -329,9 +339,9 @@ extern bool s_tile_requests_interaction_paused;
 extern bool s_tile_requests_setup_paused;
 extern AppTimer *s_tile_request_resume_timer;
 extern AppTimer *s_tile_redraw_timer;
-extern TileRequest s_orientation_tile_origins[TILE_CACHE_SIZE];
-extern int s_orientation_tile_origin_count;
-extern bool s_orientation_tile_origins_valid;
+extern TileCoverageEnvelope s_request_tile_envelope;
+extern TileCoverageEnvelope s_render_tile_envelope;
+extern bool s_tile_redraw_deferred;
 extern bool s_outbox_busy;
 extern int32_t s_outbox_cmd;
 extern uint32_t s_access_counter;
@@ -409,6 +419,10 @@ extern int32_t s_compass_heading_degrees;
 extern int32_t s_compass_magnetic_degrees;
 extern int32_t s_map_bearing_display_centi_degrees;
 extern int32_t s_map_bearing_target_centi_degrees;
+extern time_t s_map_bearing_advanced_s;
+extern uint16_t s_map_bearing_advanced_ms;
+extern bool s_map_bearing_clock_valid;
+extern uint32_t s_map_bearing_elapsed_ms;
 #ifdef MAPPY_WATCH_PHONE_MODE_FIXTURE
 extern bool s_debug_compass_override_active;
 #endif
@@ -523,6 +537,9 @@ void cancel_map_bearing_smoothing(void);
 bool sync_map_bearing_smoothing(bool animate);
 bool map_bearing_smoothing_active(void);
 bool advance_map_bearing_smoothing(void);
+bool map_bearing_rendering_visible(void);
+void pause_map_bearing_rendering(void);
+bool resume_map_bearing_rendering(void);
 bool bearing_reacquire_active(void);
 void begin_bearing_reacquire(BearingReacquireReason reason);
 void arm_route_start_bearing_reacquire(void);
@@ -573,11 +590,20 @@ void invalidate_tiles_with_reason(TileInvalidationReason reason);
 bool tile_matches(const TileCacheEntry *entry, int32_t world_x, int32_t world_y, int8_t zoom);
 TileCacheEntry *find_tile(int32_t world_x, int32_t world_y, int8_t zoom);
 int visible_tile_origins(TileRequest *origins, int max_count);
+int request_tile_origins(TileRequest *origins, int max_count);
 bool tile_origin_list_contains(const TileRequest *origins, int count,
                                int32_t world_x, int32_t world_y, int8_t zoom);
 bool tile_is_visible(const TileCacheEntry *entry);
 bool tile_coordinates_visible(int32_t world_x, int32_t world_y, int8_t zoom);
+bool tile_coordinates_render_visible(int32_t world_x, int32_t world_y,
+                                     int8_t zoom);
+void refresh_render_tile_coverage(void);
+bool tile_coverage_envelope_contains(const TileCoverageEnvelope *envelope,
+                                     int32_t world_x, int32_t world_y,
+                                     int8_t zoom);
 void clear_offscreen_pending_tile_requests(void);
+bool recover_newly_exact_tile_suppression(
+    const TileCoverageEnvelope *previous_render_envelope);
 void clear_unsent_tile_requests(void);
 TileFlight *find_tile_flight(int32_t world_x, int32_t world_y, int8_t zoom,
                             int32_t request_id);
@@ -596,8 +622,8 @@ void resume_tile_requests_after_phone_ready(void);
 bool tile_requests_paused(void);
 void cancel_tile_redraw(void);
 void schedule_tile_redraw(bool immediate);
+void flush_deferred_tile_redraw(void);
 void invalidate_orientation_tile_coverage(void);
-void remember_orientation_tile_origins(const TileRequest *origins, int count);
 bool orientation_tile_coverage_changed(void);
 uint16_t tile_animation_duration_ms(uint8_t mode);
 uint16_t tile_animation_elapsed_ms(const TileCacheEntry *entry);
@@ -607,7 +633,7 @@ void complete_tile_animation(TileCacheEntry *entry);
 bool any_tile_animation_active(void);
 void complete_tile_animations(void);
 bool advance_tile_animations(void);
-void start_tile_animation(TileCacheEntry *entry, bool was_pending);
+bool start_tile_animation(TileCacheEntry *entry, bool was_pending);
 TileCacheEntry *allocate_tile_slot_with_diagnostics(int32_t world_x, int32_t world_y,
                                                            int8_t zoom,
                                                            TileSlotDiagnostics *diag);
@@ -769,6 +795,17 @@ void fixture_perf_scheduler_tick(bool bearing_active, bool gps_active,
                                  bool bearing_changed);
 void fixture_perf_map_draw(void);
 void fixture_perf_map_draw_complete(void);
+void fixture_perf_rotated_render(uint32_t destination_pixels,
+                                 uint32_t sample_attempts,
+                                 uint32_t packed_hits,
+                                 uint32_t rle_hits,
+                                 uint32_t rle_misses,
+                                 uint32_t rle_decoded_pixels,
+                                 uint32_t passes,
+                                 uint32_t cardinal_passes,
+                                 uint32_t dda_passes,
+                                 uint32_t scaled_passes,
+                                 uint32_t decode_errors);
 void fixture_perf_route_projection_recompute(void);
 void fixture_perf_orientation_work(void);
 void fixture_perf_route_segment(bool submitted);

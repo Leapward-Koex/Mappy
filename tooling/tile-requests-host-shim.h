@@ -51,6 +51,15 @@ typedef struct {
 } TileRequest;
 
 typedef struct {
+  int32_t start_x;
+  int32_t end_x;
+  int32_t start_y;
+  int32_t end_y;
+  int8_t zoom;
+  bool valid;
+} TileCoverageEnvelope;
+
+typedef struct {
   TileRequest request;
   int32_t request_id;
   time_t started_s;
@@ -78,6 +87,8 @@ extern bool s_tile_requests_interaction_paused;
 extern bool s_tile_requests_setup_paused;
 extern AppTimer *s_tile_request_resume_timer;
 extern AppTimer *s_tile_redraw_timer;
+extern bool s_tile_redraw_deferred;
+extern TileCoverageEnvelope s_render_tile_envelope;
 extern AppTimer *s_tile_request_watchdog_timer;
 extern bool s_outbox_busy;
 extern int32_t s_outbox_cmd;
@@ -101,8 +112,16 @@ TileCacheEntry *find_tile(int32_t world_x, int32_t world_y, int8_t zoom);
 bool tile_is_visible(const TileCacheEntry *entry);
 bool tile_coordinates_visible(int32_t world_x, int32_t world_y, int8_t zoom);
 int visible_tile_origins(TileRequest *origins, int max_count);
+int request_tile_origins(TileRequest *origins, int max_count);
+bool tile_origin_list_contains(const TileRequest *origins, int count,
+                               int32_t world_x, int32_t world_y, int8_t zoom);
+bool tile_coordinates_render_visible(int32_t world_x, int32_t world_y,
+                                     int8_t zoom);
+void refresh_render_tile_coverage(void);
+bool tile_coverage_envelope_contains(const TileCoverageEnvelope *envelope,
+                                     int32_t world_x, int32_t world_y,
+                                     int8_t zoom);
 bool map_orientation_active(void);
-void remember_orientation_tile_origins(const TileRequest *origins, int count);
 void invalidate_orientation_tile_coverage(void);
 bool visible_grid_has_missing_tiles(void);
 void reset_tile_chunk_assembly(void);
@@ -137,6 +156,8 @@ void pause_tile_requests_for_interaction(void);
 void resume_tile_requests_after_interaction(void);
 void resume_tile_requests_after_phone_ready(void);
 bool tile_requests_paused(void);
+bool map_bearing_rendering_visible(void);
+void flush_deferred_tile_redraw(void);
 void queue_visible_tiles(void);
 void send_next_tile_request(void);
 

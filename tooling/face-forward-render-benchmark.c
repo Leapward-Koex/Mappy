@@ -1,3 +1,5 @@
+#define _POSIX_C_SOURCE 200809L
+
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -5,14 +7,17 @@
 #include <time.h>
 #include <math.h>
 
+#ifndef M_PI
+#define M_PI 3.14159265358979323846
+#endif
+
 #define SCREEN_W 200
 #define SCREEN_H 228
 #define TILE_W 54
 #define TILE_H 63
 #define TILE_CACHE_SIZE 42
 #define TILE_BYTES (((TILE_W * TILE_H) + 1) / 2)
-#define TRIG_MAX_RATIO 65536
-#define TRIG_RATIO_SHIFT 16
+#define TRIG_MAX_RATIO 65535
 #define FRAMES 180
 
 typedef struct {
@@ -52,11 +57,11 @@ static int32_t floor_div_i32(int32_t value, int32_t divisor) {
 }
 
 static int32_t trig_ratio_to_nearest_int(int32_t value) {
-  const int32_t half = (int32_t)1 << (TRIG_RATIO_SHIFT - 1);
+  const int32_t half = TRIG_MAX_RATIO / 2;
   if (value >= 0) {
-    return (value + half) >> TRIG_RATIO_SHIFT;
+    return (value + half) / TRIG_MAX_RATIO;
   }
-  return -(((-value) + half) >> TRIG_RATIO_SHIFT);
+  return -(((-value) + half) / TRIG_MAX_RATIO);
 }
 
 static int32_t sin_ratio(double degrees) {

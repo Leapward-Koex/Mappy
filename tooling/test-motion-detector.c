@@ -269,6 +269,33 @@ static void test_bearing_profiles(void) {
   }
   CHECK(changed_target == 27000 && changed_ticks <= 8,
         "fast profile must accept a fresh target during reacquisition");
+
+  int32_t one_tick = bearing_smoothing_advance_ticks(0, 18000, false, 1);
+  int32_t four_ticks = bearing_smoothing_advance_ticks(0, 18000, false, 4);
+  CHECK(one_tick == bearing_smoothing_advance(0, 18000, false),
+        "one elapsed virtual tick must preserve the existing profile");
+  CHECK(four_ticks != 18000 &&
+            bearing_smoothing_shortest_delta(four_ticks, 18000) <
+                bearing_smoothing_shortest_delta(one_tick, 18000),
+        "four delayed virtual ticks must catch up without snapping");
+  CHECK(bearing_smoothing_advance_ticks(0, 18000, true, 4) != 18000,
+        "the four-tick catch-up cap must preserve two displayed fast frames");
+  CHECK(bearing_smoothing_advance_ticks(35900, 100, false, 4) == 100,
+        "elapsed catch-up must retain shortest-path wraparound");
+
+  uint32_t elapsed_remainder = 0;
+  CHECK(bearing_smoothing_consume_elapsed_ticks(
+            &elapsed_remainder, 29, 30, 4) == 0 && elapsed_remainder == 29,
+        "sub-tick elapsed bearing time must be retained");
+  CHECK(bearing_smoothing_consume_elapsed_ticks(
+            &elapsed_remainder, 1, 30, 4) == 1 && elapsed_remainder == 0,
+        "retained fractional time must produce the next virtual tick");
+  CHECK(bearing_smoothing_consume_elapsed_ticks(
+            &elapsed_remainder, 200, 30, 4) == 4 && elapsed_remainder == 80,
+        "catch-up capping must retain rather than discard excess backlog");
+  CHECK(bearing_smoothing_consume_elapsed_ticks(
+            &elapsed_remainder, 10, 30, 4) == 3 && elapsed_remainder == 0,
+        "retained catch-up backlog must drain on the next displayed frame");
 }
 
 int main(void) {

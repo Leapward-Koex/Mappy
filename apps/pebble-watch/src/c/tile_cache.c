@@ -1,4 +1,5 @@
 #include "mappy.h"
+#include "rotated_raster_math.h"
 
 // Cache entries have two different kinds of value during a zoom transition:
 // target-zoom tiles are the requested result, while retained source-zoom tiles
@@ -11,8 +12,9 @@ typedef enum {
   TileCachePressureCoveredFallback = 2,
   TileCachePressureIncomingCoveredFallback = 3,
   TileCachePressureFallback = 4,
-  TileCachePressureSuppressedVisible = 5,
-  TileCachePressureLessImportantVisible = 6,
+  TileCachePressureRequestPrefetch = 5,
+  TileCachePressureSuppressedVisible = 6,
+  TileCachePressureLessImportantVisible = 7,
 } TileCachePressurePriority;
 
 typedef struct {
@@ -23,7 +25,7 @@ typedef struct {
 
 static int tile_cache_select_pressure_candidate(
     const TileCachePressureCandidate *candidates, int count,
-    uint32_t incoming_distance_sq) {
+    uint32_t incoming_distance_sq, bool incoming_render_visible) {
   if (!candidates || count <= 0) {
     return -1;
   }
@@ -37,7 +39,14 @@ static int tile_cache_select_pressure_candidate(
     // A newly arriving fringe tile must not punch a hole closer to the center
     // of the current grid.  Equal-importance entries also stay put to avoid
     // oscillating between equally distant tiles under sustained pressure.
-    if (candidate->priority == TileCachePressureLessImportantVisible &&
+    if ((candidate->priority == TileCachePressureSuppressedVisible ||
+         candidate->priority == TileCachePressureLessImportantVisible) &&
+        !incoming_render_visible) {
+      continue;
+    }
+    if (((candidate->priority == TileCachePressureRequestPrefetch &&
+          !incoming_render_visible) ||
+         candidate->priority == TileCachePressureLessImportantVisible) &&
         candidate->distance_sq <= incoming_distance_sq) {
       continue;
     }
@@ -54,7 +63,8 @@ static int tile_cache_select_pressure_candidate(
     if (candidate->priority > best->priority) {
       continue;
     }
-    if (candidate->priority == TileCachePressureLessImportantVisible &&
+    if ((candidate->priority == TileCachePressureRequestPrefetch ||
+         candidate->priority == TileCachePressureLessImportantVisible) &&
         candidate->distance_sq != best->distance_sq) {
       if (candidate->distance_sq > best->distance_sq) {
         selected = i;
@@ -186,6 +196,122 @@ static void insert_visible_tile_origin(TileRequest *origins, int *count,
   }
 }
 
+static bool tile_coverage_envelope_equal(const TileCoverageEnvelope *a,
+                                         const TileCoverageEnvelope *b) {
+  return a && b && a->valid == b->valid &&
+      (!a->valid || (a->start_x == b->start_x && a->end_x == b->end_x &&
+                     a->start_y == b->start_y && a->end_y == b->end_y &&
+                     a->zoom == b->zoom));
+}
+
+static TileCoverageEnvelope tile_coverage_envelope_from_bounds(
+    int32_t min_x, int32_t max_x, int32_t min_y, int32_t max_y) {
+  TileCoverageEnvelope envelope = {0};
+  if (s_tile_width <= 0 || s_tile_height <= 0 ||
+      s_screen_bounds.size.w <= 0 || s_screen_bounds.size.h <= 0) {
+    return envelope;
+  }
+  envelope.start_x = floor_div_i32(min_x, s_tile_width) * s_tile_width;
+  envelope.end_x = floor_div_i32(max_x, s_tile_width) * s_tile_width;
+  envelope.start_y = floor_div_i32(min_y, s_tile_height) * s_tile_height;
+  envelope.end_y = floor_div_i32(max_y, s_tile_height) * s_tile_height;
+  envelope.zoom = s_viewport_zoom;
+  envelope.valid = true;
+  return envelope;
+}
+
+static TileCoverageEnvelope exact_visible_tile_envelope(void) {
+  if (s_tile_width <= 0 || s_tile_height <= 0 ||
+      s_screen_bounds.size.w <= 0 || s_screen_bounds.size.h <= 0) {
+    TileCoverageEnvelope empty = {0};
+    return empty;
+  }
+  if (!map_orientation_active()) {
+    int32_t left = s_viewport_x - (s_screen_bounds.size.w / 2);
+    int32_t top = s_viewport_y - (s_screen_bounds.size.h / 2);
+    int grid_cols = ceil_div_i32(s_screen_bounds.size.w, s_tile_width) + 1;
+    int grid_rows = ceil_div_i32(s_screen_bounds.size.h, s_tile_height) + 1;
+    TileCoverageEnvelope envelope = tile_coverage_envelope_from_bounds(
+        left, left, top, top);
+    if (envelope.valid) {
+      envelope.end_x = envelope.start_x + (grid_cols - 1) * s_tile_width;
+      envelope.end_y = envelope.start_y + (grid_rows - 1) * s_tile_height;
+    }
+    return envelope;
+  }
+
+  int32_t angle = active_map_bearing_angle();
+  int32_t sin_value = sin_lookup(angle);
+  int32_t cos_value = cos_lookup(angle);
+  RotatedRasterBounds bounds;
+  rotated_raster_bounds_init(&bounds, s_screen_bounds.size.w,
+                             s_screen_bounds.size.h,
+                             s_screen_bounds.size.w / 2,
+                             s_screen_bounds.size.h / 2,
+                             sin_value, cos_value);
+  return tile_coverage_envelope_from_bounds(
+      s_viewport_x + bounds.min_x, s_viewport_x + bounds.max_x,
+      s_viewport_y + bounds.min_y, s_viewport_y + bounds.max_y);
+}
+
+static TileCoverageEnvelope bearing_independent_request_envelope(void) {
+  if (s_map_orientation != 1 || s_manual_pan) {
+    return exact_visible_tile_envelope();
+  }
+
+  int32_t half_w = (s_screen_bounds.size.w + 1) / 2;
+  int32_t half_h = (s_screen_bounds.size.h + 1) / 2;
+  uint64_t radius_sq = (uint64_t)half_w * half_w +
+      (uint64_t)half_h * half_h;
+  int32_t low = 0;
+  int32_t high = half_w + half_h;
+  while (low < high) {
+    int32_t mid = low + (high - low) / 2;
+    if ((uint64_t)mid * mid >= radius_sq) {
+      high = mid;
+    } else {
+      low = mid + 1;
+    }
+  }
+  int32_t radius = low;
+  return tile_coverage_envelope_from_bounds(
+      s_viewport_x - radius, s_viewport_x + radius,
+      s_viewport_y - radius, s_viewport_y + radius);
+}
+
+static int tile_origins_for_envelope(const TileCoverageEnvelope *envelope,
+                                     TileRequest *origins, int max_count) {
+  if (!envelope || !envelope->valid || !origins || max_count <= 0) {
+    return 0;
+  }
+  if (max_count > TILE_CACHE_SIZE) {
+    max_count = TILE_CACHE_SIZE;
+  }
+  int count = 0;
+  for (int32_t y = envelope->start_y; y <= envelope->end_y;
+       y += s_tile_height) {
+    for (int32_t x = envelope->start_x; x <= envelope->end_x;
+         x += s_tile_width) {
+      insert_visible_tile_origin(origins, &count, max_count, x, y);
+    }
+  }
+  return count;
+}
+
+bool tile_coverage_envelope_contains(
+    const TileCoverageEnvelope *envelope, int32_t world_x,
+    int32_t world_y, int8_t zoom) {
+  if (!envelope || !envelope->valid || zoom != envelope->zoom ||
+      s_tile_width <= 0 || s_tile_height <= 0) {
+    return false;
+  }
+  int32_t dx = world_x - envelope->start_x;
+  int32_t dy = world_y - envelope->start_y;
+  return world_x >= envelope->start_x && world_x <= envelope->end_x &&
+      world_y >= envelope->start_y && world_y <= envelope->end_y &&
+      dx % s_tile_width == 0 && dy % s_tile_height == 0;
+}
+
 int visible_tile_origins(TileRequest *origins, int max_count) {
   if (!origins || max_count <= 0 || s_screen_bounds.size.w == 0 ||
       s_screen_bounds.size.h == 0) {
@@ -195,65 +321,19 @@ int visible_tile_origins(TileRequest *origins, int max_count) {
     max_count = TILE_CACHE_SIZE;
   }
 
-  int count = 0;
-  if (!map_orientation_active()) {
-    int32_t left = s_viewport_x - (s_screen_bounds.size.w / 2);
-    int32_t top = s_viewport_y - (s_screen_bounds.size.h / 2);
-    int32_t start_x = floor_div_i32(left, s_tile_width) * s_tile_width;
-    int32_t start_y = floor_div_i32(top, s_tile_height) * s_tile_height;
-    int grid_cols = ceil_div_i32(s_screen_bounds.size.w, s_tile_width) + 1;
-    int grid_rows = ceil_div_i32(s_screen_bounds.size.h, s_tile_height) + 1;
-    for (int row = 0; row < grid_rows; row++) {
-      for (int col = 0; col < grid_cols; col++) {
-        insert_visible_tile_origin(origins, &count, max_count,
-                                   start_x + col * s_tile_width,
-                                   start_y + row * s_tile_height);
-      }
-    }
-  } else {
-    int32_t half_w = s_screen_bounds.size.w / 2;
-    int32_t half_h = s_screen_bounds.size.h / 2;
-    const int32_t screen_corners[4][2] = {
-      {-1, -1}, {1, -1}, {1, 1}, {-1, 1},
-    };
-    int32_t min_x = INT32_MAX;
-    int32_t max_x = INT32_MIN;
-    int32_t min_y = INT32_MAX;
-    int32_t max_y = INT32_MIN;
-    for (int i = 0; i < 4; i++) {
-      int32_t world_dx;
-      int32_t world_dy;
-      screen_delta_to_world_delta(screen_corners[i][0] * half_w,
-                                  screen_corners[i][1] * half_h,
-                                  &world_dx, &world_dy);
-      int32_t world_x = s_viewport_x + world_dx;
-      int32_t world_y = s_viewport_y + world_dy;
-      if (world_x < min_x) {
-        min_x = world_x;
-      }
-      if (world_x > max_x) {
-        max_x = world_x;
-      }
-      if (world_y < min_y) {
-        min_y = world_y;
-      }
-      if (world_y > max_y) {
-        max_y = world_y;
-      }
-    }
+  TileCoverageEnvelope envelope = exact_visible_tile_envelope();
+  s_render_tile_envelope = envelope;
+  return tile_origins_for_envelope(&envelope, origins, max_count);
+}
 
-    int32_t start_x = floor_div_i32(min_x, s_tile_width) * s_tile_width;
-    int32_t end_x = floor_div_i32(max_x, s_tile_width) * s_tile_width;
-    int32_t start_y = floor_div_i32(min_y, s_tile_height) * s_tile_height;
-    int32_t end_y = floor_div_i32(max_y, s_tile_height) * s_tile_height;
-    for (int32_t y = start_y; y <= end_y; y += s_tile_height) {
-      for (int32_t x = start_x; x <= end_x; x += s_tile_width) {
-        insert_visible_tile_origin(origins, &count, max_count, x, y);
-      }
-    }
-  }
+int request_tile_origins(TileRequest *origins, int max_count) {
+  TileCoverageEnvelope envelope = bearing_independent_request_envelope();
+  s_request_tile_envelope = envelope;
+  return tile_origins_for_envelope(&envelope, origins, max_count);
+}
 
-  return count;
+void refresh_render_tile_coverage(void) {
+  s_render_tile_envelope = exact_visible_tile_envelope();
 }
 
 bool tile_origin_list_contains(const TileRequest *origins, int count,
@@ -271,80 +351,42 @@ bool tile_origin_list_contains(const TileRequest *origins, int count,
 }
 
 void invalidate_orientation_tile_coverage(void) {
-  s_orientation_tile_origin_count = 0;
-  s_orientation_tile_origins_valid = false;
-}
-
-void remember_orientation_tile_origins(const TileRequest *origins, int count) {
-  if (!origins || count < 0 || count > TILE_CACHE_SIZE) {
-    invalidate_orientation_tile_coverage();
-    return;
-  }
-
-  for (int i = 0; i < count; i++) {
-    s_orientation_tile_origins[i] = origins[i];
-  }
-  s_orientation_tile_origin_count = count;
-  s_orientation_tile_origins_valid = true;
+  s_request_tile_envelope.valid = false;
+  s_render_tile_envelope.valid = false;
 }
 
 bool orientation_tile_coverage_changed(void) {
-  TileRequest origins[TILE_CACHE_SIZE];
-  int count = visible_tile_origins(origins, active_tile_cache_size());
-  bool changed = !s_orientation_tile_origins_valid ||
-      count != s_orientation_tile_origin_count;
-  if (!changed) {
-    for (int i = 0; i < count; i++) {
-      if (origins[i].world_x != s_orientation_tile_origins[i].world_x ||
-          origins[i].world_y != s_orientation_tile_origins[i].world_y ||
-          origins[i].zoom != s_orientation_tile_origins[i].zoom) {
-        changed = true;
-        break;
-      }
-    }
-  }
-  if (changed) {
-    remember_orientation_tile_origins(origins, count);
-  }
-  return changed;
+  TileCoverageEnvelope request_envelope = bearing_independent_request_envelope();
+  TileCoverageEnvelope render_envelope = exact_visible_tile_envelope();
+  TileCoverageEnvelope previous_render_envelope = s_render_tile_envelope;
+  bool request_changed = !tile_coverage_envelope_equal(
+      &request_envelope, &s_request_tile_envelope);
+  bool render_changed = !tile_coverage_envelope_equal(
+      &render_envelope, &previous_render_envelope);
+  s_render_tile_envelope = render_envelope;
+  bool suppression_recovered = render_changed &&
+      recover_newly_exact_tile_suppression(&previous_render_envelope);
+  return request_changed || suppression_recovered;
 }
 
 bool tile_coordinates_visible(int32_t world_x, int32_t world_y, int8_t zoom) {
-  if (zoom != s_viewport_zoom || s_screen_bounds.size.w == 0 ||
-      s_screen_bounds.size.h == 0) {
-    return false;
-  }
+  return tile_coverage_envelope_contains(&s_request_tile_envelope,
+                                         world_x, world_y, zoom);
+}
 
-  if (!map_orientation_active()) {
-    int32_t left = s_viewport_x - (s_screen_bounds.size.w / 2);
-    int32_t top = s_viewport_y - (s_screen_bounds.size.h / 2);
-    int32_t start_x = floor_div_i32(left, s_tile_width) * s_tile_width;
-    int32_t start_y = floor_div_i32(top, s_tile_height) * s_tile_height;
-    int grid_cols = ceil_div_i32(s_screen_bounds.size.w, s_tile_width) + 1;
-    int grid_rows = ceil_div_i32(s_screen_bounds.size.h, s_tile_height) + 1;
-    int32_t dx = world_x - start_x;
-    int32_t dy = world_y - start_y;
-    return dx >= 0 && dy >= 0 &&
-        dx <= (grid_cols - 1) * s_tile_width &&
-        dy <= (grid_rows - 1) * s_tile_height &&
-        dx % s_tile_width == 0 &&
-        dy % s_tile_height == 0;
+bool tile_coordinates_render_visible(int32_t world_x, int32_t world_y,
+                                     int8_t zoom) {
+  if (!s_render_tile_envelope.valid) {
+    refresh_render_tile_coverage();
   }
-
-  TileRequest origins[TILE_CACHE_SIZE];
-  int count = visible_tile_origins(origins, active_tile_cache_size());
-  for (int i = 0; i < count; i++) {
-    if (zoom == origins[i].zoom &&
-        world_x == origins[i].world_x &&
-        world_y == origins[i].world_y) {
-      return true;
-    }
-  }
-  return false;
+  return tile_coverage_envelope_contains(&s_render_tile_envelope,
+                                         world_x, world_y, zoom);
 }
 
 bool tile_is_visible(const TileCacheEntry *entry) {
-  return entry && tile_coordinates_visible(entry->world_x, entry->world_y, entry->zoom);
+  return entry && tile_coordinates_render_visible(entry->world_x,
+                                                   entry->world_y,
+                                                   entry->zoom);
 }
 
 static TileCachePressurePriority tile_cache_pressure_priority(
@@ -362,8 +404,11 @@ static TileCachePressurePriority tile_cache_pressure_priority(
   if (retained) {
     return TileCachePressureFallback;
   }
-  if (!tile_is_visible(entry)) {
+  if (!tile_coordinates_visible(entry->world_x, entry->world_y, entry->zoom)) {
     return TileCachePressureOffscreen;
+  }
+  if (!tile_is_visible(entry)) {
+    return TileCachePressureRequestPrefetch;
   }
   if (!entry->valid) {
     return TileCachePressureSuppressedVisible;
@@ -382,6 +427,8 @@ static const char *tile_cache_pressure_reason(
       return "evictIncomingCoveredFallback";
     case TileCachePressureFallback:
       return "evictFallbackPressure";
+    case TileCachePressureRequestPrefetch:
+      return "evictRequestPrefetch";
     case TileCachePressureSuppressedVisible:
       return "evictSuppressedVisible";
     case TileCachePressureLessImportantVisible:
@@ -437,8 +484,10 @@ TileCacheEntry *allocate_tile_slot_with_diagnostics(int32_t world_x, int32_t wor
 
   uint32_t incoming_distance_sq = tile_coordinate_distance_sq(world_x,
                                                               world_y);
+  bool incoming_render_visible = tile_coordinates_render_visible(
+      world_x, world_y, zoom);
   int replace_index = tile_cache_select_pressure_candidate(
-      candidates, capacity, incoming_distance_sq);
+      candidates, capacity, incoming_distance_sq, incoming_render_visible);
   if (replace_index < 0) {
     if (diag) {
       diag->reason = "deferVisiblePriority";
@@ -496,8 +545,9 @@ static TileCacheEntry *storage_eviction_candidate(TileCacheEntry *target) {
 
   uint32_t incoming_distance_sq = tile_coordinate_distance_sq(
       target->world_x, target->world_y);
+  bool incoming_render_visible = tile_is_visible(target);
   int index = tile_cache_select_pressure_candidate(
-      candidates, capacity, incoming_distance_sq);
+      candidates, capacity, incoming_distance_sq, incoming_render_visible);
   if (index >= 0) {
     return &s_tiles[index];
   }
@@ -528,7 +578,8 @@ bool reserve_tile_storage(TileCacheEntry *entry, uint16_t length,
     // A retained source-zoom tile is useful as fallback imagery, but it is not
     // request-visible at the target zoom.  Tombstoning it here would prevent a
     // rapid zoom reversal from ever requesting that coordinate again.
-    bool evicted_was_request_visible = tile_is_visible(evicted);
+    bool evicted_was_request_visible = tile_coordinates_visible(
+        evicted->world_x, evicted->world_y, evicted->zoom);
     release_tile_storage(evicted);
     evicted->valid = false;
     evicted->storage_suppressed = evicted_was_request_visible;

@@ -50,6 +50,7 @@ static TileApplyResult reject_tile_chunk(TileFlight *flight, int8_t zoom,
     suppress_failed_tile(world_x, world_y, zoom);
   }
   set_bottom_text(message);
+  schedule_tile_redraw(true);
   send_log_event(3, zoom, detail, message);
   if (flight) {
     complete_tile_flight(flight);
@@ -77,6 +78,7 @@ TileApplyResult apply_tile(DictionaryIterator *iter) {
   if (!x_tuple || !y_tuple || !zoom_tuple || !total_tuple || !data_tuple ||
       !request_id_tuple) {
     set_bottom_text("Tile missing data");
+    schedule_tile_redraw(true);
     return TileApplyIgnored;
   }
 
@@ -250,15 +252,19 @@ TileApplyResult apply_tile(DictionaryIterator *iter) {
   entry->encoded_length = storage_format == TileStoragePacked ?
       0 : (uint16_t)total_bytes;
   entry->last_used = ++s_access_counter;
-  start_tile_animation(entry, true);
+  bool render_visible = tile_is_visible(entry);
+  bool tile_animated = start_tile_animation(entry, true);
   reset_tile_chunk_assembly();
   APP_LOG(APP_LOG_LEVEL_DEBUG,
           "Tile accept x=%ld y=%ld z=%d encoded=%ld",
           (long)world_x, (long)world_y, (int)zoom, (long)total_bytes);
-  int visible_count = valid_visible_tile_count();
-  zoom_fallback_maybe_finish();
-  update_state_after_map_change();
-  bool grid_complete = visible_grid_is_complete();
+  int visible_count = render_visible ? valid_visible_tile_count() : 0;
+  bool grid_complete = false;
+  if (render_visible) {
+    zoom_fallback_maybe_finish();
+    update_state_after_map_change();
+    grid_complete = visible_grid_is_complete();
+  }
 #ifdef MAPPY_WATCH_PHONE_MODE_FIXTURE
   if (grid_complete) {
     APP_LOG(APP_LOG_LEVEL_INFO, "MAPPY_GRID");
@@ -266,6 +272,8 @@ TileApplyResult apply_tile(DictionaryIterator *iter) {
 #endif
   bool flush_redraw = visible_count == 1 || grid_complete;
   complete_tile_flight(flight);
-  schedule_tile_redraw(flush_redraw);
+  if (render_visible && !tile_animated) {
+    schedule_tile_redraw(flush_redraw);
+  }
   return TileApplyCompletedVisible;
 }

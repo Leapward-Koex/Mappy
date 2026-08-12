@@ -111,20 +111,20 @@ bool advance_tile_animations(void) {
   return visible_changed;
 }
 
-void start_tile_animation(TileCacheEntry *entry, bool was_pending) {
+bool start_tile_animation(TileCacheEntry *entry, bool was_pending) {
   if (!entry) {
-    return;
+    return false;
   }
   entry->animation_active = false;
   entry->animation_mode = TILE_ANIMATION_NONE;
   int mode = normalize_tile_animation_mode(s_tile_animation_mode);
   if (!was_pending || mode == TILE_ANIMATION_NONE || !tile_is_visible(entry) ||
-      s_menu_mode != MenuNone) {
-    return;
+      !map_bearing_rendering_visible()) {
+    return false;
   }
 #ifdef PBL_TOUCH
   if (s_touch_active) {
-    return;
+    return false;
   }
 #endif
 
@@ -132,4 +132,9 @@ void start_tile_animation(TileCacheEntry *entry, bool was_pending) {
   entry->animation_mode = (uint8_t)mode;
   entry->animation_active = true;
   schedule_visual_animation_tick();
+  if (!s_visual_animation_timer) {
+    complete_tile_animation(entry);
+    return false;
+  }
+  return true;
 }

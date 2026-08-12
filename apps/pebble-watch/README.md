@@ -124,6 +124,19 @@ Run the host codec, geometry, malformed-input, and arena-bound checks with:
 bash tooling/pebble-emulator-codex.sh test-tile-cache-host
 ```
 
+Run the pixel-exact face-forward raster property tests and comparative host
+benchmark with:
+
+```sh
+bash tooling/pebble-emulator-codex.sh test-face-forward-render-host
+```
+
+Run the whole-frame Emery gates at representative face-forward bearings with:
+
+```sh
+bash tooling/pebble-emulator-codex.sh test-face-forward-angles
+```
+
 Codex can inspect that PNG directly from Windows. Emulator button input can be
 sent with:
 

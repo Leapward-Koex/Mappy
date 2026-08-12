@@ -20,6 +20,9 @@ Commands:
   test-motion-host         Run allocation-free motion and bearing host tests.
   test-tile-cache-host     Run bounded tile codec and arena host tests.
   test-tile-scheduler-host Run deterministic two-flight scheduler host tests.
+  test-face-forward-render-host
+                           Run exact rotated-raster tests and the host benchmark.
+  test-face-forward-angles Run 0/30/45/60/75/90-degree Emery render gates.
   test-render-performance  Run fixture bearing and mixed-animation assertions.
   test-pan-under-load [prompt]
                            Run pan/load assertions, or only the prompt fade case.
@@ -307,6 +310,7 @@ test_tooling() {
   test_motion_host
   test_tile_cache_host
   test_tile_scheduler_host
+  test_face_forward_render_host
   test_location_edge_host
 }
 
@@ -369,6 +373,31 @@ test_tile_scheduler_host() {
     -o "$output"
   "$output"
   rm -f "$output"
+  trap - RETURN
+}
+
+test_face_forward_render_host() {
+  local compiler="${CC:-cc}"
+  if ! command -v "$compiler" >/dev/null 2>&1; then
+    echo "C compiler was not found: $compiler" >&2
+    return 127
+  fi
+
+  local raster_output benchmark_output
+  raster_output="$(mktemp "${TMPDIR:-/tmp}/mappy-rotated-raster-tests.XXXXXX")"
+  benchmark_output="$(mktemp "${TMPDIR:-/tmp}/mappy-face-forward-benchmark.XXXXXX")"
+  trap 'rm -f "$raster_output" "$benchmark_output"' RETURN
+
+  "$compiler" -std=c99 -Wall -Wextra -Werror -O2 \
+    "$ROOT_DIR/tooling/test-rotated-raster.c" -lm -o "$raster_output"
+  "$raster_output"
+
+  "$compiler" -std=c99 -Wall -Wextra -Werror -O2 \
+    "$ROOT_DIR/tooling/face-forward-render-benchmark.c" -lm \
+    -o "$benchmark_output"
+  "$benchmark_output"
+
+  rm -f "$raster_output" "$benchmark_output"
   trap - RETURN
 }
 
@@ -817,7 +846,8 @@ test_render_performance() {
   if [[ -z "$manual_ticks" || -z "$manual_draws" || -z "$manual_steps" ||
         -z "$manual_advances" || -z "$manual_browse" ]] ||
       (( manual_ticks < 2 || manual_draws != manual_steps ||
-         manual_advances != manual_steps || manual_browse != manual_steps )); then
+         manual_advances < manual_steps ||
+         manual_browse != manual_advances )); then
     echo "Manual-browse bearing animation assertion failed: $manual" >&2
     return 1
   fi
@@ -836,7 +866,8 @@ test_render_performance() {
   fi
 
   if [[ -z "$recentered_ticks" || -z "$recentered_steps" ]] ||
-      (( recentered_ticks < 2 || recentered_steps != recentered_ticks )); then
+      (( recentered_ticks < 2 || recentered_steps < 2 ||
+         recentered_steps > recentered_ticks )); then
     echo "Recentered bearing animation assertion failed: $recentered" >&2
     return 1
   fi
@@ -856,9 +887,9 @@ test_render_performance() {
     echo "Render timing summary was missing q=total/max: $recentered" >&2
     return 1
   fi
-  if (( isolated_draw_max > 100 || mixed_draw_max > 100 ||
-        recentered_draw_max > 100 )); then
-    echo "Facing/mixed render exceeded 100 ms: isolated=$isolated_draw_max mixed=$mixed_draw_max recentered=$recentered_draw_max" >&2
+  if (( isolated_draw_max > 20 || mixed_draw_max > 40 ||
+        recentered_draw_max > 30 )); then
+    echo "Facing render regression: isolated=$isolated_draw_max/20ms mixed=$mixed_draw_max/40ms recentered=$recentered_draw_max/30ms" >&2
     return 1
   fi
   if (( manual_draw_max > 50 )); then
@@ -869,6 +900,83 @@ test_render_performance() {
   printf 'Isolated: %s\nMixed: %s\nManual browse: %s\nRecentered: %s\nPerformance log: %s\n' \
     "$isolated" "$mixed" "$manual" "$recentered" \
     "$(windows_path "$log_file")"
+  pebble kill >/dev/null 2>&1 || true
+}
+
+test_face_forward_angles() {
+  require_pebble
+  set_phone_mode fixture
+  export MAPPY_FIXTURE_ROUTE_POINT_COUNT=128
+  export MAPPY_FIXTURE_TILE_ANIMATION_MODE=0
+  export MAPPY_FIXTURE_TILE_DELAY_MS=0
+  export MAPPY_FIXTURE_TILE_STAGGER_MS=0
+  mkdir -p "$OUT_DIR"
+  local log_file="$OUT_DIR/face-forward-angle-sweep.log"
+  rm -f "$log_file"
+
+  pebble kill >/dev/null 2>&1 || true
+  install_app_with_recovery
+  sleep 6
+
+  cd "$WATCH_DIR"
+  PYTHONUNBUFFERED=1 pebble logs --emulator "$PLATFORM" >"$log_file" 2>&1 &
+  local log_pid=$!
+  trap 'kill "$log_pid" >/dev/null 2>&1 || true' RETURN
+  sleep 1
+
+  local angles=(0 30 45 60 75 90)
+  send_debug_facing 0
+  sleep 3
+  for angle in "${angles[@]:1}"; do
+    send_debug_compass "$angle"
+    sleep 3
+  done
+
+  kill "$log_pid" >/dev/null 2>&1 || true
+  wait "$log_pid" 2>/dev/null || true
+  trap - RETURN
+
+  mapfile -t summaries < <(grep 'MAPPY_PERF' "$log_file")
+  mapfile -t rotated < <(grep 'MAPPY_RPERF' "$log_file")
+  local expected=${#angles[@]}
+  if (( ${#summaries[@]} < expected || ${#rotated[@]} < expected )); then
+    echo "Expected $expected face-forward summaries; see $(windows_path "$log_file")" >&2
+    pebble kill >/dev/null 2>&1 || true
+    return 1
+  fi
+
+  local first_summary=$((${#summaries[@]} - expected))
+  local first_rotated=$((${#rotated[@]} - expected))
+  for i in "${!angles[@]}"; do
+    local summary="${summaries[first_summary + i]}"
+    local render_summary="${rotated[first_rotated + i]}"
+    local draw_max render_errors passes destination_pixels sample_attempts
+    local packed_hits rle_hits rle_misses rle_decoded
+    draw_max="$(perf_summary_pair_value "$summary" q max)"
+    render_errors="$(perf_summary_value "$render_summary" e)"
+    passes="$(perf_summary_value "$render_summary" a)"
+    destination_pixels="$(perf_summary_value "$render_summary" p)"
+    sample_attempts="$(perf_summary_value "$render_summary" s)"
+    packed_hits="$(perf_summary_value "$render_summary" k)"
+    rle_hits="$(perf_summary_value "$render_summary" h)"
+    rle_misses="$(perf_summary_value "$render_summary" m)"
+    rle_decoded="$(perf_summary_value "$render_summary" r)"
+    if [[ -z "$draw_max" || -z "$render_errors" || -z "$passes" ||
+          -z "$destination_pixels" || -z "$sample_attempts" ||
+          -z "$packed_hits" || -z "$rle_hits" || -z "$rle_misses" ||
+          -z "$rle_decoded" ||
+          "$render_errors" != "0" ]] ||
+        (( draw_max > 50 || (i > 0 && passes < 1) ||
+           destination_pixels != sample_attempts ||
+           packed_hits + rle_hits + rle_misses > sample_attempts ||
+           rle_decoded > 32 * rle_misses )); then
+      echo "Face-forward ${angles[i]}-degree render gate failed: $summary / $render_summary" >&2
+      pebble kill >/dev/null 2>&1 || true
+      return 1
+    fi
+    printf '%s degrees: %s\n  %s\n' "${angles[i]}" "$summary" "$render_summary"
+  done
+  printf 'Angle performance log: %s\n' "$(windows_path "$log_file")"
   pebble kill >/dev/null 2>&1 || true
 }
 
@@ -943,12 +1051,21 @@ run_pan_under_load_case() {
   fi
 
   if [[ "$prompt_animation" == "1" ]]; then
-    # Action 4 starts one decoded visible tile after liftoff and after the pan
-    # action message completes, so the following completion request cannot
-    # cancel the newly scheduled tick.
+    # Action 4 starts one decoded visible tile after liftoff and closes the
+    # fixture measurement in the same watch-side dispatch. Keeping both state
+    # changes together avoids an emulator AppMessage delivery race.
     send_debug_pan_under_load 4
-    sleep 0.05
-    send_debug_pan_under_load 2
+    local animation_start_deadline=$((SECONDS + 1))
+    while (( SECONDS <= animation_start_deadline )); do
+      if grep -q 'MAPPY_PAN_ANIMATION active=1' "$log_file"; then
+        break
+      fi
+      sleep 0.01
+    done
+    if ! grep -q 'MAPPY_PAN_ANIMATION active=1' "$log_file"; then
+      echo "Prompt post-pan tile animation did not start for $label" >&2
+      return 1
+    fi
     local prompt_deadline=$((SECONDS + 5))
     while (( SECONDS < prompt_deadline )); do
       if grep -q 'MAPPY_PERF' "$log_file"; then
@@ -1507,6 +1624,12 @@ main() {
       ;;
     test-tile-scheduler-host)
       test_tile_scheduler_host
+      ;;
+    test-face-forward-render-host|test-render-host)
+      test_face_forward_render_host
+      ;;
+    test-face-forward-angles)
+      test_face_forward_angles
       ;;
     test-render-performance)
       test_render_performance
