@@ -1,5 +1,75 @@
 #include "mappy.h"
 
+// Cache entries have two different kinds of value during a zoom transition:
+// target-zoom tiles are the requested result, while retained source-zoom tiles
+// are temporary fallback imagery.  Keep the pressure order explicit and
+// shared by slot and byte-arena eviction so the temporary fallback can never
+// displace an already-rendered target tile.
+typedef enum {
+  TileCachePressureIneligible = 0,
+  TileCachePressureOffscreen = 1,
+  TileCachePressureCoveredFallback = 2,
+  TileCachePressureIncomingCoveredFallback = 3,
+  TileCachePressureFallback = 4,
+  TileCachePressureSuppressedVisible = 5,
+  TileCachePressureLessImportantVisible = 6,
+} TileCachePressurePriority;
+
+typedef struct {
+  TileCachePressurePriority priority;
+  uint32_t distance_sq;
+  uint32_t last_used;
+} TileCachePressureCandidate;
+
+static int tile_cache_select_pressure_candidate(
+    const TileCachePressureCandidate *candidates, int count,
+    uint32_t incoming_distance_sq) {
+  if (!candidates || count <= 0) {
+    return -1;
+  }
+
+  int selected = -1;
+  for (int i = 0; i < count; i++) {
+    const TileCachePressureCandidate *candidate = &candidates[i];
+    if (candidate->priority == TileCachePressureIneligible) {
+      continue;
+    }
+    // A newly arriving fringe tile must not punch a hole closer to the center
+    // of the current grid.  Equal-importance entries also stay put to avoid
+    // oscillating between equally distant tiles under sustained pressure.
+    if (candidate->priority == TileCachePressureLessImportantVisible &&
+        candidate->distance_sq <= incoming_distance_sq) {
+      continue;
+    }
+    if (selected < 0) {
+      selected = i;
+      continue;
+    }
+
+    const TileCachePressureCandidate *best = &candidates[selected];
+    if (candidate->priority < best->priority) {
+      selected = i;
+      continue;
+    }
+    if (candidate->priority > best->priority) {
+      continue;
+    }
+    if (candidate->priority == TileCachePressureLessImportantVisible &&
+        candidate->distance_sq != best->distance_sq) {
+      if (candidate->distance_sq > best->distance_sq) {
+        selected = i;
+      }
+      continue;
+    }
+    if (candidate->last_used < best->last_used) {
+      selected = i;
+    }
+  }
+  return selected;
+}
+
+#ifndef MAPPY_TILE_CACHE_POLICY_HOST_TEST
+
 // Tile cache bookkeeping and visibility checks. Request lifetime is owned by
 // TileFlight records in tile_requests.c, not by cache entries.
 
@@ -56,17 +126,28 @@ TileCacheEntry *find_tile(int32_t world_x, int32_t world_y, int8_t zoom) {
   return NULL;
 }
 
-static int32_t tile_origin_distance_sq(const TileRequest *request) {
-  int32_t center_x = request->world_x + (s_tile_width / 2);
-  int32_t center_y = request->world_y + (s_tile_height / 2);
-  int32_t dx = center_x - s_viewport_x;
-  int32_t dy = center_y - s_viewport_y;
-  return dx * dx + dy * dy;
+static uint32_t tile_coordinate_distance_sq(int32_t world_x,
+                                            int32_t world_y) {
+  int64_t center_x = (int64_t)world_x + (s_tile_width / 2);
+  int64_t center_y = (int64_t)world_y + (s_tile_height / 2);
+  int64_t dx = center_x - s_viewport_x;
+  int64_t dy = center_y - s_viewport_y;
+  uint64_t abs_dx = (uint64_t)(dx < 0 ? -dx : dx);
+  uint64_t abs_dy = (uint64_t)(dy < 0 ? -dy : dy);
+  if (abs_dx > UINT16_MAX || abs_dy > UINT16_MAX) {
+    return UINT32_MAX;
+  }
+  uint64_t distance_sq = abs_dx * abs_dx + abs_dy * abs_dy;
+  return distance_sq > UINT32_MAX ? UINT32_MAX : (uint32_t)distance_sq;
+}
+
+static uint32_t tile_origin_distance_sq(const TileRequest *request) {
+  return tile_coordinate_distance_sq(request->world_x, request->world_y);
 }
 
 static bool tile_origin_precedes(const TileRequest *a, const TileRequest *b) {
-  int32_t distance_a = tile_origin_distance_sq(a);
-  int32_t distance_b = tile_origin_distance_sq(b);
+  uint32_t distance_a = tile_origin_distance_sq(a);
+  uint32_t distance_b = tile_origin_distance_sq(b);
   if (distance_a != distance_b) {
     return distance_a < distance_b;
   }
@@ -266,6 +347,51 @@ bool tile_is_visible(const TileCacheEntry *entry) {
   return entry && tile_coordinates_visible(entry->world_x, entry->world_y, entry->zoom);
 }
 
+static TileCachePressurePriority tile_cache_pressure_priority(
+    TileCacheEntry *entry, int32_t incoming_world_x,
+    int32_t incoming_world_y, int8_t incoming_zoom) {
+  bool retained = zoom_fallback_retains_entry(entry);
+  if (retained && zoom_fallback_entry_fully_covered(entry)) {
+    return TileCachePressureCoveredFallback;
+  }
+  if (retained && zoom_fallback_entry_covered_by_tile(
+                      entry, incoming_world_x, incoming_world_y,
+                      incoming_zoom)) {
+    return TileCachePressureIncomingCoveredFallback;
+  }
+  if (retained) {
+    return TileCachePressureFallback;
+  }
+  if (!tile_is_visible(entry)) {
+    return TileCachePressureOffscreen;
+  }
+  if (!entry->valid) {
+    return TileCachePressureSuppressedVisible;
+  }
+  return TileCachePressureLessImportantVisible;
+}
+
+static const char *tile_cache_pressure_reason(
+    TileCachePressurePriority priority) {
+  switch (priority) {
+    case TileCachePressureOffscreen:
+      return "evictOffscreen";
+    case TileCachePressureCoveredFallback:
+      return "evictSupersededFallback";
+    case TileCachePressureIncomingCoveredFallback:
+      return "evictIncomingCoveredFallback";
+    case TileCachePressureFallback:
+      return "evictFallbackPressure";
+    case TileCachePressureSuppressedVisible:
+      return "evictSuppressedVisible";
+    case TileCachePressureLessImportantVisible:
+      return "evictLessImportantVisible";
+    case TileCachePressureIneligible:
+    default:
+      return "deferVisiblePriority";
+  }
+}
+
 TileCacheEntry *allocate_tile_slot_with_diagnostics(int32_t world_x, int32_t world_y,
                                                            int8_t zoom,
                                                            TileSlotDiagnostics *diag) {
@@ -299,78 +425,31 @@ TileCacheEntry *allocate_tile_slot_with_diagnostics(int32_t world_x, int32_t wor
     }
   }
 
-  int replace_index = -1;
-  uint32_t oldest = UINT32_MAX;
-  const char *replace_reason = "evictOffscreen";
+  TileCachePressureCandidate candidates[TILE_CACHE_SIZE];
   for (int i = 0; i < capacity; i++) {
-    if (!zoom_fallback_retains_entry(&s_tiles[i]) &&
-        !tile_is_visible(&s_tiles[i]) && s_tiles[i].last_used < oldest) {
-      oldest = s_tiles[i].last_used;
-      replace_index = i;
-    }
+    TileCacheEntry *candidate = &s_tiles[i];
+    candidates[i].priority = tile_cache_pressure_priority(
+        candidate, world_x, world_y, zoom);
+    candidates[i].distance_sq = tile_coordinate_distance_sq(
+        candidate->world_x, candidate->world_y);
+    candidates[i].last_used = candidate->last_used;
   }
 
-  if (replace_index < 0) {
-    replace_reason = "evictSupersededFallback";
-    for (int i = 0; i < capacity; i++) {
-      TileCacheEntry *candidate = &s_tiles[i];
-      if (zoom_fallback_retains_entry(candidate) &&
-          zoom_fallback_entry_fully_covered(candidate) &&
-          candidate->last_used < oldest) {
-        oldest = candidate->last_used;
-        replace_index = i;
-      }
-    }
-  }
-
-  if (replace_index < 0) {
-    replace_reason = "evictIncomingCoveredFallback";
-    for (int i = 0; i < capacity; i++) {
-      TileCacheEntry *candidate = &s_tiles[i];
-      if (zoom_fallback_retains_entry(candidate) &&
-          zoom_fallback_entry_covered_by_tile(candidate, world_x, world_y,
-                                              zoom) &&
-          candidate->last_used < oldest) {
-        oldest = candidate->last_used;
-        replace_index = i;
-      }
-    }
-  }
-
-  if (replace_index < 0) {
-    replace_reason = "evictLru";
-    for (int i = 0; i < capacity; i++) {
-      if (!zoom_fallback_retains_entry(&s_tiles[i]) &&
-          s_tiles[i].last_used < oldest) {
-        oldest = s_tiles[i].last_used;
-        replace_index = i;
-      }
-    }
-  }
-
-  if (replace_index < 0) {
-    // The fixed cache/arena can be smaller than worst-case transient coverage.
-    // Preserve fallback until this final, validated commit forces an eviction.
-    replace_reason = "evictFallbackPressure";
-    for (int i = 0; i < capacity; i++) {
-      if (zoom_fallback_retains_entry(&s_tiles[i]) &&
-          s_tiles[i].last_used < oldest) {
-        oldest = s_tiles[i].last_used;
-        replace_index = i;
-      }
-    }
-  }
-
+  uint32_t incoming_distance_sq = tile_coordinate_distance_sq(world_x,
+                                                              world_y);
+  int replace_index = tile_cache_select_pressure_candidate(
+      candidates, capacity, incoming_distance_sq);
   if (replace_index < 0) {
     if (diag) {
-      diag->reason = "deferAllPending";
+      diag->reason = "deferVisiblePriority";
     }
     return NULL;
   }
 
   TileCacheEntry *entry = &s_tiles[replace_index];
   if (diag) {
-    diag->reason = replace_reason;
+    diag->reason = tile_cache_pressure_reason(
+        candidates[replace_index].priority);
   }
   entry->world_x = world_x;
   entry->world_y = world_y;
@@ -400,36 +479,27 @@ void release_tile_storage(TileCacheEntry *entry) {
 }
 
 static TileCacheEntry *storage_eviction_candidate(TileCacheEntry *target) {
-  TileStorageEvictionCandidate candidates[TILE_CACHE_SIZE];
+  TileCachePressureCandidate candidates[TILE_CACHE_SIZE];
   int capacity = active_tile_cache_size();
-  for (int pass = 0; pass < 5; pass++) {
-    for (int i = 0; i < capacity; i++) {
-      TileCacheEntry *entry = &s_tiles[i];
-      bool retained = zoom_fallback_retains_entry(entry);
-      bool eligible = false;
-      if (entry != target && entry->valid &&
-          tile_storage_ref_valid(&entry->storage)) {
-        if (pass == 0) {
-          eligible = !retained && !tile_is_visible(entry);
-        } else if (pass == 1) {
-          eligible = retained && zoom_fallback_entry_fully_covered(entry);
-        } else if (pass == 2) {
-          eligible = retained && zoom_fallback_entry_covered_by_tile(
-              entry, target->world_x, target->world_y, target->zoom);
-        } else if (pass == 3) {
-          eligible = !retained;
-        } else {
-          eligible = retained;
-        }
-      }
-      candidates[i].eligible = eligible;
-      candidates[i].visible = eligible && pass != 0;
-      candidates[i].last_used = entry->last_used;
+  for (int i = 0; i < capacity; i++) {
+    TileCacheEntry *candidate = &s_tiles[i];
+    candidates[i].priority = TileCachePressureIneligible;
+    if (candidate != target && candidate->valid &&
+        tile_storage_ref_valid(&candidate->storage)) {
+      candidates[i].priority = tile_cache_pressure_priority(
+          candidate, target->world_x, target->world_y, target->zoom);
     }
-    int index = tile_storage_select_eviction(candidates, capacity);
-    if (index >= 0) {
-      return &s_tiles[index];
-    }
+    candidates[i].distance_sq = tile_coordinate_distance_sq(
+        candidate->world_x, candidate->world_y);
+    candidates[i].last_used = candidate->last_used;
+  }
+
+  uint32_t incoming_distance_sq = tile_coordinate_distance_sq(
+      target->world_x, target->world_y);
+  int index = tile_cache_select_pressure_candidate(
+      candidates, capacity, incoming_distance_sq);
+  if (index >= 0) {
+    return &s_tiles[index];
   }
   return NULL;
 }
@@ -533,3 +603,5 @@ bool visible_grid_is_complete(void) {
   }
   return true;
 }
+
+#endif  // MAPPY_TILE_CACHE_POLICY_HOST_TEST

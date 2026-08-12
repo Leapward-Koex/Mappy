@@ -469,6 +469,12 @@ void pause_tile_requests_for_interaction(void) {
   for (int i = 0; i < TILE_REQUEST_MAX_FLIGHTS; i++) {
     if (s_tile_flights[i].active) {
       s_tile_flights[i].discard_only = true;
+      // A pan makes the response irrelevant immediately. Keeping these
+      // flights alive until their terminal chunk (or the stale watchdog)
+      // would occupy the entire response window and block the new viewport.
+      // Retiring also makes find_tile_flight reject every late chunk by its
+      // old request ID; s_next_request_id remains monotonic for replacements.
+      retire_tile_flight(&s_tile_flights[i]);
     }
   }
   reset_tile_chunk_assembly();

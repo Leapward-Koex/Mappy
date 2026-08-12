@@ -449,13 +449,14 @@ static void test_ready_retry_attempt_survives_queue_rebuild(void) {
         "queue rebuilding must preserve the retry backoff attempt");
 }
 
-static void test_touchdown_discards_flights_and_clears_queue(void) {
+static void test_touchdown_retires_flights_and_clears_queue(void) {
   reset_fixture();
   set_visible_origins(3);
   queue_visible_tiles();
   acknowledge_outbox();
   acknowledge_outbox();
   int32_t first_id = s_tile_flights[0].request_id;
+  int32_t second_id = s_tile_flights[1].request_id;
   s_tile_chunk_active = true;
   s_tile_chunk_request_id = first_id;
 
@@ -463,18 +464,72 @@ static void test_touchdown_discards_flights_and_clears_queue(void) {
   CHECK(tile_requests_paused(), "touchdown should pause tile dispatch");
   CHECK(s_request_count == 0 && s_request_index == 0,
         "touchdown should clear every unsent request");
-  CHECK(active_tile_flight_count() == 2,
-        "touchdown should retain active response slots until terminal data");
-  CHECK(s_tile_flights[0].discard_only && s_tile_flights[1].discard_only,
-        "touchdown should mark every active flight discard-only");
+  CHECK(active_tile_flight_count() == 0,
+        "touchdown should immediately free both obsolete response slots");
+  CHECK(s_tile_request_watchdog_timer == NULL,
+        "touchdown should cancel the obsolete-flight watchdog");
   CHECK(!s_tile_chunk_active && s_chunk_reset_count > 0,
         "touchdown should reset partial tile decoding");
-  CHECK(find_tile_flight(0, 0, 16, first_id + 1000) == NULL,
-        "a stale request ID must not match a live flight");
+  CHECK(find_tile_flight(0, 0, 16, first_id) == NULL &&
+            find_tile_flight(54, 0, 16, second_id) == NULL,
+        "retired request IDs must stop matching before terminal data arrives");
+  CHECK(s_next_request_id > first_id && s_next_request_id > second_id,
+        "retiring flights must not rewind the request ID sequence");
+}
 
-  complete_tile_flight(find_tile_flight(0, 0, 16, first_id));
-  CHECK(active_tile_flight_count() == 1 && s_tile_send_count == 2,
-        "discard terminal data should free only its flight while paused");
+static void test_pause_resume_replaces_flights_and_ignores_late_chunks(void) {
+  reset_fixture();
+  set_visible_origins(2);
+  queue_visible_tiles();
+  acknowledge_outbox();
+  acknowledge_outbox();
+
+  TileFlight *old_first = find_flight_for_coordinate(0, 0, 16);
+  TileFlight *old_second = find_flight_for_coordinate(54, 0, 16);
+  int32_t old_first_id = old_first ? old_first->request_id : 0;
+  int32_t old_second_id = old_second ? old_second->request_id : 0;
+  CHECK(old_first_id > 0 && old_second_id > 0,
+        "the pause regression requires two live response flights");
+
+  pause_tile_requests_for_interaction();
+  CHECK(active_tile_flight_count() == 0,
+        "pause should retire both live flights without waiting eight seconds");
+  resume_tile_requests_after_interaction();
+  advance_time(TILE_REQUEST_TOUCH_RESUME_MS);
+  acknowledge_outbox();
+  acknowledge_outbox();
+
+  TileFlight *new_first = find_flight_for_coordinate(0, 0, 16);
+  TileFlight *new_second = find_flight_for_coordinate(54, 0, 16);
+  int32_t new_first_id = new_first ? new_first->request_id : 0;
+  int32_t new_second_id = new_second ? new_second->request_id : 0;
+  CHECK(new_first_id > old_second_id && new_second_id > old_second_id,
+        "resumed requests must receive fresh, monotonically increasing IDs");
+  CHECK(active_tile_flight_count() == 2,
+        "resume should refill both response slots for the current viewport");
+
+  // tile_decode.c performs this exact lookup before accepting any chunk. A
+  // terminal chunk from either retired flight must therefore remain ignored,
+  // even when a replacement for the same coordinate is active.
+  TileFlight *late_first = find_tile_flight(0, 0, 16, old_first_id);
+  TileFlight *late_second = find_tile_flight(54, 0, 16, old_second_id);
+  CHECK(late_first == NULL && late_second == NULL,
+        "late terminal chunks must not match replacement flights");
+  if (late_first) {
+    complete_tile_flight(late_first);
+  }
+  if (late_second) {
+    complete_tile_flight(late_second);
+  }
+  CHECK(active_tile_flight_count() == 2 &&
+            find_tile_flight(0, 0, 16, new_first_id) != NULL &&
+            find_tile_flight(54, 0, 16, new_second_id) != NULL,
+        "late terminal chunks must not retire current-viewport flights");
+
+  handle_tile_request_error(0, 0, 16, old_first_id, false, true);
+  handle_tile_request_error(54, 0, 16, old_second_id, false, true);
+  CHECK(active_tile_flight_count() == 2 && active_retry_timer_count() == 0,
+        "late terminal errors must also leave replacement flights untouched");
 }
 
 static void test_resume_waits_full_grace_period(void) {
@@ -577,7 +632,8 @@ int main(void) {
   test_decode_suppression_covers_the_visible_grid();
   test_unsent_begin_failure_retries_without_external_input();
   test_ready_retry_attempt_survives_queue_rebuild();
-  test_touchdown_discards_flights_and_clears_queue();
+  test_touchdown_retires_flights_and_clears_queue();
+  test_pause_resume_replaces_flights_and_ignores_late_chunks();
   test_resume_waits_full_grace_period();
   test_timeout_retry_isolated_from_other_flight();
   test_discard_timeout_does_not_retry();

@@ -21,7 +21,8 @@ Commands:
   test-tile-cache-host     Run bounded tile codec and arena host tests.
   test-tile-scheduler-host Run deterministic two-flight scheduler host tests.
   test-render-performance  Run fixture bearing and mixed-animation assertions.
-  test-pan-under-load      Run cold-zoom/immediate-repan tile-load assertions.
+  test-pan-under-load [prompt]
+                           Run pan/load assertions, or only the prompt fade case.
   test-rapid-zoom-reversal Run A-to-B-to-A fallback eviction/refetch assertions.
   test-motion-reacquire    Replay wrist motion and assert fast bearing behavior.
   build                    Build the Pebble watch app.
@@ -876,11 +877,15 @@ run_pan_under_load_case() {
   local height="$2"
   local orientation="$3"
   local animation="$4"
+  local prompt_animation="${5:-0}"
   local orientation_name="north"
   if [[ "$orientation" == "1" ]]; then
     orientation_name="facing"
   fi
   local label="${width}x${height}-${orientation_name}-anim${animation}"
+  if [[ "$prompt_animation" == "1" ]]; then
+    label="${label}-prompt"
+  fi
   local log_file="$OUT_DIR/pan-under-load-${label}.log"
   local expected_tiles=25
   if [[ "$width" == "72" ]]; then
@@ -900,9 +905,29 @@ run_pan_under_load_case() {
   sleep 0.15
   send_debug_compass_recenter 0
   sleep 0.35
+  if [[ "$prompt_animation" == "1" ]]; then
+    send_debug_tile 0
+    local seed_deadline=$((SECONDS + 2))
+    while (( SECONDS < seed_deadline )); do
+      if grep -q 'Debug tile accept' "$log_file"; then
+        break
+      fi
+      sleep 0.05
+    done
+    if ! grep -q 'Debug tile accept' "$log_file"; then
+      kill "$log_pid" >/dev/null 2>&1 || true
+      wait "$log_pid" 2>/dev/null || true
+      echo "Prompt pan-animation tile seed failed for $label" >&2
+      return 1
+    fi
+  fi
   local started_ms
   started_ms="$(date +%s%3N)"
-  send_debug_pan_under_load 0
+  if [[ "$prompt_animation" == "1" ]]; then
+    send_debug_pan_under_load 3
+  else
+    send_debug_pan_under_load 0
+  fi
   local start_deadline=$((SECONDS + 1))
   while (( SECONDS <= start_deadline )); do
     if grep -q 'MAPPY_PAN_START' "$log_file"; then
@@ -916,6 +941,56 @@ run_pan_under_load_case() {
     echo "Pan fixture start marker was not observed for $label" >&2
     return 1
   fi
+
+  if [[ "$prompt_animation" == "1" ]]; then
+    # Action 4 starts one decoded visible tile after liftoff and after the pan
+    # action message completes, so the following completion request cannot
+    # cancel the newly scheduled tick.
+    send_debug_pan_under_load 4
+    sleep 0.05
+    send_debug_pan_under_load 2
+    local prompt_deadline=$((SECONDS + 5))
+    while (( SECONDS < prompt_deadline )); do
+      if grep -q 'MAPPY_PERF' "$log_file"; then
+        break
+      fi
+      sleep 0.05
+    done
+    sleep 0.1
+    kill "$log_pid" >/dev/null 2>&1 || true
+    wait "$log_pid" 2>/dev/null || true
+
+    local prompt_summary prompt_errors prompt_tile_advances prompt_draw_max
+    prompt_summary="$(grep 'MAPPY_PERF' "$log_file" | tail -1 || true)"
+    if [[ -z "$prompt_summary" ]]; then
+      echo "Prompt pan-animation fixture did not finish: $(windows_path "$log_file")" >&2
+      return 1
+    fi
+    prompt_errors="$(perf_summary_value "$prompt_summary" e)"
+    prompt_tile_advances="$(perf_summary_value "$prompt_summary" l)"
+    prompt_draw_max="$(perf_summary_pair_value "$prompt_summary" q max)"
+    if [[ -z "$prompt_errors" || "$prompt_errors" != "0" ]]; then
+      echo "Prompt pan-animation fixture reported errors for $label: $prompt_summary" >&2
+      return 1
+    fi
+    if [[ -z "$prompt_tile_advances" ]] || (( prompt_tile_advances < 1 )); then
+      echo "Prompt post-pan tile did not animate for $label: $prompt_summary" >&2
+      return 1
+    fi
+    if [[ -z "$prompt_draw_max" ]] || (( prompt_draw_max > 100 )); then
+      echo "Prompt post-pan fade draw exceeded 100 ms for $label: $prompt_summary" >&2
+      return 1
+    fi
+    if grep -Eqi 'Tile flight expired|tile chunk reject|tile decode failed|inbox dropped' \
+        "$log_file"; then
+      echo "Prompt tile transfer error reported for $label: $(windows_path "$log_file")" >&2
+      return 1
+    fi
+
+    printf '%s: %s\n' "$label" "$prompt_summary"
+    return 0
+  fi
+
   sleep 0.12
   local input_frame_ms host_input_started_ms host_input_frame_ms
   send_debug_pan_under_load 1
@@ -1022,6 +1097,11 @@ run_pan_under_load_case() {
 
 test_pan_under_load() {
   require_pebble
+  local prompt_only="${1:-}"
+  if [[ -n "$prompt_only" && "$prompt_only" != "prompt" ]]; then
+    echo "test-pan-under-load argument must be 'prompt' when supplied" >&2
+    return 2
+  fi
   if pgrep -x qemu-pebble >/dev/null 2>&1; then
     echo "Pebble emulator is already running; retry test-pan-under-load after its owner finishes." >&2
     return 75
@@ -1038,6 +1118,18 @@ test_pan_under_load() {
   mkdir -p "$OUT_DIR"
   trap 'pebble kill >/dev/null 2>&1 || true' RETURN
 
+  if [[ "$prompt_only" == "prompt" ]]; then
+    export MAPPY_FIXTURE_TILE_WIDTH=108
+    export MAPPY_FIXTURE_TILE_HEIGHT=126
+    pebble kill >/dev/null 2>&1 || true
+    install_app_with_recovery
+    sleep 6
+    run_pan_under_load_case 108 126 1 1 1
+    pebble kill >/dev/null 2>&1 || true
+    trap - RETURN
+    return
+  fi
+
   local geometry width height orientation
   for geometry in 54:63 72:84 108:126; do
     width="${geometry%%:*}"
@@ -1052,15 +1144,13 @@ test_pan_under_load() {
     done
   done
 
-  # Exercise the normal tile animation path once after every geometry has
-  # passed with animations disabled. Hold each response long enough that at
-  # least one later flight lands outside the 900 ms post-touch suppression
-  # window; the zero-delay latency cases can legitimately finish before an
-  # animation is allowed to begin.
-  export MAPPY_FIXTURE_TILE_DELAY_MS=250
+  # Exercise the normal tile animation path with immediate responses. Tiles
+  # requested after touch liftoff must animate without a grace-period delay.
+  export MAPPY_FIXTURE_TILE_DELAY_MS=0
   pebble kill >/dev/null 2>&1 || true
   install_app_with_recovery
   sleep 6
+  run_pan_under_load_case 108 126 1 1 1
   run_pan_under_load_case 108 126 1 1
   pebble kill >/dev/null 2>&1 || true
   trap - RETURN
@@ -1422,7 +1512,7 @@ main() {
       test_render_performance
       ;;
     test-pan-under-load)
-      test_pan_under_load
+      test_pan_under_load "$@"
       ;;
     test-rapid-zoom-reversal)
       test_rapid_zoom_reversal

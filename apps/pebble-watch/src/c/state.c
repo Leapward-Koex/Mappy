@@ -166,8 +166,6 @@ int16_t s_touch_start_x;
 int16_t s_touch_start_y;
 int32_t s_touch_start_viewport_x;
 int32_t s_touch_start_viewport_y;
-time_t s_last_touch_ended_s;
-uint16_t s_last_touch_ended_ms;
 bool s_touch_disabled_logged;
 bool s_pinch_unavailable_logged;
 #endif

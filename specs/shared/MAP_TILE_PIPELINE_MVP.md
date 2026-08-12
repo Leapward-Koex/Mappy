@@ -199,14 +199,14 @@ grid_cols = ceil(screen_width / tile_width) + 1
 grid_rows = ceil(screen_height / tile_height) + 1
 visible_cache_entries = grid_cols * grid_rows
 packed_tile_bytes = ceil(tile_width * tile_height / 2)
-compressed_arena_bytes = 32768
+compressed_arena_bytes = 47104
 decode_scratch_bytes = 6804
 tile_request_queue_len >= visible_cache_entries
 ```
 
 For the MVP `emery` baseline at `54x63`, this evaluates to `5 x 5`, `25`
 visible entries, and `1701` packed bytes for one decoded tile. Cached imagery
-is not held as 25 decoded buffers. It is stored in a fixed 32 KiB compressed
+is not held as 25 decoded buffers. It is stored in a fixed 46 KiB compressed
 arena, with one 6,804-byte scratch buffer sized for the largest supported tile.
 Larger rendered tiles reduce `grid_cols` and `grid_rows`, but increase both the
 packed fallback size and typical encoded bytes per response.
@@ -218,9 +218,13 @@ Each valid entry stores the smaller of:
 - the lossless packed 4-bit palette pixels when indexed RLE is not smaller.
 
 Arena segments are contiguous and compact after eviction. Storage pressure
-prefers offscreen/LRU entries. A visible entry evicted only for byte pressure is
-suppressed from re-request until it leaves the viewport, preventing a
-request/eviction loop for high-entropy imagery.
+prefers offscreen/LRU entries, then retained source-zoom fallback imagery
+(already-covered fallback first), before considering a current visible tile.
+If pressure remains, an incoming tile may replace only a current tile farther
+from the viewport center; a fringe arrival cannot punch a more central hole.
+A visible entry evicted only for unavoidable byte pressure is suppressed from
+re-request until it leaves the viewport, preventing a request/eviction loop for
+high-entropy imagery.
 
 The grid origin is computed from the viewport:
 
@@ -514,7 +518,7 @@ The watch must support:
 - A golden 54x63 palette-index grid RLE-encodes and decodes without loss, and
   the same RLE, indexed-RLE, and packed paths pass for every supported watch
   tile size.
-- Compressed arena usage never exceeds 32 KiB; compaction preserves remaining
+- Compressed arena usage never exceeds 46 KiB; compaction preserves remaining
   segments and byte-pressure eviction cannot cause an immediate visible-tile
   re-request loop.
 - A crop crossing a 256x256 logical source-tile boundary composites from the

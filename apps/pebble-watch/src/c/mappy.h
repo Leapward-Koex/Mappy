@@ -79,7 +79,7 @@
 #define GRID_COLS 7
 #define GRID_ROWS 6
 #define TILE_CACHE_SIZE (GRID_COLS * GRID_ROWS)
-#define TILE_STORAGE_ARENA_BYTES (32 * 1024)
+#define TILE_STORAGE_ARENA_BYTES (46 * 1024)
 #define MAX_RLE_BYTES MAX_TILE_PIXELS
 #define MAX_ROUTE_POINTS 128
 #define MAX_INSTRUCTION_BYTES 47
@@ -143,7 +143,6 @@
 #define TILE_ANIMATION_FADE_ZOOM_MS 640
 #define VISUAL_ANIMATION_TICK_MS 30
 #define TILE_ANIMATION_ZOOM_START_Q8 205
-#define TOUCH_TILE_ANIMATION_SUPPRESS_MS 900
 #define TILE_REQUEST_STALE_MS 8000
 #define TILE_REQUEST_WATCHDOG_MS 1000
 #define TILE_REQUEST_MAX_FLIGHTS 2
@@ -477,8 +476,6 @@ extern int16_t s_touch_start_x;
 extern int16_t s_touch_start_y;
 extern int32_t s_touch_start_viewport_x;
 extern int32_t s_touch_start_viewport_y;
-extern time_t s_last_touch_ended_s;
-extern uint16_t s_last_touch_ended_ms;
 extern bool s_touch_disabled_logged;
 extern bool s_pinch_unavailable_logged;
 #endif
@@ -796,8 +793,6 @@ void deinit(void);
 
 #ifdef PBL_TOUCH
 void reset_touch_state(void);
-void mark_touch_interaction_ended(void);
-bool touch_interaction_recent(void);
 void log_touch_disabled_once(void);
 void log_pinch_unavailable_once(void);
 void begin_pan_interaction(int16_t screen_x, int16_t screen_y);

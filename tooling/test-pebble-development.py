@@ -114,7 +114,7 @@ class RepositoryWorkflowTest(unittest.TestCase):
         requests = (
             ROOT / "apps" / "pebble-watch" / "src" / "c" / "tile_requests.c"
         ).read_text(encoding="utf-8")
-        self.assertIn("TILE_STORAGE_ARENA_BYTES (32 * 1024)", header)
+        self.assertIn("TILE_STORAGE_ARENA_BYTES (46 * 1024)", header)
         self.assertNotIn("s_tile_chunk_buffer", header + decode)
         self.assertIn("s_tile_chunk_store_packed", decode)
         self.assertIn("storage_suppressed", requests)

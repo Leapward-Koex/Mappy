@@ -123,7 +123,7 @@ void start_tile_animation(TileCacheEntry *entry, bool was_pending) {
     return;
   }
 #ifdef PBL_TOUCH
-  if (touch_interaction_recent()) {
+  if (s_touch_active) {
     return;
   }
 #endif

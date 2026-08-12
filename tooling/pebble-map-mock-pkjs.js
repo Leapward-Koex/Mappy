@@ -343,15 +343,15 @@
       var wy = Number(pick(payload, 'world_y', KEY_WORLD_Y) || 0);
       var zoom = Number(pick(payload, 'tile_zoom', KEY_TILE_ZOOM) || ROUTE_ZOOM);
       var requestId = Number(pick(payload, 'request_id', KEY_REQUEST_ID) || 0);
-      // A complete high-entropy viewport cannot fit in the watch's bounded
-      // 32 KiB arena after it falls back to packed storage. Coordinate-stable
+      // A complete high-entropy rotated viewport cannot fit in the watch's
+      // bounded 46 KiB arena after it falls back to packed storage. Stable
       // stress tiles exercise real multi-chunk streaming while ensuring a
       // retry or zoom reversal returns the same bytes for the same tile.
       var tileColumn = Math.floor(wx / TILE_W);
       var tileRow = Math.floor(wy / TILE_H);
       // Emery can need a 4x3 tile envelope in facing mode. One stable lattice
       // point per such envelope guarantees a real multi-chunk response without
-      // making a 108x126 visible grid exceed the watch's 32 KiB tile arena.
+      // making a 108x126 visible grid exceed the watch's tile arena.
       var highEntropyTile = tileHighEntropy &&
           positiveModulo(tileColumn, 4) === 0 &&
           positiveModulo(tileRow, 3) === 0;

@@ -60,7 +60,7 @@ MVP map tile geometry:
 | Visible grid target | 5 x 5 |
 | Visible cache entries | 25 |
 | Tile request queue | 25 entries, or refill scheduler with equivalent coverage |
-| Compressed tile arena | 32,768 bytes |
+| Compressed tile arena | 47,104 bytes |
 | Shared decode scratch | 6,804 bytes |
 
 The implementation must confirm heap usage on target hardware before shipping.
@@ -220,7 +220,7 @@ encoded_length uint16
 storage_suppressed bool
 ```
 
-All entry payloads live in a compact fixed 32 KiB arena. Indexed RLE retains
+All entry payloads live in a compact fixed 46 KiB arena. Indexed RLE retains
 the wire bytes and adds a three-byte checkpoint every 32 source pixels. If that
 representation is not smaller than the decoded 4-bit pixels, the entry stores
 packed nibbles instead. One 6,804-byte scratch allocation is shared by incoming
@@ -231,12 +231,18 @@ Cache eviction:
 1. Prefer exact x/y/zoom match.
 2. Else use an invalid entry.
 3. Else replace the least-recently-used entry outside the current visible grid.
-4. Else replace the oldest visible entry only if memory pressure requires it.
+4. Else replace retained source-zoom fallback imagery, preferring fallback that
+   is already covered by target-zoom tiles.
+5. Else reuse an already-suppressed visible slot.
+6. Else replace a current visible tile only when it is farther from the
+   viewport center than the incoming tile; otherwise defer the incoming tile.
 
 Removing an arena segment compacts later segments and updates their offsets.
-An entry evicted only to satisfy the byte budget is not requested again until
-it leaves the viewport. This keeps pathological imagery stable instead of
-cycling continuously between request and eviction.
+The same order applies when reclaiming arena bytes, so temporary zoom fallback
+cannot displace already-rendered target imagery. An entry evicted only to
+satisfy an unavoidable byte-budget shortfall is not requested again until it
+leaves the viewport. This keeps pathological imagery stable instead of cycling
+continuously between request and eviction.
 
 Theme, zoom, or `CMD_MAP_SETTINGS` changes invalidate encoded-color cache
 entries because phone palette selection or source tile generation changes the

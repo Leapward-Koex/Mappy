@@ -201,6 +201,19 @@ void fixture_set_location_screen_position(int32_t screen_x, int32_t screen_y) {
 void fixture_perf_pan_under_load(int action) {
   int16_t screen_x = s_screen_bounds.size.w / 2;
   int16_t screen_y = s_screen_bounds.size.h / 2;
+  if (action == 3) {
+    fixture_perf_begin();
+    s_fixture_pan_active = true;
+    s_fixture_pan_input_pending = false;
+    if (!s_has_gps || !s_map_layer) {
+      s_fixture_perf.errors++;
+    }
+    begin_pan_interaction(screen_x, screen_y);
+    update_pan_interaction(screen_x + 16, screen_y + 6);
+    end_pan_interaction(screen_x + 24, screen_y + 9);
+    APP_LOG(APP_LOG_LEVEL_INFO, "MAPPY_PAN_START");
+    return;
+  }
   if (action == 0) {
     fixture_perf_begin();
     s_fixture_pan_active = s_has_gps && s_map_layer;
@@ -225,6 +238,20 @@ void fixture_perf_pan_under_load(int action) {
   } else if (action == 2) {
     s_fixture_pan_active = false;
     fixture_perf_maybe_emit();
+  } else if (action == 4) {
+    if (s_tiles) {
+      int capacity = active_tile_cache_size();
+      for (int i = 0; i < capacity; i++) {
+        if (!s_tiles[i].valid || !tile_is_visible(&s_tiles[i])) {
+          continue;
+        }
+        start_tile_animation(&s_tiles[i], true);
+        if (!s_tiles[i].animation_active) {
+          s_fixture_perf.errors++;
+        }
+        break;
+      }
+    }
   }
 }
 

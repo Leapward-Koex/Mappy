@@ -39,26 +39,6 @@ void reset_touch_state(void) {
   s_transient_zoom_scale_q8 = TRANSIENT_SCALE_Q8_ONE;
 }
 
-void mark_touch_interaction_ended(void) {
-  time_ms(&s_last_touch_ended_s, &s_last_touch_ended_ms);
-}
-
-bool touch_interaction_recent(void) {
-  if (s_touch_active) {
-    return true;
-  }
-  if (s_last_touch_ended_s == 0 && s_last_touch_ended_ms == 0) {
-    return false;
-  }
-
-  time_t now_s;
-  uint16_t now_ms;
-  time_ms(&now_s, &now_ms);
-  int32_t elapsed = (int32_t)(now_s - s_last_touch_ended_s) * 1000 +
-      (int32_t)now_ms - (int32_t)s_last_touch_ended_ms;
-  return elapsed >= 0 && elapsed < TOUCH_TILE_ANIMATION_SUPPRESS_MS;
-}
-
 void log_touch_disabled_once(void) {
   if (!s_touch_disabled_logged) {
     s_touch_disabled_logged = true;
@@ -113,7 +93,6 @@ static void finish_touch_pan(bool apply_final_position, int16_t screen_x,
   if (apply_final_position) {
     apply_pan_interaction_position(screen_x, screen_y, false);
   }
-  mark_touch_interaction_ended();
   reset_touch_state();
   s_manual_pan = true;
   sync_map_bearing_smoothing(false);
@@ -130,7 +109,6 @@ void begin_pan_interaction(int16_t screen_x, int16_t screen_y) {
   hardware_perf_begin_pan();
 #endif
   pause_tile_requests_for_interaction();
-  complete_tile_animations();
   complete_gps_smoothing();
   s_touch_active = true;
   s_touch_start_x = screen_x;
