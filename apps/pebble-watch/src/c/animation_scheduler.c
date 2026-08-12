@@ -40,6 +40,14 @@ static void visual_animation_timer_callback(void *data) {
   if (changed && s_map_layer) {
     layer_mark_dirty(s_map_layer);
   }
+#ifdef MAPPY_WATCH_PHONE_MODE_FIXTURE
+  // A render can complete the final animation while a sentinel timer is
+  // already queued. Let that timer close a fixture measurement even though it
+  // has no additional frame to dirty.
+  if (!changed) {
+    fixture_perf_maybe_emit();
+  }
+#endif
 }
 
 void schedule_visual_animation_tick(void) {

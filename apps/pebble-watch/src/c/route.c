@@ -491,12 +491,15 @@ static void finish_route_at_destination(void) {
 
   enqueue_arrival_vibration();
   cancel_menu_highlight_animation();
+  complete_tile_animations();
+  cancel_tile_redraw();
   s_menu_mode = MenuNone;
   s_menu_selection = 0;
   int32_t completed_request_id = s_active_route_request_id;
   clear_route_local();
   s_active_route_request_id = completed_request_id;
   s_arrival_dialog_visible = true;
+  pause_map_bearing_rendering();
   s_route_complete_pending = true;
   s_route_clear_armed = false;
   copy_bounded_text(s_top_text, sizeof(s_top_text), "Map");
@@ -566,7 +569,9 @@ bool dismiss_arrival_dialog(void) {
     return false;
   }
   s_arrival_dialog_visible = false;
+  resume_map_bearing_rendering();
   update_state_after_map_change();
+  s_tile_redraw_deferred = false;
   layer_mark_dirty(s_map_layer);
   return true;
 }
@@ -704,7 +709,11 @@ void apply_route_points(DictionaryIterator *iter) {
     return;
   }
 
+  bool dismissed_arrival_dialog = s_arrival_dialog_visible;
   s_arrival_dialog_visible = false;
+  if (dismissed_arrival_dialog) {
+    resume_map_bearing_rendering();
+  }
   bool user_visible_route = !fresh_tuple || fresh_tuple->value->int32 != 0;
   int response_route_mode = s_pending_route_mode;
   bool has_response_route_mode = false;

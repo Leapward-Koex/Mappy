@@ -1,5 +1,10 @@
 #include "mappy.h"
 #include "location_edge_geometry.h"
+#include "rotated_raster_math.h"
+
+#if TRIG_MAX_RATIO != ROTATED_RASTER_TRIG_RATIO
+#error "Rotated raster math requires Pebble's 0xffff trig ratio"
+#endif
 
 // Map, route, location, status chrome, and menu rendering.
 
@@ -13,17 +18,49 @@ typedef struct {
   uint8_t packed[ROTATED_RLE_BLOCK_BYTES];
 } RotatedRleBlockCacheEntry;
 
+typedef struct {
+  int col;
+  int row;
+  int local_x;
+  int local_y;
+} RotatedLookupCursor;
+
+typedef struct {
+  RotatedRleBlockCacheEntry rle_block_cache[ROTATED_RLE_BLOCK_CACHE_SIZE];
+  RotatedRasterPoint row_points[ROTATED_RASTER_BLOCK_SIZE];
+  RotatedLookupCursor row_cursors[ROTATED_RASTER_BLOCK_SIZE];
+} RotatedRenderScratch;
+
 typedef union {
   TileRequest origins[TILE_CACHE_SIZE];
   TileCacheEntry *fallback_entries[TILE_CACHE_SIZE];
-  RotatedRleBlockCacheEntry rle_block_cache[ROTATED_RLE_BLOCK_CACHE_SIZE];
+  RotatedRenderScratch rotated;
 } RenderTileScratch;
 
 static RenderTileScratch s_render_tile_scratch;
 #define s_render_tile_origins s_render_tile_scratch.origins
 #define s_render_fallback_entries s_render_tile_scratch.fallback_entries
+#define s_rotated_rle_block_cache \
+    s_render_tile_scratch.rotated.rle_block_cache
+#define s_rotated_row_points s_render_tile_scratch.rotated.row_points
+#define s_rotated_row_cursors s_render_tile_scratch.rotated.row_cursors
 static TileCacheEntry *s_render_tile_entries[TILE_CACHE_SIZE];
 #ifdef MAPPY_WATCH_PHONE_MODE_FIXTURE
+typedef struct {
+  uint32_t destination_pixels;
+  uint32_t sample_attempts;
+  uint32_t packed_hits;
+  uint32_t rle_hits;
+  uint32_t rle_misses;
+  uint32_t rle_decoded_pixels;
+  uint32_t passes;
+  uint32_t cardinal_passes;
+  uint32_t dda_passes;
+  uint32_t scaled_passes;
+  uint32_t decode_errors;
+} RotatedRenderCounters;
+
+static RotatedRenderCounters s_rotated_render_counters;
 static int s_last_rotated_log_entry_count = -1;
 static int s_last_rotated_log_cols = -1;
 static int s_last_rotated_log_rows = -1;
@@ -164,8 +201,6 @@ typedef struct {
 
 static RotatedTileLookup s_rotated_tile_lookup;
 
-#define s_rotated_rle_block_cache s_render_tile_scratch.rle_block_cache
-
 static bool prepare_rotated_tile_lookup(TileCacheEntry **entries, int entry_count,
                                         RotatedTileLookup *lookup) {
   if (!lookup) {
@@ -288,6 +323,9 @@ static void log_rotated_render_signature(int entry_count,
 static inline bool sample_rotated_tile_lookup_palette_index(
     const RotatedTileLookup *lookup, int col, int row, int local_x,
     int local_y, uint8_t *palette_index) {
+#ifdef MAPPY_WATCH_PHONE_MODE_FIXTURE
+  s_rotated_render_counters.sample_attempts++;
+#endif
   if (!lookup || lookup->cols <= 0 || lookup->rows <= 0) {
     return false;
   }
@@ -331,6 +369,9 @@ static inline bool sample_rotated_tile_lookup_palette_index(
     int pixel_index = sample_y * s_tile_width + sample_x;
     uint8_t packed = cell->stored[pixel_index / 2];
     *palette_index = (pixel_index & 1) ? packed >> 4 : packed & 0x0f;
+#ifdef MAPPY_WATCH_PHONE_MODE_FIXTURE
+    s_rotated_render_counters.packed_hits++;
+#endif
     return true;
   }
   if (entry->storage.format != TileStorageIndexedRle ||
@@ -346,6 +387,9 @@ static inline bool sample_rotated_tile_lookup_palette_index(
   RotatedRleBlockCacheEntry *cached = &s_rotated_rle_block_cache[slot];
   if (cached->cell_index != cell_index || cached->row != (uint8_t)sample_y ||
       cached->block != block) {
+#ifdef MAPPY_WATCH_PHONE_MODE_FIXTURE
+    s_rotated_render_counters.rle_misses++;
+#endif
     const uint8_t *row_index = cell->stored + entry->encoded_length;
     size_t row_index_bytes = entry->storage.length - entry->encoded_length;
     if (!tile_rle_decode_indexed_block(
@@ -353,11 +397,26 @@ static inline bool sample_rotated_tile_lookup_palette_index(
             (uint16_t)s_tile_width, (uint16_t)s_tile_height, block,
             (uint16_t)sample_y, cached->packed, sizeof(cached->packed))) {
       cached->cell_index = UINT8_MAX;
+#ifdef MAPPY_WATCH_PHONE_MODE_FIXTURE
+      s_rotated_render_counters.decode_errors++;
+#endif
       return false;
     }
+#ifdef MAPPY_WATCH_PHONE_MODE_FIXTURE
+    uint16_t block_start = (uint16_t)block * TILE_RLE_INDEX_BLOCK_PIXELS;
+    uint16_t decoded_pixels = (uint16_t)s_tile_width - block_start;
+    if (decoded_pixels > TILE_RLE_INDEX_BLOCK_PIXELS) {
+      decoded_pixels = TILE_RLE_INDEX_BLOCK_PIXELS;
+    }
+    s_rotated_render_counters.rle_decoded_pixels += decoded_pixels;
+#endif
     cached->cell_index = cell_index;
     cached->row = (uint8_t)sample_y;
     cached->block = block;
+#ifdef MAPPY_WATCH_PHONE_MODE_FIXTURE
+  } else {
+    s_rotated_render_counters.rle_hits++;
+#endif
   }
 
   uint8_t block_x = (uint16_t)sample_x % TILE_RLE_INDEX_BLOCK_PIXELS;
@@ -390,6 +449,238 @@ static inline void advance_rotated_lookup_axis(int delta, int tile_size,
   }
 }
 
+typedef struct {
+  uint8_t *framebuffer_data;
+  int16_t bytes_per_row;
+  uint8_t background_argb;
+  const uint8_t *palette_argb;
+  int screen_w;
+  int screen_h;
+  int center_x;
+  int center_y;
+  int32_t viewport_x;
+  int32_t viewport_y;
+  bool fill_missing;
+} RotatedRasterTarget;
+
+static inline void rotated_lookup_cursor_init(
+    const RotatedTileLookup *lookup, int32_t world_x, int32_t world_y,
+    RotatedLookupCursor *cursor) {
+  rotated_lookup_position(lookup, world_x, world_y,
+                          &cursor->col, &cursor->row,
+                          &cursor->local_x, &cursor->local_y);
+}
+
+// Current-zoom DDA and cardinal steps are at most one world pixel.  Keeping
+// the cursor normalized lets their hot loops cross a boundary without the
+// division retained by the multi-zoom fallback path.
+static inline void rotated_lookup_cursor_advance_unit(
+    RotatedLookupCursor *cursor, int32_t dx, int32_t dy) {
+  cursor->local_x += (int)dx;
+  if (cursor->local_x < 0) {
+    cursor->local_x += s_tile_width;
+    cursor->col--;
+  } else if (cursor->local_x >= s_tile_width) {
+    cursor->local_x -= s_tile_width;
+    cursor->col++;
+  }
+
+  cursor->local_y += (int)dy;
+  if (cursor->local_y < 0) {
+    cursor->local_y += s_tile_height;
+    cursor->row--;
+  } else if (cursor->local_y >= s_tile_height) {
+    cursor->local_y -= s_tile_height;
+    cursor->row++;
+  }
+}
+
+static inline void draw_rotated_lookup_cursor_pixel(
+    const RotatedRasterTarget *target, const RotatedTileLookup *lookup,
+    const RotatedLookupCursor *cursor, uint8_t *destination) {
+  uint8_t palette_index;
+  if (sample_rotated_tile_lookup_palette_index(
+          lookup, cursor->col, cursor->row,
+          cursor->local_x, cursor->local_y, &palette_index)) {
+    *destination = target->palette_argb[palette_index & 0x0f];
+  } else if (target->fill_missing) {
+    *destination = target->background_argb;
+  }
+}
+
+// Traverse destination pixels in fixed 8x8 blocks to keep indexed-RLE rows
+// hot.  Each of the eight row states persists across every block column, so
+// the traversal never recomputes or restarts a row's fixed-point position.
+static void draw_rotated_current_zoom_dda(
+    const RotatedRasterTarget *target, const RotatedTileLookup *lookup,
+    int32_t sin_value, int32_t cos_value) {
+  RotatedRasterDda dda;
+  rotated_raster_dda_init(&dda, target->center_x, target->center_y,
+                          sin_value, cos_value);
+
+  RotatedRasterPoint next_row_point = dda.row_origin;
+  RotatedLookupCursor next_row_cursor;
+  rotated_lookup_cursor_init(
+      lookup, target->viewport_x + next_row_point.x.rounded,
+      target->viewport_y + next_row_point.y.rounded, &next_row_cursor);
+
+  for (int block_y = 0; block_y < target->screen_h;
+       block_y += ROTATED_RASTER_BLOCK_SIZE) {
+    int block_h = target->screen_h - block_y;
+    if (block_h > ROTATED_RASTER_BLOCK_SIZE) {
+      block_h = ROTATED_RASTER_BLOCK_SIZE;
+    }
+
+    for (int block_row = 0; block_row < block_h; block_row++) {
+      s_rotated_row_points[block_row] = next_row_point;
+      s_rotated_row_cursors[block_row] = next_row_cursor;
+      if (block_y + block_row + 1 < target->screen_h) {
+        int32_t dx;
+        int32_t dy;
+        rotated_raster_point_advance(&next_row_point,
+                                     &dda.row_x, &dda.row_y, &dx, &dy);
+        rotated_lookup_cursor_advance_unit(&next_row_cursor, dx, dy);
+      }
+    }
+
+    for (int block_x = 0; block_x < target->screen_w;
+         block_x += ROTATED_RASTER_BLOCK_SIZE) {
+      int block_w = target->screen_w - block_x;
+      if (block_w > ROTATED_RASTER_BLOCK_SIZE) {
+        block_w = ROTATED_RASTER_BLOCK_SIZE;
+      }
+      for (int block_row = 0; block_row < block_h; block_row++) {
+        uint8_t *destination = target->framebuffer_data +
+            ((block_y + block_row) * target->bytes_per_row) + block_x;
+        for (int block_col = 0; block_col < block_w; block_col++) {
+          draw_rotated_lookup_cursor_pixel(
+              target, lookup, &s_rotated_row_cursors[block_row],
+              destination + block_col);
+          if (block_x + block_col + 1 < target->screen_w) {
+            int32_t dx;
+            int32_t dy;
+            rotated_raster_point_advance(&s_rotated_row_points[block_row],
+                                         &dda.pixel_x, &dda.pixel_y,
+                                         &dx, &dy);
+            rotated_lookup_cursor_advance_unit(
+                &s_rotated_row_cursors[block_row], dx, dy);
+          }
+        }
+      }
+    }
+  }
+}
+
+static void draw_rotated_current_zoom_cardinal(
+    const RotatedRasterTarget *target, const RotatedTileLookup *lookup,
+    const RotatedRasterCardinal *cardinal) {
+  int32_t top_left_dx;
+  int32_t top_left_dy;
+  rotated_raster_cardinal_top_left(cardinal, target->center_x,
+                                   target->center_y,
+                                   &top_left_dx, &top_left_dy);
+  RotatedLookupCursor next_row_cursor;
+  rotated_lookup_cursor_init(lookup,
+                             target->viewport_x + top_left_dx,
+                             target->viewport_y + top_left_dy,
+                             &next_row_cursor);
+
+  for (int block_y = 0; block_y < target->screen_h;
+       block_y += ROTATED_RASTER_BLOCK_SIZE) {
+    int block_h = target->screen_h - block_y;
+    if (block_h > ROTATED_RASTER_BLOCK_SIZE) {
+      block_h = ROTATED_RASTER_BLOCK_SIZE;
+    }
+
+    for (int block_row = 0; block_row < block_h; block_row++) {
+      s_rotated_row_cursors[block_row] = next_row_cursor;
+      if (block_y + block_row + 1 < target->screen_h) {
+        rotated_lookup_cursor_advance_unit(
+            &next_row_cursor, cardinal->row_dx, cardinal->row_dy);
+      }
+    }
+
+    for (int block_x = 0; block_x < target->screen_w;
+         block_x += ROTATED_RASTER_BLOCK_SIZE) {
+      int block_w = target->screen_w - block_x;
+      if (block_w > ROTATED_RASTER_BLOCK_SIZE) {
+        block_w = ROTATED_RASTER_BLOCK_SIZE;
+      }
+      for (int block_row = 0; block_row < block_h; block_row++) {
+        uint8_t *destination = target->framebuffer_data +
+            ((block_y + block_row) * target->bytes_per_row) + block_x;
+        for (int block_col = 0; block_col < block_w; block_col++) {
+          draw_rotated_lookup_cursor_pixel(
+              target, lookup, &s_rotated_row_cursors[block_row],
+              destination + block_col);
+          if (block_x + block_col + 1 < target->screen_w) {
+            rotated_lookup_cursor_advance_unit(
+                &s_rotated_row_cursors[block_row],
+                cardinal->pixel_dx, cardinal->pixel_dy);
+          }
+        }
+      }
+    }
+  }
+}
+
+static void draw_rotated_scaled_reference(
+    const RotatedRasterTarget *target, const RotatedTileLookup *lookup,
+    int32_t sin_value, int32_t cos_value,
+    int8_t viewport_zoom, int8_t sample_zoom) {
+  for (int screen_y = 0; screen_y < target->screen_h; screen_y++) {
+    int32_t sy = screen_y - target->center_y;
+    int32_t sx = -target->center_x;
+    int32_t world_x_num = sx * cos_value - sy * sin_value;
+    int32_t world_y_num = sx * sin_value + sy * cos_value;
+    uint8_t *dst_row = target->framebuffer_data +
+        (screen_y * target->bytes_per_row);
+    int32_t sample_world_x = scale_world_to_zoom(
+        target->viewport_x + trig_ratio_to_nearest_int(world_x_num),
+        viewport_zoom, sample_zoom);
+    int32_t sample_world_y = scale_world_to_zoom(
+        target->viewport_y + trig_ratio_to_nearest_int(world_y_num),
+        viewport_zoom, sample_zoom);
+    int col;
+    int row;
+    int local_x;
+    int local_y;
+    rotated_lookup_position(lookup, sample_world_x, sample_world_y,
+                            &col, &row, &local_x, &local_y);
+    for (int screen_x = 0; screen_x < target->screen_w; screen_x++) {
+      uint8_t palette_index;
+      if (sample_rotated_tile_lookup_palette_index(lookup, col, row,
+                                                   local_x, local_y,
+                                                   &palette_index)) {
+        dst_row[screen_x] = target->palette_argb[palette_index & 0x0f];
+      } else if (target->fill_missing) {
+        dst_row[screen_x] = target->background_argb;
+      }
+      if (screen_x + 1 >= target->screen_w) {
+        continue;
+      }
+      world_x_num += cos_value;
+      world_y_num += sin_value;
+      int32_t next_world_x = target->viewport_x +
+          trig_ratio_to_nearest_int(world_x_num);
+      int32_t next_world_y = target->viewport_y +
+          trig_ratio_to_nearest_int(world_y_num);
+      int32_t next_sample_world_x = scale_world_to_zoom(
+          next_world_x, viewport_zoom, sample_zoom);
+      int32_t next_sample_world_y = scale_world_to_zoom(
+          next_world_y, viewport_zoom, sample_zoom);
+      advance_rotated_lookup_axis(
+          (int)(next_sample_world_x - sample_world_x), s_tile_width,
+          &col, &local_x);
+      advance_rotated_lookup_axis(
+          (int)(next_sample_world_y - sample_world_y), s_tile_height,
+          &row, &local_y);
+      sample_world_x = next_sample_world_x;
+      sample_world_y = next_sample_world_y;
+    }
+  }
+}
+
 static bool draw_rotated_tiles_framebuffer_sampled(uint8_t *framebuffer_data,
                                                    int16_t bytes_per_row,
                                                    uint8_t background_argb,
@@ -403,7 +694,7 @@ static bool draw_rotated_tiles_framebuffer_sampled(uint8_t *framebuffer_data,
                                                    int32_t sin_value,
                                                    int32_t cos_value,
                                                    int8_t sample_zoom,
-  bool fill_missing) {
+                                                   bool fill_missing) {
   RotatedTileLookup *lookup = &s_rotated_tile_lookup;
   if (!prepare_rotated_tile_lookup(entries, entry_count, lookup)) {
     APP_LOG(APP_LOG_LEVEL_WARNING,
@@ -418,7 +709,7 @@ static bool draw_rotated_tiles_framebuffer_sampled(uint8_t *framebuffer_data,
     return false;
   }
   memset(s_rotated_rle_block_cache, 0xff,
-         sizeof(s_render_tile_scratch.rle_block_cache));
+         sizeof(s_render_tile_scratch.rotated.rle_block_cache));
 #ifdef MAPPY_WATCH_PHONE_MODE_FIXTURE
   if (sample_zoom == s_viewport_zoom) {
     log_rotated_render_signature(entry_count, lookup);
@@ -433,52 +724,46 @@ static bool draw_rotated_tiles_framebuffer_sampled(uint8_t *framebuffer_data,
     }
     return true;
   }
-  for (int screen_y = 0; screen_y < screen_h; screen_y++) {
-    int32_t sy = screen_y - center_y;
-    int32_t sx = -center_x;
-    int32_t world_x_num = sx * cos_value - sy * sin_value;
-    int32_t world_y_num = sx * sin_value + sy * cos_value;
-    uint8_t *dst_row = framebuffer_data + (screen_y * bytes_per_row);
-    int32_t viewport_x = render_viewport_x();
-    int32_t viewport_y = render_viewport_y();
-    int32_t sample_world_x = scale_world_to_zoom(
-        viewport_x + trig_ratio_to_nearest_int(world_x_num),
-        s_viewport_zoom, sample_zoom);
-    int32_t sample_world_y = scale_world_to_zoom(
-        viewport_y + trig_ratio_to_nearest_int(world_y_num),
-        s_viewport_zoom, sample_zoom);
-    int col;
-    int row;
-    int local_x;
-    int local_y;
-    rotated_lookup_position(lookup, sample_world_x, sample_world_y, &col, &row,
-                            &local_x, &local_y);
-    for (int screen_x = 0; screen_x < screen_w; screen_x++) {
-      uint8_t palette_index;
-      if (sample_rotated_tile_lookup_palette_index(lookup, col, row,
-                                                   local_x, local_y,
-                                                   &palette_index)) {
-        dst_row[screen_x] = palette_argb[palette_index & 0x0f];
-      } else if (fill_missing) {
-        dst_row[screen_x] = background_argb;
-      }
-      world_x_num += cos_value;
-      world_y_num += sin_value;
-      int32_t next_world_x = viewport_x + trig_ratio_to_nearest_int(world_x_num);
-      int32_t next_world_y = viewport_y + trig_ratio_to_nearest_int(world_y_num);
-      int32_t next_sample_world_x = scale_world_to_zoom(
-          next_world_x, s_viewport_zoom, sample_zoom);
-      int32_t next_sample_world_y = scale_world_to_zoom(
-          next_world_y, s_viewport_zoom, sample_zoom);
-      advance_rotated_lookup_axis(
-          (int)(next_sample_world_x - sample_world_x), s_tile_width,
-                                  &col, &local_x);
-      advance_rotated_lookup_axis(
-          (int)(next_sample_world_y - sample_world_y), s_tile_height,
-                                  &row, &local_y);
-      sample_world_x = next_sample_world_x;
-      sample_world_y = next_sample_world_y;
-    }
+
+  int8_t viewport_zoom = s_viewport_zoom;
+  RotatedRasterTarget target = {
+    .framebuffer_data = framebuffer_data,
+    .bytes_per_row = bytes_per_row,
+    .background_argb = background_argb,
+    .palette_argb = palette_argb,
+    .screen_w = screen_w,
+    .screen_h = screen_h,
+    .center_x = center_x,
+    .center_y = center_y,
+    .viewport_x = render_viewport_x(),
+    .viewport_y = render_viewport_y(),
+    .fill_missing = fill_missing,
+  };
+#ifdef MAPPY_WATCH_PHONE_MODE_FIXTURE
+  s_rotated_render_counters.destination_pixels +=
+      (uint32_t)screen_w * (uint32_t)screen_h;
+  s_rotated_render_counters.passes++;
+#endif
+  if (sample_zoom != viewport_zoom) {
+#ifdef MAPPY_WATCH_PHONE_MODE_FIXTURE
+    s_rotated_render_counters.scaled_passes++;
+#endif
+    draw_rotated_scaled_reference(&target, lookup, sin_value, cos_value,
+                                  viewport_zoom, sample_zoom);
+    return true;
+  }
+
+  RotatedRasterCardinal cardinal;
+  if (rotated_raster_cardinal_init(&cardinal, sin_value, cos_value)) {
+#ifdef MAPPY_WATCH_PHONE_MODE_FIXTURE
+    s_rotated_render_counters.cardinal_passes++;
+#endif
+    draw_rotated_current_zoom_cardinal(&target, lookup, &cardinal);
+  } else {
+#ifdef MAPPY_WATCH_PHONE_MODE_FIXTURE
+    s_rotated_render_counters.dda_passes++;
+#endif
+    draw_rotated_current_zoom_dda(&target, lookup, sin_value, cos_value);
   }
   return true;
 }
@@ -744,6 +1029,10 @@ bool draw_tiles_framebuffer_fast(GContext *ctx, const GColor *palette,
   int32_t sin_value = 0;
   int32_t cos_value = TRIG_MAX_RATIO;
   if (rotated) {
+#ifdef MAPPY_WATCH_PHONE_MODE_FIXTURE
+    memset(&s_rotated_render_counters, 0,
+           sizeof(s_rotated_render_counters));
+#endif
     int32_t angle = active_map_bearing_angle();
     sin_value = sin_lookup(angle);
     cos_value = cos_lookup(angle);
@@ -765,6 +1054,20 @@ bool draw_tiles_framebuffer_fast(GContext *ctx, const GColor *palette,
           entries, entry_count, screen_w, screen_h, center_x, center_y,
           sin_value, cos_value, s_viewport_zoom, true);
     }
+#ifdef MAPPY_WATCH_PHONE_MODE_FIXTURE
+    fixture_perf_rotated_render(
+        s_rotated_render_counters.destination_pixels,
+        s_rotated_render_counters.sample_attempts,
+        s_rotated_render_counters.packed_hits,
+        s_rotated_render_counters.rle_hits,
+        s_rotated_render_counters.rle_misses,
+        s_rotated_render_counters.rle_decoded_pixels,
+        s_rotated_render_counters.passes,
+        s_rotated_render_counters.cardinal_passes,
+        s_rotated_render_counters.dda_passes,
+        s_rotated_render_counters.scaled_passes,
+        s_rotated_render_counters.decode_errors);
+#endif
     graphics_release_frame_buffer(ctx, framebuffer);
     return rendered;
   }

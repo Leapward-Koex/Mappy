@@ -19,6 +19,17 @@ typedef struct {
   uint32_t route_segments_clipped;
   uint32_t map_draw_time_ms;
   uint32_t max_map_draw_time_ms;
+  uint32_t rotated_destination_pixels;
+  uint32_t rotated_sample_attempts;
+  uint32_t rotated_packed_hits;
+  uint32_t rotated_rle_hits;
+  uint32_t rotated_rle_misses;
+  uint32_t rotated_rle_decoded_pixels;
+  uint32_t rotated_passes;
+  uint32_t rotated_cardinal_passes;
+  uint32_t rotated_dda_passes;
+  uint32_t rotated_scaled_passes;
+  uint32_t rotated_decode_errors;
   uint32_t errors;
 } FixturePerfCounters;
 
@@ -106,6 +117,33 @@ void fixture_perf_map_draw_complete(void) {
     }
     APP_LOG(APP_LOG_LEVEL_INFO, "MAPPY_PAN_FRAME i=%ld", (long)input_ms);
   }
+}
+
+void fixture_perf_rotated_render(uint32_t destination_pixels,
+                                 uint32_t sample_attempts,
+                                 uint32_t packed_hits,
+                                 uint32_t rle_hits,
+                                 uint32_t rle_misses,
+                                 uint32_t rle_decoded_pixels,
+                                 uint32_t passes,
+                                 uint32_t cardinal_passes,
+                                 uint32_t dda_passes,
+                                 uint32_t scaled_passes,
+                                 uint32_t decode_errors) {
+  if (!s_fixture_perf_active) {
+    return;
+  }
+  s_fixture_perf.rotated_destination_pixels += destination_pixels;
+  s_fixture_perf.rotated_sample_attempts += sample_attempts;
+  s_fixture_perf.rotated_packed_hits += packed_hits;
+  s_fixture_perf.rotated_rle_hits += rle_hits;
+  s_fixture_perf.rotated_rle_misses += rle_misses;
+  s_fixture_perf.rotated_rle_decoded_pixels += rle_decoded_pixels;
+  s_fixture_perf.rotated_passes += passes;
+  s_fixture_perf.rotated_cardinal_passes += cardinal_passes;
+  s_fixture_perf.rotated_dda_passes += dda_passes;
+  s_fixture_perf.rotated_scaled_passes += scaled_passes;
+  s_fixture_perf.rotated_decode_errors += decode_errors;
 }
 
 void fixture_perf_route_projection_recompute(void) {
@@ -239,19 +277,28 @@ void fixture_perf_pan_under_load(int action) {
     s_fixture_pan_active = false;
     fixture_perf_maybe_emit();
   } else if (action == 4) {
+    bool started = false;
     if (s_tiles) {
       int capacity = active_tile_cache_size();
       for (int i = 0; i < capacity; i++) {
         if (!s_tiles[i].valid || !tile_is_visible(&s_tiles[i])) {
           continue;
         }
-        start_tile_animation(&s_tiles[i], true);
+        started = start_tile_animation(&s_tiles[i], true);
         if (!s_tiles[i].animation_active) {
           s_fixture_perf.errors++;
         }
         break;
       }
     }
+    APP_LOG(APP_LOG_LEVEL_INFO, "MAPPY_PAN_ANIMATION active=%d",
+            started ? 1 : 0);
+    // Finish the fixture measurement in the same AppMessage dispatch that
+    // starts the post-pan animation. A second fixture command can be accepted
+    // by the emulator transport without reaching the watch, which otherwise
+    // leaves this measurement active until the host times out.
+    s_fixture_pan_active = false;
+    fixture_perf_maybe_emit();
   }
 }
 
@@ -261,6 +308,19 @@ void fixture_perf_maybe_emit(void) {
       visual_animations_active()) {
     return;
   }
+  APP_LOG(APP_LOG_LEVEL_INFO,
+          "MAPPY_RPERF p=%lu s=%lu k=%lu h=%lu m=%lu r=%lu a=%lu c=%lu d=%lu z=%lu e=%lu",
+          (unsigned long)s_fixture_perf.rotated_destination_pixels,
+          (unsigned long)s_fixture_perf.rotated_sample_attempts,
+          (unsigned long)s_fixture_perf.rotated_packed_hits,
+          (unsigned long)s_fixture_perf.rotated_rle_hits,
+          (unsigned long)s_fixture_perf.rotated_rle_misses,
+          (unsigned long)s_fixture_perf.rotated_rle_decoded_pixels,
+          (unsigned long)s_fixture_perf.rotated_passes,
+          (unsigned long)s_fixture_perf.rotated_cardinal_passes,
+          (unsigned long)s_fixture_perf.rotated_dda_passes,
+          (unsigned long)s_fixture_perf.rotated_scaled_passes,
+          (unsigned long)s_fixture_perf.rotated_decode_errors);
   APP_LOG(APP_LOG_LEVEL_INFO,
           "MAPPY_PERF e=%lu t=%lu d=%lu b=%lu B=%lu g=%lu l=%lu m=%lu x=%lu u=%lu v=%lu o=%lu p=%lu c=%lu q=%lu/%lu s=%lu",
           (unsigned long)s_fixture_perf.errors,

@@ -75,6 +75,23 @@ static int32_t target_map_bearing_centi_degrees(void) {
 #endif
 }
 
+static void reset_map_bearing_clock(void) {
+  s_map_bearing_clock_valid = false;
+  s_map_bearing_advanced_s = 0;
+  s_map_bearing_advanced_ms = 0;
+  s_map_bearing_elapsed_ms = 0;
+}
+
+static void start_map_bearing_clock(void) {
+  time_ms(&s_map_bearing_advanced_s, &s_map_bearing_advanced_ms);
+  s_map_bearing_elapsed_ms = 0;
+  s_map_bearing_clock_valid = true;
+}
+
+bool map_bearing_rendering_visible(void) {
+  return s_menu_mode == MenuNone && !s_arrival_dialog_visible;
+}
+
 void update_map_after_bearing_display_change(bool was_orientation_active) {
   bool orientation_active = map_orientation_active();
   if (was_orientation_active && !orientation_active) {
@@ -93,8 +110,6 @@ void update_map_after_bearing_display_change(bool was_orientation_active) {
     if (orientation_tile_coverage_changed()) {
       update_state_after_map_change();
       queue_visible_tiles();
-    } else {
-      send_next_tile_request();
     }
   }
 }
@@ -476,11 +491,13 @@ void cancel_map_bearing_smoothing(void) {
     s_map_bearing_target_centi_degrees =
         s_map_bearing_display_centi_degrees;
   }
+  reset_map_bearing_clock();
   release_visual_animation_tick_if_idle();
 }
 
 bool map_bearing_smoothing_active(void) {
-  return s_map_bearing_target_centi_degrees >= 0 &&
+  return map_bearing_rendering_visible() &&
+      s_map_bearing_target_centi_degrees >= 0 &&
       s_map_bearing_display_centi_degrees >= 0 &&
       bearing_smoothing_shortest_delta(s_map_bearing_display_centi_degrees,
                                        s_map_bearing_target_centi_degrees) != 0;
@@ -491,7 +508,13 @@ bool sync_map_bearing_smoothing(bool animate) {
   int32_t target = target_map_bearing_centi_degrees();
   if (target < 0) {
     s_map_bearing_target_centi_degrees = target;
+    if (!map_bearing_rendering_visible()) {
+      reset_map_bearing_clock();
+      release_visual_animation_tick_if_idle();
+      return false;
+    }
     s_map_bearing_display_centi_degrees = target;
+    reset_map_bearing_clock();
     release_visual_animation_tick_if_idle();
     return previous_display != s_map_bearing_display_centi_degrees;
   }
@@ -500,8 +523,14 @@ bool sync_map_bearing_smoothing(bool animate) {
   // active_map_bearing_centi_degrees() keeps the geographic map north-up.
   target = normalize_centi_degrees(target);
   s_map_bearing_target_centi_degrees = target;
+  if (!map_bearing_rendering_visible()) {
+    reset_map_bearing_clock();
+    release_visual_animation_tick_if_idle();
+    return false;
+  }
   if (s_map_bearing_display_centi_degrees < 0 || !animate) {
     s_map_bearing_display_centi_degrees = target;
+    reset_map_bearing_clock();
     release_visual_animation_tick_if_idle();
     return previous_display != s_map_bearing_display_centi_degrees;
   }
@@ -509,16 +538,21 @@ bool sync_map_bearing_smoothing(bool animate) {
   if (bearing_smoothing_shortest_delta(
           s_map_bearing_display_centi_degrees, target) == 0) {
     s_map_bearing_display_centi_degrees = target;
+    reset_map_bearing_clock();
     release_visual_animation_tick_if_idle();
     return previous_display != s_map_bearing_display_centi_degrees;
   }
 
+  if (!s_map_bearing_clock_valid) {
+    start_map_bearing_clock();
+  }
   schedule_visual_animation_tick();
   return false;
 }
 
 bool advance_map_bearing_smoothing(void) {
-  if (s_map_bearing_target_centi_degrees < 0 ||
+  if (!map_bearing_rendering_visible() ||
+      s_map_bearing_target_centi_degrees < 0 ||
       s_map_bearing_display_centi_degrees < 0) {
     return false;
   }
@@ -527,16 +561,64 @@ bool advance_map_bearing_smoothing(void) {
       s_map_bearing_display_centi_degrees,
       s_map_bearing_target_centi_degrees);
   if (delta == 0) {
+    reset_map_bearing_clock();
+    return false;
+  }
+  time_t now_s;
+  uint16_t now_ms;
+  time_ms(&now_s, &now_ms);
+  int32_t elapsed_ms = 0;
+  if (s_map_bearing_clock_valid) {
+    elapsed_ms = (int32_t)(now_s - s_map_bearing_advanced_s) * 1000 +
+        (int32_t)now_ms - (int32_t)s_map_bearing_advanced_ms;
+  }
+  if (elapsed_ms < 0) {
+    elapsed_ms = 0;
+  }
+  uint8_t tick_count = bearing_smoothing_consume_elapsed_ticks(
+      &s_map_bearing_elapsed_ms, (uint32_t)elapsed_ms,
+      VISUAL_ANIMATION_TICK_MS, BEARING_SMOOTHING_MAX_CATCHUP_TICKS);
+  s_map_bearing_advanced_s = now_s;
+  s_map_bearing_advanced_ms = now_ms;
+  s_map_bearing_clock_valid = true;
+  if (tick_count == 0) {
     return false;
   }
   bool was_orientation_active = map_orientation_active();
-  s_map_bearing_display_centi_degrees = bearing_smoothing_advance(
+  s_map_bearing_display_centi_degrees = bearing_smoothing_advance_ticks(
       s_map_bearing_display_centi_degrees,
       s_map_bearing_target_centi_degrees,
-      bearing_reacquire_active());
+      bearing_reacquire_active(), tick_count);
+
+  if (bearing_smoothing_shortest_delta(s_map_bearing_display_centi_degrees,
+                                       s_map_bearing_target_centi_degrees) == 0) {
+    reset_map_bearing_clock();
+  }
 
   update_map_after_bearing_display_change(was_orientation_active);
   return true;
+}
+
+void pause_map_bearing_rendering(void) {
+  reset_map_bearing_clock();
+  release_visual_animation_tick_if_idle();
+}
+
+bool resume_map_bearing_rendering(void) {
+  if (!map_bearing_rendering_visible()) {
+    return false;
+  }
+  bool was_orientation_active = map_orientation_active();
+  int32_t previous_display = s_map_bearing_display_centi_degrees;
+  int32_t target = target_map_bearing_centi_degrees();
+  s_map_bearing_target_centi_degrees = target;
+  s_map_bearing_display_centi_degrees = target;
+  reset_map_bearing_clock();
+  bool changed = previous_display != s_map_bearing_display_centi_degrees;
+  if (changed) {
+    update_map_after_bearing_display_change(was_orientation_active);
+  }
+  return changed;
 }
 
 void world_delta_to_screen_delta(int32_t dx, int32_t dy,

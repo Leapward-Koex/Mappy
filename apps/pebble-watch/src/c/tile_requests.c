@@ -14,6 +14,51 @@ static TileRequest s_suppressed_requests[TILE_CACHE_SIZE];
 static bool s_suppressed_request_active[TILE_CACHE_SIZE];
 
 static bool request_matches(const TileRequest *request, int32_t world_x,
+                            int32_t world_y, int8_t zoom);
+
+bool recover_newly_exact_tile_suppression(
+    const TileCoverageEnvelope *previous_render_envelope) {
+  bool recovered = false;
+  for (int i = 0; i < TILE_CACHE_SIZE; i++) {
+    if (!s_suppressed_request_active[i]) {
+      continue;
+    }
+    TileRequest *request = &s_suppressed_requests[i];
+    bool was_exact = tile_coverage_envelope_contains(
+        previous_render_envelope, request->world_x, request->world_y,
+        request->zoom);
+    if (!was_exact && tile_coordinates_render_visible(
+                          request->world_x, request->world_y, request->zoom)) {
+      s_suppressed_request_active[i] = false;
+      recovered = true;
+      TileCacheEntry *entry = find_tile(request->world_x, request->world_y,
+                                        request->zoom);
+      if (entry && entry->storage_suppressed) {
+        entry->storage_suppressed = false;
+      }
+    }
+  }
+
+  if (!s_tiles) {
+    return recovered;
+  }
+  int capacity = active_tile_cache_size();
+  for (int i = 0; i < capacity; i++) {
+    TileCacheEntry *entry = &s_tiles[i];
+    if (!entry->storage_suppressed) {
+      continue;
+    }
+    bool was_exact = tile_coverage_envelope_contains(
+        previous_render_envelope, entry->world_x, entry->world_y, entry->zoom);
+    if (!was_exact && tile_is_visible(entry)) {
+      entry->storage_suppressed = false;
+      recovered = true;
+    }
+  }
+  return recovered;
+}
+
+static bool request_matches(const TileRequest *request, int32_t world_x,
                             int32_t world_y, int8_t zoom) {
   return request && request->world_x == world_x &&
       request->world_y == world_y && request->zoom == zoom;
@@ -403,7 +448,8 @@ void clear_offscreen_pending_tile_requests(void) {
   }
   int capacity = active_tile_cache_size();
   for (int i = 0; i < capacity; i++) {
-    if (s_tiles[i].storage_suppressed && !tile_is_visible(&s_tiles[i])) {
+    if (s_tiles[i].storage_suppressed && !tile_coordinates_visible(
+            s_tiles[i].world_x, s_tiles[i].world_y, s_tiles[i].zoom)) {
       s_tiles[i].storage_suppressed = false;
     }
   }
@@ -435,12 +481,19 @@ void cancel_tile_redraw(void) {
 static void tile_redraw_callback(void *context) {
   (void)context;
   s_tile_redraw_timer = NULL;
-  if (!s_tile_requests_interaction_paused && s_map_layer) {
+  if (!map_bearing_rendering_visible()) {
+    s_tile_redraw_deferred = true;
+  } else if (!s_tile_requests_interaction_paused && s_map_layer) {
     layer_mark_dirty(s_map_layer);
   }
 }
 
 void schedule_tile_redraw(bool immediate) {
+  if (!map_bearing_rendering_visible()) {
+    cancel_tile_redraw();
+    s_tile_redraw_deferred = true;
+    return;
+  }
   if (s_tile_requests_interaction_paused) {
     cancel_tile_redraw();
     return;
@@ -455,6 +508,17 @@ void schedule_tile_redraw(bool immediate) {
   if (!s_tile_redraw_timer) {
     s_tile_redraw_timer = app_timer_register(TILE_REDRAW_COALESCE_MS,
                                              tile_redraw_callback, NULL);
+  }
+}
+
+void flush_deferred_tile_redraw(void) {
+  if (!s_tile_redraw_deferred || !map_bearing_rendering_visible()) {
+    return;
+  }
+  s_tile_redraw_deferred = false;
+  cancel_tile_redraw();
+  if (s_map_layer) {
+    layer_mark_dirty(s_map_layer);
   }
 }
 
@@ -506,6 +570,11 @@ void resume_tile_requests_after_phone_ready(void) {
 }
 
 static void rebuild_visible_tile_queue(void) {
+  TileCoverageEnvelope previous_render_envelope = s_render_tile_envelope;
+  TileRequest origins[TILE_CACHE_SIZE];
+  int origin_count = request_tile_origins(origins, active_tile_cache_size());
+  refresh_render_tile_coverage();
+  recover_newly_exact_tile_suppression(&previous_render_envelope);
   clear_offscreen_pending_tile_requests();
   clear_unsent_tile_requests();
   if (!s_has_gps || s_screen_bounds.size.w == 0 ||
@@ -513,55 +582,59 @@ static void rebuild_visible_tile_queue(void) {
     return;
   }
 
-  TileRequest origins[TILE_CACHE_SIZE];
-  int origin_count = visible_tile_origins(origins, active_tile_cache_size());
-  if (map_orientation_active()) {
-    remember_orientation_tile_origins(origins, origin_count);
-  } else {
-    invalidate_orientation_tile_coverage();
-  }
+  for (int priority = 0; priority < 2; priority++) {
+    // Ready retries retain priority within their visibility class, while exact
+    // render coverage always leads bearing-independent prefetch fringe work.
+    for (int i = 0; i < TILE_REQUEST_MAX_FLIGHTS &&
+         s_request_count < TILE_CACHE_SIZE; i++) {
+      TileRetry *retry = &s_tile_retries[i];
+      if (!retry->active || retry->timer) {
+        continue;
+      }
+      TileRequest request = retry->request;
+      bool exact = tile_coordinates_render_visible(
+          request.world_x, request.world_y, request.zoom);
+      if ((priority == 0) != exact) {
+        continue;
+      }
+      TileCacheEntry *entry = find_tile(request.world_x, request.world_y,
+                                        request.zoom);
+      if (!tile_coordinates_visible(request.world_x, request.world_y,
+                                    request.zoom) ||
+          (entry && (entry->valid || entry->storage_suppressed)) ||
+          tile_request_is_suppressed(request.world_x, request.world_y,
+                                     request.zoom) ||
+          coordinate_has_current_flight(request.world_x, request.world_y,
+                                        request.zoom)) {
+        continue;
+      }
+      s_request_queue[s_request_count] = request;
+      s_request_retry_attempts[s_request_count] = retry->retry_attempt;
+      s_request_count++;
+    }
 
-  // Timer-complete retries stay keyed outside the response window and lead
-  // the rebuilt queue so an unrelated center-first request cannot starve them.
-  for (int i = 0; i < TILE_REQUEST_MAX_FLIGHTS &&
-       s_request_count < TILE_CACHE_SIZE; i++) {
-    TileRetry *retry = &s_tile_retries[i];
-    if (!retry->active || retry->timer) {
-      continue;
+    for (int i = 0; i < origin_count && s_request_count < TILE_CACHE_SIZE; i++) {
+      TileRequest origin = origins[i];
+      bool exact = tile_coordinates_render_visible(
+          origin.world_x, origin.world_y, origin.zoom);
+      if ((priority == 0) != exact) {
+        continue;
+      }
+      TileCacheEntry *entry = find_tile(origin.world_x, origin.world_y,
+                                        origin.zoom);
+      if ((entry && (entry->valid || entry->storage_suppressed)) ||
+          tile_request_is_suppressed(origin.world_x, origin.world_y,
+                                     origin.zoom) ||
+          coordinate_has_current_flight(origin.world_x, origin.world_y,
+                                        origin.zoom) ||
+          coordinate_has_retry_record(origin.world_x, origin.world_y,
+                                      origin.zoom)) {
+        continue;
+      }
+      s_request_queue[s_request_count] = origin;
+      s_request_retry_attempts[s_request_count] = 0;
+      s_request_count++;
     }
-    TileRequest request = retry->request;
-    TileCacheEntry *entry = find_tile(request.world_x, request.world_y,
-                                      request.zoom);
-    if (!tile_coordinates_visible(request.world_x, request.world_y,
-                                  request.zoom) ||
-        (entry && (entry->valid || entry->storage_suppressed)) ||
-        tile_request_is_suppressed(request.world_x, request.world_y,
-                                   request.zoom) ||
-        coordinate_has_current_flight(request.world_x, request.world_y,
-                                      request.zoom)) {
-      continue;
-    }
-    s_request_queue[s_request_count] = request;
-    s_request_retry_attempts[s_request_count] = retry->retry_attempt;
-    s_request_count++;
-  }
-
-  for (int i = 0; i < origin_count && s_request_count < TILE_CACHE_SIZE; i++) {
-    TileRequest origin = origins[i];
-    TileCacheEntry *entry = find_tile(origin.world_x, origin.world_y,
-                                      origin.zoom);
-    if ((entry && (entry->valid || entry->storage_suppressed)) ||
-        tile_request_is_suppressed(origin.world_x, origin.world_y,
-                                   origin.zoom) ||
-        coordinate_has_current_flight(origin.world_x, origin.world_y,
-                                      origin.zoom) ||
-        coordinate_has_retry_record(origin.world_x, origin.world_y,
-                                    origin.zoom)) {
-      continue;
-    }
-    s_request_queue[s_request_count] = origin;
-    s_request_retry_attempts[s_request_count] = 0;
-    s_request_count++;
   }
 }
 

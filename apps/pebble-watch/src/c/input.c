@@ -195,8 +195,12 @@ bool has_active_route(void) {
 }
 
 void open_menu(MenuMode mode) {
+  bool opening_overlay = s_menu_mode == MenuNone;
   complete_tile_animations();
   s_menu_mode = mode;
+  if (opening_overlay) {
+    pause_map_bearing_rendering();
+  }
   s_menu_selection = 0;
   reset_menu_highlight_animation();
   update_touch_subscription();
@@ -210,7 +214,9 @@ void close_menu(void) {
   s_menu_selection = 0;
   update_touch_subscription();
   update_state_after_map_change();
+  resume_map_bearing_rendering();
   refresh_motion_detection_service();
+  s_tile_redraw_deferred = false;
   layer_mark_dirty(s_map_layer);
 }
 

@@ -256,11 +256,11 @@ static void test_cache_pressure_prefers_zoom_fallback(void) {
       .last_used = 30,
     },
   };
-  CHECK(tile_cache_select_pressure_candidate(candidates, 3, 25) == 2,
+  CHECK(tile_cache_select_pressure_candidate(candidates, 3, 25, true) == 2,
         "covered zoom fallback should be evicted before a visible current tile");
 
   candidates[2].priority = TileCachePressureIneligible;
-  CHECK(tile_cache_select_pressure_candidate(candidates, 3, 25) == 1,
+  CHECK(tile_cache_select_pressure_candidate(candidates, 3, 25, true) == 1,
         "any retained zoom fallback should be evicted before visible current imagery");
 }
 
@@ -277,13 +277,13 @@ static void test_cache_pressure_preserves_more_important_visible_tiles(void) {
       .last_used = 2,
     },
   };
-  CHECK(tile_cache_select_pressure_candidate(candidates, 2, 625) == -1,
+  CHECK(tile_cache_select_pressure_candidate(candidates, 2, 625, true) == -1,
         "a fringe arrival must not evict a more central rendered tile");
-  CHECK(tile_cache_select_pressure_candidate(candidates, 2, 16) == 1,
+  CHECK(tile_cache_select_pressure_candidate(candidates, 2, 16, true) == 1,
         "a central arrival may replace the farthest less-important tile");
 
   candidates[0].distance_sq = 400;
-  CHECK(tile_cache_select_pressure_candidate(candidates, 2, 400) == -1,
+  CHECK(tile_cache_select_pressure_candidate(candidates, 2, 400, true) == -1,
         "equal-importance visible tiles should not churn under pressure");
 }
 
@@ -305,11 +305,33 @@ static void test_cache_pressure_reuses_existing_holes_first(void) {
       .last_used = 60,
     },
   };
-  CHECK(tile_cache_select_pressure_candidate(candidates, 3, 4) == 2,
+  CHECK(tile_cache_select_pressure_candidate(candidates, 3, 4, true) == 2,
         "offscreen storage should remain the first pressure victim");
   candidates[2].priority = TileCachePressureIneligible;
-  CHECK(tile_cache_select_pressure_candidate(candidates, 3, 4) == 1,
+  CHECK(tile_cache_select_pressure_candidate(candidates, 3, 4, true) == 1,
         "an existing visible hole should be reused before making another one");
+}
+
+static void test_cache_pressure_prioritizes_exact_render_tiles(void) {
+  TileCachePressureCandidate candidates[] = {
+    {
+      .priority = TileCachePressureLessImportantVisible,
+      .distance_sq = 400,
+      .last_used = 1,
+    },
+    {
+      .priority = TileCachePressureRequestPrefetch,
+      .distance_sq = 100,
+      .last_used = 2,
+    },
+  };
+  CHECK(tile_cache_select_pressure_candidate(candidates, 2, 900, true) == 1,
+        "an exact-render arrival must evict request-envelope prefetch first");
+  CHECK(tile_cache_select_pressure_candidate(candidates, 2, 50, false) == 1,
+        "a prefetch arrival may replace only a less useful prefetch tile");
+  candidates[1].priority = TileCachePressureIneligible;
+  CHECK(tile_cache_select_pressure_candidate(candidates, 2, 50, false) == -1,
+        "a prefetch arrival must never displace exact-render imagery");
 }
 
 int main(void) {
@@ -321,6 +343,7 @@ int main(void) {
   test_cache_pressure_prefers_zoom_fallback();
   test_cache_pressure_preserves_more_important_visible_tiles();
   test_cache_pressure_reuses_existing_holes_first();
+  test_cache_pressure_prioritizes_exact_render_tiles();
   if (s_failures > 0) {
     fprintf(stderr, "tile storage tests: %d failure(s)\n", s_failures);
     return 1;

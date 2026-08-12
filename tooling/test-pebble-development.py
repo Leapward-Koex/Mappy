@@ -157,6 +157,8 @@ class RepositoryWorkflowTest(unittest.TestCase):
             "test-motion-host",
             "test-tile-cache-host",
             "test-tile-scheduler-host",
+            "test-face-forward-render-host",
+            "test-face-forward-angles",
             "test-render-performance",
             "test-pan-under-load",
             "test-rapid-zoom-reversal",

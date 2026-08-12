@@ -20,6 +20,8 @@ bool s_tile_requests_interaction_paused;
 bool s_tile_requests_setup_paused;
 AppTimer *s_tile_request_resume_timer;
 AppTimer *s_tile_redraw_timer;
+bool s_tile_redraw_deferred;
+TileCoverageEnvelope s_render_tile_envelope;
 AppTimer *s_tile_request_watchdog_timer;
 bool s_outbox_busy;
 int32_t s_outbox_cmd;
@@ -37,6 +39,8 @@ static uint64_t s_now_ms;
 static AppTimer s_timers[16];
 static TileRequest s_visible_origins[TILE_CACHE_SIZE];
 static int s_visible_origin_count;
+static TileRequest s_request_origins[TILE_CACHE_SIZE];
+static int s_request_origin_count;
 static bool s_visible_grid_missing;
 static bool s_control_pending;
 static int s_control_send_count;
@@ -47,6 +51,7 @@ static AppMessageResult s_send_begin_result;
 static AppMessageResult s_outbox_send_result;
 static DictionaryIterator s_dictionary;
 static Layer s_layer;
+static bool s_rendering_visible;
 
 #define CHECK(condition, message) do { \
   if (!(condition)) { \
@@ -89,6 +94,10 @@ void layer_mark_dirty(Layer *layer) {
   }
 }
 
+bool map_bearing_rendering_visible(void) {
+  return s_rendering_visible;
+}
+
 int active_tile_cache_size(void) {
   return TILE_CACHE_SIZE;
 }
@@ -108,8 +117,8 @@ TileCacheEntry *find_tile(int32_t world_x, int32_t world_y, int8_t zoom) {
 }
 
 bool tile_coordinates_visible(int32_t world_x, int32_t world_y, int8_t zoom) {
-  for (int i = 0; i < s_visible_origin_count; i++) {
-    TileRequest *origin = &s_visible_origins[i];
+  for (int i = 0; i < s_request_origin_count; i++) {
+    TileRequest *origin = &s_request_origins[i];
     if (origin->world_x == world_x && origin->world_y == world_y &&
         origin->zoom == zoom) {
       return true;
@@ -118,25 +127,82 @@ bool tile_coordinates_visible(int32_t world_x, int32_t world_y, int8_t zoom) {
   return false;
 }
 
+bool tile_coordinates_render_visible(int32_t world_x, int32_t world_y,
+                                     int8_t zoom) {
+  return tile_origin_list_contains(s_visible_origins, s_visible_origin_count,
+                                   world_x, world_y, zoom);
+}
+
+bool tile_coverage_envelope_contains(const TileCoverageEnvelope *envelope,
+                                     int32_t world_x, int32_t world_y,
+                                     int8_t zoom) {
+  return envelope && envelope->valid && zoom == envelope->zoom &&
+      world_x >= envelope->start_x && world_x <= envelope->end_x &&
+      world_y >= envelope->start_y && world_y <= envelope->end_y;
+}
+
 bool tile_is_visible(const TileCacheEntry *entry) {
-  return entry && tile_coordinates_visible(entry->world_x, entry->world_y,
-                                           entry->zoom);
+  return entry && tile_coordinates_render_visible(
+                      entry->world_x, entry->world_y, entry->zoom);
+}
+
+void refresh_render_tile_coverage(void) {
+  if (s_visible_origin_count > 0) {
+    s_render_tile_envelope = (TileCoverageEnvelope) {
+      .start_x = s_visible_origins[0].world_x,
+      .end_x = s_visible_origins[0].world_x,
+      .start_y = s_visible_origins[0].world_y,
+      .end_y = s_visible_origins[0].world_y,
+      .zoom = s_visible_origins[0].zoom,
+      .valid = true,
+    };
+    for (int i = 1; i < s_visible_origin_count; i++) {
+      if (s_visible_origins[i].world_x < s_render_tile_envelope.start_x) {
+        s_render_tile_envelope.start_x = s_visible_origins[i].world_x;
+      }
+      if (s_visible_origins[i].world_x > s_render_tile_envelope.end_x) {
+        s_render_tile_envelope.end_x = s_visible_origins[i].world_x;
+      }
+      if (s_visible_origins[i].world_y < s_render_tile_envelope.start_y) {
+        s_render_tile_envelope.start_y = s_visible_origins[i].world_y;
+      }
+      if (s_visible_origins[i].world_y > s_render_tile_envelope.end_y) {
+        s_render_tile_envelope.end_y = s_visible_origins[i].world_y;
+      }
+    }
+  } else {
+    s_render_tile_envelope.valid = false;
+  }
 }
 
 int visible_tile_origins(TileRequest *origins, int max_count) {
   int count = s_visible_origin_count < max_count ? s_visible_origin_count :
                                                   max_count;
   memcpy(origins, s_visible_origins, (size_t)count * sizeof(*origins));
+  refresh_render_tile_coverage();
   return count;
+}
+
+int request_tile_origins(TileRequest *origins, int max_count) {
+  int count = s_request_origin_count < max_count ? s_request_origin_count :
+                                                  max_count;
+  memcpy(origins, s_request_origins, (size_t)count * sizeof(*origins));
+  return count;
+}
+
+bool tile_origin_list_contains(const TileRequest *origins, int count,
+                               int32_t world_x, int32_t world_y, int8_t zoom) {
+  for (int i = 0; i < count; i++) {
+    if (origins[i].world_x == world_x && origins[i].world_y == world_y &&
+        origins[i].zoom == zoom) {
+      return true;
+    }
+  }
+  return false;
 }
 
 bool map_orientation_active(void) {
   return false;
-}
-
-void remember_orientation_tile_origins(const TileRequest *origins, int count) {
-  (void)origins;
-  (void)count;
 }
 
 void invalidate_orientation_tile_coverage(void) {
@@ -197,12 +263,14 @@ AppMessageResult app_message_outbox_send(void) {
 
 static void set_visible_origins(int count) {
   s_visible_origin_count = count;
+  s_request_origin_count = count;
   for (int i = 0; i < count; i++) {
     s_visible_origins[i] = (TileRequest) {
       .world_x = i * 54,
       .world_y = 0,
       .zoom = 16,
     };
+    s_request_origins[i] = s_visible_origins[i];
   }
 }
 
@@ -228,6 +296,8 @@ static void reset_fixture(void) {
   s_tile_requests_setup_paused = false;
   s_tile_request_resume_timer = NULL;
   s_tile_redraw_timer = NULL;
+  s_tile_redraw_deferred = false;
+  memset(&s_render_tile_envelope, 0, sizeof(s_render_tile_envelope));
   s_tile_request_watchdog_timer = NULL;
   s_outbox_busy = false;
   s_outbox_cmd = 0;
@@ -241,12 +311,14 @@ static void reset_fixture(void) {
   s_tile_chunk_active = false;
   s_tile_chunk_request_id = 0;
   s_visible_origin_count = 0;
+  s_request_origin_count = 0;
   s_visible_grid_missing = false;
   s_control_pending = false;
   s_control_send_count = 0;
   s_tile_send_count = 0;
   s_chunk_reset_count = 0;
   s_dirty_count = 0;
+  s_rendering_visible = true;
   s_send_begin_result = APP_MSG_OK;
   s_outbox_send_result = APP_MSG_OK;
   s_now_ms = 10000;
@@ -625,6 +697,52 @@ static void test_tile_error_requires_exact_request_id(void) {
         "the exact matching retryable error should schedule one retry");
 }
 
+static void test_tile_redraw_defers_behind_overlay(void) {
+  reset_fixture();
+  s_rendering_visible = false;
+  schedule_tile_redraw(true);
+  CHECK(s_dirty_count == 0 && s_tile_redraw_deferred,
+        "tile redraw must defer while an overlay obscures the map");
+
+  s_rendering_visible = true;
+  flush_deferred_tile_redraw();
+  CHECK(s_dirty_count == 1 && !s_tile_redraw_deferred,
+        "closing an overlay must flush exactly one deferred tile redraw");
+  flush_deferred_tile_redraw();
+  CHECK(s_dirty_count == 1,
+        "a consumed deferred redraw must not be emitted twice");
+}
+
+static void test_exact_render_requests_lead_prefetch_fringe(void) {
+  reset_fixture();
+  set_visible_origins(3);
+  s_visible_origins[0] = s_request_origins[1];
+  s_visible_origin_count = 1;
+
+  queue_visible_tiles();
+  CHECK(find_flight_for_coordinate(54, 0, 16) != NULL,
+        "exact render coverage must dispatch before request-envelope fringe");
+  CHECK(find_flight_for_coordinate(0, 0, 16) == NULL,
+        "prefetch order must remain behind exact render coverage");
+}
+
+static void test_prefetch_suppression_recovers_when_exact(void) {
+  reset_fixture();
+  set_visible_origins(2);
+  s_visible_origins[0] = s_request_origins[1];
+  s_visible_origin_count = 1;
+  TileRequest scratch[TILE_CACHE_SIZE];
+  visible_tile_origins(scratch, TILE_CACHE_SIZE);
+  suppress_tile_request(0, 0, 16);
+
+  s_visible_origins[0] = s_request_origins[0];
+  queue_visible_tiles();
+  CHECK(!tile_request_is_suppressed(0, 0, 16),
+        "a suppressed prefetch tile must recover when it enters exact view");
+  CHECK(find_flight_for_coordinate(0, 0, 16) != NULL,
+        "newly exact recovered coverage must be re-requested immediately");
+}
+
 int main(void) {
   test_two_flight_window_and_ack_semantics();
   test_control_message_priority();
@@ -638,6 +756,9 @@ int main(void) {
   test_timeout_retry_isolated_from_other_flight();
   test_discard_timeout_does_not_retry();
   test_tile_error_requires_exact_request_id();
+  test_tile_redraw_defers_behind_overlay();
+  test_exact_render_requests_lead_prefetch_fringe();
+  test_prefetch_suppression_recovers_when_exact();
   cancel_remaining_timers();
   if (s_failures > 0) {
     fprintf(stderr, "tile request scheduler tests: %d failure(s)\n", s_failures);
