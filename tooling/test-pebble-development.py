@@ -123,6 +123,7 @@ class RepositoryWorkflowTest(unittest.TestCase):
         fixture = (
             ROOT / "tooling" / "pebble-map-mock-pkjs.js"
         ).read_text(encoding="utf-8")
+        generator = GENERATOR_PATH.read_text(encoding="utf-8")
         self.assertIn(
             "if (!ignoreStartupReady) setTimeout(sendReadyState, phoneReadyDelayMs);",
             fixture,
@@ -137,6 +138,15 @@ class RepositoryWorkflowTest(unittest.TestCase):
         )
         self.assertIn("offset += tileChunkBytes", fixture)
         self.assertIn("'tile-he-'", fixture)
+        feedback_echo = (
+            "button_id: feedbackMode(pick(payload, 'button_id', KEY_BUTTON_ID))"
+        )
+        for source in (fixture, generator):
+            self.assertIn(feedback_echo, source)
+            self.assertIn(
+                "mode === 0 || mode === 1 || mode === 2 || mode === 3 ? mode : 3",
+                source,
+            )
 
     def test_shell_scripts_parse_and_help_lists_supported_commands(self) -> None:
         helper = ROOT / "tooling" / "pebble-emulator-codex.sh"

@@ -129,6 +129,8 @@ int s_backlight_mode;
 int s_map_orientation;
 int s_units_mode = 1;
 int s_tile_animation_mode = TILE_ANIMATION_FADE;
+int s_haptic_mode = NavigationFeedbackModeAll;
+int s_glance_mode = NavigationFeedbackModeAll;
 int s_tile_width = DEFAULT_TILE_W;
 int s_tile_height = DEFAULT_TILE_H;
 int s_tile_pixels = DEFAULT_TILE_W * DEFAULT_TILE_H;

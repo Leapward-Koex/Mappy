@@ -8,6 +8,8 @@
 #define PENDING_SETTING_BACKLIGHT (1u << 3)
 #define PENDING_SETTING_MAP_ORIENTATION (1u << 4)
 #define PENDING_SETTING_TILE_ANIMATION (1u << 5)
+#define PENDING_SETTING_HAPTIC_MODE (1u << 6)
+#define PENDING_SETTING_GLANCE_MODE (1u << 7)
 
 static uint32_t s_pending_setting_mask;
 static AppTimer *s_init_retry_timer;
@@ -97,6 +99,10 @@ static uint32_t pending_setting_mask_for_cmd(int32_t cmd) {
       return PENDING_SETTING_MAP_ORIENTATION;
     case CMD_TILE_ANIMATION:
       return PENDING_SETTING_TILE_ANIMATION;
+    case CMD_HAPTIC_MODE:
+    case CMD_GLANCE_MODE:
+      return cmd == CMD_HAPTIC_MODE ? PENDING_SETTING_HAPTIC_MODE :
+          PENDING_SETTING_GLANCE_MODE;
     default:
       return 0;
   }
@@ -138,6 +144,16 @@ static bool send_pending_scalar_setting(void) {
     s_pending_setting_mask &= ~PENDING_SETTING_TILE_ANIMATION;
     return send_scalar_setting(CMD_TILE_ANIMATION, s_tile_animation_mode);
   }
+  if (s_pending_setting_mask &
+      (PENDING_SETTING_HAPTIC_MODE | PENDING_SETTING_GLANCE_MODE)) {
+    bool is_haptic =
+        (s_pending_setting_mask & PENDING_SETTING_HAPTIC_MODE) != 0;
+    uint32_t mask = is_haptic ? PENDING_SETTING_HAPTIC_MODE :
+        PENDING_SETTING_GLANCE_MODE;
+    s_pending_setting_mask &= ~mask;
+    return send_scalar_setting(is_haptic ? CMD_HAPTIC_MODE : CMD_GLANCE_MODE,
+                               is_haptic ? s_haptic_mode : s_glance_mode);
+  }
 
   s_pending_setting_mask = 0;
   return false;
@@ -156,11 +172,10 @@ void queue_log_event(int category, int detail, int detail2, const char *text) {
     index = (s_pending_log_head + s_pending_log_count) % LOG_EVENT_QUEUE_SIZE;
   }
 
-  s_pending_log_events[index].pending = true;
   s_pending_log_events[index].category = category;
   s_pending_log_events[index].detail = detail;
   s_pending_log_events[index].detail2 = detail2;
-  copy_bounded_text(s_pending_log_events[index].text, sizeof(s_pending_log_events[index].text), text);
+  s_pending_log_events[index].text = text;
   s_pending_log_count++;
 }
 
@@ -171,11 +186,10 @@ bool dequeue_log_event(PendingLogEvent *event) {
   if (s_pending_log_overflow_count > 0) {
     uint16_t dropped = s_pending_log_overflow_count;
     s_pending_log_overflow_count = 0;
-    event->pending = true;
     event->category = 5;
     event->detail = dropped;
     event->detail2 = LOG_EVENT_QUEUE_SIZE;
-    copy_bounded_text(event->text, sizeof(event->text), "diagnostic overflow");
+    event->text = "diagnostic overflow";
     return true;
   }
   if (s_pending_log_count == 0) {
@@ -183,10 +197,9 @@ bool dequeue_log_event(PendingLogEvent *event) {
   }
 
   *event = s_pending_log_events[s_pending_log_head];
-  s_pending_log_events[s_pending_log_head].pending = false;
   s_pending_log_head = (s_pending_log_head + 1) % LOG_EVENT_QUEUE_SIZE;
   s_pending_log_count--;
-  return event->pending;
+  return true;
 }
 
 bool send_log_event(int category, int detail, int detail2, const char *text) {
@@ -487,6 +500,14 @@ void send_map_orientation(void) {
 
 void send_tile_animation(void) {
   send_scalar_setting(CMD_TILE_ANIMATION, s_tile_animation_mode);
+}
+
+void send_haptic_mode(void) {
+  send_scalar_setting(CMD_HAPTIC_MODE, s_haptic_mode);
+}
+
+void send_glance_mode(void) {
+  send_scalar_setting(CMD_GLANCE_MODE, s_glance_mode);
 }
 
 void send_nav_steps_request(void) {
@@ -1102,6 +1123,23 @@ void inbox_received(DictionaryIterator *iter, void *context) {
         s_backlight_mode = next_backlight;
         persist_write_int(PERSIST_BACKLIGHT, s_backlight_mode);
         light_enable(s_backlight_mode == 1);
+      }
+      break;
+    }
+    case CMD_HAPTIC_MODE:
+    case CMD_GLANCE_MODE: {
+      Tuple *tuple = dict_find(iter, MESSAGE_KEY_button_id);
+      bool is_haptic = cmd == CMD_HAPTIC_MODE;
+      int *mode = is_haptic ? &s_haptic_mode : &s_glance_mode;
+      int next_mode = navigation_feedback_normalize_mode(
+          tuple ? tuple->value->int32 : NavigationFeedbackModeAll);
+      if (next_mode != *mode) {
+        *mode = next_mode;
+        persist_write_int(is_haptic ? PERSIST_HAPTIC_MODE :
+                          PERSIST_GLANCE_MODE, *mode);
+        if (is_haptic) {
+          vibes_cancel();
+        }
       }
       break;
     }

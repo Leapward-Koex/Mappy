@@ -720,6 +720,8 @@ internal class WatchAppMessageBridge(
             CMD_TRAVEL_MODE,
             CMD_UNITS,
             CMD_BACKLIGHT,
+            CMD_HAPTIC_MODE,
+            CMD_GLANCE_MODE,
             CMD_DECLINATION,
             CMD_MAP_SETTINGS,
             CMD_MAP_ORIENTATION,

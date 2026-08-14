@@ -1,13 +1,11 @@
-# Turn Haptic Alert Spec
+# Navigation Feedback Alert Spec
 
 ## Purpose
 
-The watch must provide Google Maps-style haptic cues around upcoming navigation
-maneuvers. The wearer should get a subtle advance cue before a maneuver and a
-stronger cue when the maneuver is due, without adding phone round-trips or
-vibrating repeatedly because of GPS jitter. The same local route-projection
-model also owns destination-arrival feedback so the trip can finish without a
-phone round-trip.
+The watch must provide configurable Google Maps-style haptic and transient
+backlight cues around navigation events. The same local route-projection model
+owns turn and destination-arrival feedback so the trip can finish without a
+phone round-trip or repeat outputs because of GPS jitter.
 
 ## Inputs
 
@@ -23,21 +21,39 @@ This feature uses existing route and nav-step data:
   - `instruction`
 - GPS progress is computed by projecting the current fix onto the overview route.
 
-No new protocol fields are required for MVP turn haptics or arrival feedback.
+`CMD_HAPTIC_MODE` and `CMD_GLANCE_MODE` independently select which events
+produce vibration or a transient interaction backlight wake.
 
 ## Alert Stages
 
-The watch supports two haptic stages per maneuver, plus one route-completion
-stage:
+The watch supports four one-shot feedback events:
 
-| Stage | Intent | Pattern |
+| Event | Intent | Existing haptic pattern |
 | --- | --- | --- |
+| Route start | A fresh user-visible walking route was applied. | Short pulse. |
 | Preview | The next maneuver is close enough that the wearer should prepare. | Two short pulses. |
 | Now | The maneuver is due now or within the final approach window. | Stronger multi-pulse pattern. |
 | Arrival | The wearer is at or very close to the destination. | Distinct multi-pulse completion pattern. |
 
-The patterns must be short and nonblocking. They must not prevent rendering,
-AppMessage handling, or route progress updates.
+The patterns and backlight wake must be short and nonblocking. Glance uses
+`light_enable_interaction()` and adds no app timer. When Backlight is Keep on,
+the transient call is skipped without changing the stored Glance preference.
+
+## Output Presets
+
+Haptics and Glance are independent controls with the same values:
+
+| Value | Label | Events |
+| ---: | --- | --- |
+| 0 | Off | None. |
+| 1 | Turns | Preview and Now. |
+| 2 | Arrival | Arrival only. |
+| 3 | All | Route start, Preview, Now, and Arrival. |
+
+Both settings default to All, and missing or invalid persisted/wire values
+normalize to All. Navigation feedback intentionally follows these presets during
+Pebble Quiet Time. Glance is event-driven and must not reuse the face-forward
+wrist-look detector as a general raise-to-wake signal.
 
 ## Thresholds
 
@@ -75,18 +91,19 @@ Rules:
 
 ## Repeat Suppression
 
-Each haptic stage is one-shot per nav-step `global_idx`:
+Each turn-feedback stage is one-shot per nav-step `global_idx`:
 
-- Once preview has fired for a maneuver, it must not fire again for that
-  maneuver.
-- Once now has fired for a maneuver, preview is considered satisfied and must not
-  fire later for that maneuver.
+- Once preview is consumed for a maneuver, it must not fire again for that
+  maneuver, even if both outputs were disabled.
+- Once now is consumed for a maneuver, preview is considered satisfied and must
+  not fire later for that maneuver.
 - Walking backward or GPS jitter must not repeat either stage.
 - Starting a new route, clearing the route, or replacing route points resets all
   turn-alert state.
 
 The watch already maintains monotonic nav progress for instruction progression;
-turn haptics must respect that same monotonicity for repeat suppression.
+feedback must respect that same monotonicity. Changing a preset does not reset
+indexes and must not replay an already consumed event.
 
 ## User Experience
 
@@ -94,10 +111,12 @@ The cue should feel useful but quiet:
 
 - The preview cue should be noticeable without feeling urgent.
 - The now cue should be clearly stronger than preview.
-- Cues should be suppressed while off-route rather than vibrating with low
+- Cues should be suppressed while off-route rather than producing feedback with low
   confidence.
-- The current instruction text remains unchanged by the vibration.
-- Route-start walking vibration remains separate from turn haptics.
+- The current instruction text remains unchanged by either output.
+- Haptics Off plus Glance enabled is a supported silent visual-navigation mode.
+- Changing Haptics cancels queued Mappy vibration; Mappy has no unrelated local
+  vibration source that should survive that preference change.
 
 ## Destination Arrival
 
@@ -108,7 +127,7 @@ conservative route-pixel fallback when meter scaling is unavailable.
 
 On arrival:
 
-- Fire one distinct arrival vibration.
+- Consume one arrival feedback event and apply both output presets.
 - Finish the active trip locally by clearing route geometry, nav steps, route
   progress, route-detail windows, and pending nav-step requests.
 - Queue or send `CMD_ROUTE_CLEAR` to the phone so the companion clears its active
@@ -117,19 +136,20 @@ On arrival:
 - Any hardware button press dismisses the dialog and returns to the normal map.
 
 Arrival must not fire while the GPS projection is stale or off-route. Clearing
-or replacing the route resets arrival state. The arrival dialog is local UI; it
-does not require a new protocol command.
+or replacing the route resets arrival state. Completion, route clearing, and the
+arrival dialog happen regardless of whether either feedback output is enabled.
 
 ## Debug Verification
 
-Debug tooling should expose observable counts for preview and now vibrations.
+Debug tooling should expose observable event, vibration-dispatch, and
+glance-dispatch counts.
 Moving debug GPS along a route must be enough to test:
 
 - preview fires once before a turn,
 - now fires once near the turn,
 - moving backward does not repeat either alert,
 - moving forward to the next maneuver allows alerts for the next `global_idx`.
-- moving debug GPS to the destination fires one arrival vibration, clears the
+- moving debug GPS to the destination consumes one arrival event, clears the
   active route, and shows the arrival dialog until any button press.
 
 ## Acceptance
@@ -140,8 +160,12 @@ Moving debug GPS along a route must be enough to test:
 - Repeating the same GPS positions or moving backward across the thresholds does
   not add more cues.
 - Clearing/replacing the route resets alert state for the new route.
-- Moving GPS within 20 m of the destination fires one arrival cue, clears the
+- Moving GPS within 20 m of the destination consumes one arrival event, clears the
   trip, sends or queues `CMD_ROUTE_CLEAR`, and shows an `Arrived` dialog.
+- The full four-preset by four-event matrix is host-tested for both Haptics and
+  Glance, including invalid-value normalization and disabled-output consumption.
+- Haptics Off with Glance All requests a light wake without vibration; Haptics
+  All with Glance Off vibrates without requesting a light wake.
 - Pressing any hardware button dismisses the arrival dialog and leaves the map
   visible.
 - Pebble build succeeds with the custom haptic patterns.

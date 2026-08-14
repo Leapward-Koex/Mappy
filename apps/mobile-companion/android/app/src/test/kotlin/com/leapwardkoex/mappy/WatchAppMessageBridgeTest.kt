@@ -102,6 +102,8 @@ class WatchAppMessageBridgeTest {
             CMD_TRAVEL_MODE,
             CMD_UNITS,
             CMD_BACKLIGHT,
+            CMD_HAPTIC_MODE,
+            CMD_GLANCE_MODE,
             CMD_MAP_SETTINGS,
             CMD_MAP_ORIENTATION,
             CMD_TILE_ANIMATION

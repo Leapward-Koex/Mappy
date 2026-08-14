@@ -145,6 +145,18 @@ bash tooling/pebble-emulator-codex.sh button click select
 bash tooling/pebble-emulator-codex.sh screenshot after-select.png
 ```
 
+A normal Select click opens Actions. Holding Select for at least 700 ms on the
+map recenters on the current GPS fix without opening Actions; the emulator can
+exercise it with:
+
+```sh
+bash tooling/pebble-emulator-codex.sh button click select --duration 800
+```
+
+The watch Settings menu also exposes independent Haptics and Glance controls.
+Each cycles through All, Turns, Arrival, and Off; Glance means a brief navigation
+backlight wake and is separate from the System/Keep on backlight setting.
+
 Use `PEBBLE_PLATFORM=<platform>` to test another supported Pebble platform.
 
 ### Debug compass injection

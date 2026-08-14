@@ -332,6 +332,8 @@ class WatchDisplaySettings {
     required this.travelMode,
     required this.unitsMode,
     required this.backlightMode,
+    required this.hapticMode,
+    required this.glanceMode,
     required this.mapOrientation,
     required this.tileAnimationMode,
   });
@@ -340,6 +342,8 @@ class WatchDisplaySettings {
   final WatchTravelMode travelMode;
   final WatchUnitsMode unitsMode;
   final WatchBacklightMode backlightMode;
+  final WatchNavigationFeedbackMode hapticMode;
+  final WatchNavigationFeedbackMode glanceMode;
   final WatchMapOrientation mapOrientation;
   final WatchTileAnimationMode tileAnimationMode;
 
@@ -348,6 +352,8 @@ class WatchDisplaySettings {
     travelMode: WatchTravelMode.drive,
     unitsMode: WatchUnitsMode.metric,
     backlightMode: WatchBacklightMode.system,
+    hapticMode: WatchNavigationFeedbackMode.all,
+    glanceMode: WatchNavigationFeedbackMode.all,
     mapOrientation: WatchMapOrientation.northUp,
     tileAnimationMode: WatchTileAnimationMode.fadeIn,
   );
@@ -357,6 +363,8 @@ class WatchDisplaySettings {
     WatchTravelMode? travelMode,
     WatchUnitsMode? unitsMode,
     WatchBacklightMode? backlightMode,
+    WatchNavigationFeedbackMode? hapticMode,
+    WatchNavigationFeedbackMode? glanceMode,
     WatchMapOrientation? mapOrientation,
     WatchTileAnimationMode? tileAnimationMode,
   }) {
@@ -365,6 +373,8 @@ class WatchDisplaySettings {
       travelMode: travelMode ?? this.travelMode,
       unitsMode: unitsMode ?? this.unitsMode,
       backlightMode: backlightMode ?? this.backlightMode,
+      hapticMode: hapticMode ?? this.hapticMode,
+      glanceMode: glanceMode ?? this.glanceMode,
       mapOrientation: mapOrientation ?? this.mapOrientation,
       tileAnimationMode: tileAnimationMode ?? this.tileAnimationMode,
     );
@@ -376,6 +386,8 @@ class WatchDisplaySettings {
       'travelMode': travelMode.protocolValue,
       'unitsMode': unitsMode.protocolValue,
       'backlightMode': backlightMode.protocolValue,
+      'hapticMode': hapticMode.protocolValue,
+      'glanceMode': glanceMode.protocolValue,
       'mapOrientation': mapOrientation.protocolValue,
       'tileAnimationMode': tileAnimationMode.protocolValue,
     };
@@ -395,6 +407,12 @@ class WatchDisplaySettings {
       WatchMessage.command(WatchCommands.backlight, {
         WatchKeys.buttonId: backlightMode.protocolValue,
       }),
+      WatchMessage.command(WatchCommands.hapticMode, {
+        WatchKeys.buttonId: hapticMode.protocolValue,
+      }),
+      WatchMessage.command(WatchCommands.glanceMode, {
+        WatchKeys.buttonId: glanceMode.protocolValue,
+      }),
       WatchMessage.command(WatchCommands.mapOrientation, {
         WatchKeys.buttonId: mapOrientation.protocolValue,
       }),
@@ -412,6 +430,12 @@ class WatchDisplaySettings {
       unitsMode: WatchUnitsMode.fromProtocol(asInt(value['unitsMode'])),
       backlightMode: WatchBacklightMode.fromProtocol(
         asInt(value['backlightMode']),
+      ),
+      hapticMode: WatchNavigationFeedbackMode.fromProtocol(
+        asInt(value['hapticMode']),
+      ),
+      glanceMode: WatchNavigationFeedbackMode.fromProtocol(
+        asInt(value['glanceMode']),
       ),
       mapOrientation: WatchMapOrientation.fromProtocol(
         asInt(value['mapOrientation']),
@@ -643,6 +667,8 @@ class WatchPhoneWorker implements WatchMessageDispatcher {
   WatchTileAnimationMode tileAnimationMode = WatchTileAnimationMode.fadeIn;
   WatchUnitsMode unitsMode = WatchUnitsMode.metric;
   WatchBacklightMode backlightMode = WatchBacklightMode.system;
+  WatchNavigationFeedbackMode hapticMode = WatchNavigationFeedbackMode.all;
+  WatchNavigationFeedbackMode glanceMode = WatchNavigationFeedbackMode.all;
   @override
   ProviderStatus lastProviderStatus = const ProviderStatus.notConfigured();
 
@@ -811,6 +837,16 @@ class WatchPhoneWorker implements WatchMessageDispatcher {
           asInt(message.fields[WatchKeys.buttonId]),
         );
         return [_backlightMessage()];
+      case WatchCommands.hapticMode:
+        hapticMode = WatchNavigationFeedbackMode.fromProtocol(
+          asInt(message.fields[WatchKeys.buttonId]),
+        );
+        return [_hapticModeMessage()];
+      case WatchCommands.glanceMode:
+        glanceMode = WatchNavigationFeedbackMode.fromProtocol(
+          asInt(message.fields[WatchKeys.buttonId]),
+        );
+        return [_glanceModeMessage()];
       case WatchCommands.logEvent:
         return const [];
       default:
@@ -834,6 +870,8 @@ class WatchPhoneWorker implements WatchMessageDispatcher {
         travelMode: travelMode,
         unitsMode: unitsMode,
         backlightMode: backlightMode,
+        hapticMode: hapticMode,
+        glanceMode: glanceMode,
         mapOrientation: mapOrientation,
         tileAnimationMode: tileAnimationMode,
       );
@@ -849,6 +887,8 @@ class WatchPhoneWorker implements WatchMessageDispatcher {
     travelMode = settings.travelMode;
     unitsMode = settings.unitsMode;
     backlightMode = settings.backlightMode;
+    hapticMode = settings.hapticMode;
+    glanceMode = settings.glanceMode;
     mapOrientation = settings.mapOrientation;
     tileAnimationMode = settings.tileAnimationMode;
     final messages = [
@@ -856,6 +896,8 @@ class WatchPhoneWorker implements WatchMessageDispatcher {
       _travelModeMessage(),
       _unitsMessage(),
       _backlightMessage(),
+      _hapticModeMessage(),
+      _glanceModeMessage(),
       _mapOrientationMessage(),
       _tileAnimationMessage(),
     ];
@@ -907,6 +949,8 @@ class WatchPhoneWorker implements WatchMessageDispatcher {
       _travelModeMessage(),
       _unitsMessage(),
       _backlightMessage(),
+      _hapticModeMessage(),
+      _glanceModeMessage(),
       WatchMessage.command(WatchCommands.mapSettings, {WatchKeys.buttonId: 0}),
       _mapOrientationMessage(),
       _tileAnimationMessage(),
@@ -1607,6 +1651,18 @@ class WatchPhoneWorker implements WatchMessageDispatcher {
   WatchMessage _backlightMessage() {
     return WatchMessage.command(WatchCommands.backlight, {
       WatchKeys.buttonId: backlightMode.protocolValue,
+    });
+  }
+
+  WatchMessage _hapticModeMessage() {
+    return WatchMessage.command(WatchCommands.hapticMode, {
+      WatchKeys.buttonId: hapticMode.protocolValue,
+    });
+  }
+
+  WatchMessage _glanceModeMessage() {
+    return WatchMessage.command(WatchCommands.glanceMode, {
+      WatchKeys.buttonId: glanceMode.protocolValue,
     });
   }
 

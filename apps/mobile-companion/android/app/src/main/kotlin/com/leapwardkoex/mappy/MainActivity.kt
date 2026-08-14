@@ -50,6 +50,8 @@ class MainActivity : FlutterActivity() {
     private var nativeTravelMode = DEFAULT_TRAVEL_PROTOCOL_MODE
     private var nativeUnitsMode = DEFAULT_UNITS_MODE
     private var nativeBacklightMode = 0
+    private var nativeHapticMode = DEFAULT_HAPTIC_MODE
+    private var nativeGlanceMode = DEFAULT_GLANCE_MODE
     private var nativeMapOrientation = DEFAULT_MAP_ORIENTATION
     private var nativeTileAnimationMode = DEFAULT_TILE_ANIMATION_MODE
     private var nativeRouteGeneration = 0
@@ -2038,6 +2040,16 @@ class MainActivity : FlutterActivity() {
                 saveDisplaySettings()
                 listOf(backlightMessage())
             }
+            CMD_HAPTIC_MODE -> {
+                nativeHapticMode = feedbackModeProtocolValue(intValue(message, KEY_BUTTON_ID))
+                saveDisplaySettings()
+                listOf(hapticModeMessage())
+            }
+            CMD_GLANCE_MODE -> {
+                nativeGlanceMode = feedbackModeProtocolValue(intValue(message, KEY_BUTTON_ID))
+                saveDisplaySettings()
+                listOf(glanceModeMessage())
+            }
             CMD_MAP_ORIENTATION -> {
                 val previous = nativeMapOrientation
                 nativeMapOrientation = mapOrientationProtocolValue(intValue(message, KEY_BUTTON_ID))
@@ -2179,6 +2191,8 @@ class MainActivity : FlutterActivity() {
             travelModeMessage(),
             unitsMessage(),
             backlightMessage(),
+            hapticModeMessage(),
+            glanceModeMessage(),
             mapSettingsMessage(reason = 0),
             mapOrientationMessage(),
             tileAnimationMessage(),
@@ -3101,6 +3115,16 @@ class MainActivity : FlutterActivity() {
             messages.add(backlightMessage())
             changed = true
         }
+        intValue(settings, HAPTIC_MODE_SETTING)?.let { value ->
+            nativeHapticMode = feedbackModeProtocolValue(value)
+            messages.add(hapticModeMessage())
+            changed = true
+        }
+        intValue(settings, GLANCE_MODE_SETTING)?.let { value ->
+            nativeGlanceMode = feedbackModeProtocolValue(value)
+            messages.add(glanceModeMessage())
+            changed = true
+        }
         intValue(settings, MAP_ORIENTATION_SETTING)?.let { value ->
             val previous = nativeMapOrientation
             nativeMapOrientation = mapOrientationProtocolValue(value)
@@ -3135,7 +3159,9 @@ class MainActivity : FlutterActivity() {
                     unitsMode = nativeUnitsMode,
                     backlightMode = nativeBacklightMode,
                     mapOrientation = nativeMapOrientation,
-                    tileAnimationMode = nativeTileAnimationMode
+                    tileAnimationMode = nativeTileAnimationMode,
+                    hapticMode = nativeHapticMode,
+                    glanceMode = nativeGlanceMode
                 )
             )
         }
@@ -3146,6 +3172,8 @@ class MainActivity : FlutterActivity() {
         nativeTravelMode = settings.travelMode
         nativeUnitsMode = settings.unitsMode
         nativeBacklightMode = settings.backlightMode
+        nativeHapticMode = settings.hapticMode
+        nativeGlanceMode = settings.glanceMode
         nativeMapOrientation = settings.mapOrientation
         nativeTileAnimationMode = settings.tileAnimationMode
     }
@@ -3159,7 +3187,9 @@ class MainActivity : FlutterActivity() {
                 unitsMode = nativeUnitsMode,
                 backlightMode = nativeBacklightMode,
                 mapOrientation = nativeMapOrientation,
-                tileAnimationMode = nativeTileAnimationMode
+                tileAnimationMode = nativeTileAnimationMode,
+                hapticMode = nativeHapticMode,
+                glanceMode = nativeGlanceMode
             )
         )
     }
@@ -3270,6 +3300,12 @@ class MainActivity : FlutterActivity() {
 
     private fun backlightMessage(): Map<String, Any?> =
         watchMessage(CMD_BACKLIGHT, mapOf(KEY_BUTTON_ID to synchronized(this) { nativeBacklightMode }))
+
+    private fun hapticModeMessage(): Map<String, Any?> =
+        watchMessage(CMD_HAPTIC_MODE, mapOf(KEY_BUTTON_ID to synchronized(this) { nativeHapticMode }))
+
+    private fun glanceModeMessage(): Map<String, Any?> =
+        watchMessage(CMD_GLANCE_MODE, mapOf(KEY_BUTTON_ID to synchronized(this) { nativeGlanceMode }))
 
     private fun mapOrientationMessage(): Map<String, Any?> =
         watchMessage(

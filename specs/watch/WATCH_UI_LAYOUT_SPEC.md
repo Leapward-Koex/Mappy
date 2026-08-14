@@ -236,9 +236,9 @@ Settings/actions menu:
 
 - Minimum actions: saved-location menu, travel mode, reroute when route active,
   clear route when route active.
-- Theme/units/backlight/centered map orientation may be phone-owned UI only
-  unless watch implementation adds compact controls that match
-  `WATCH_APP_MVP.md`.
+- The eight Settings rows are Theme, Units, Backlight, Haptics, Glance,
+  Orientation, Tile animation, and Diagnostics. Haptics and Glance cycle
+  independently through All, Turns, Arrival, and Off.
 
 ## Button Behavior
 
@@ -246,7 +246,8 @@ Default map state:
 
 | Button | Behavior |
 | --- | --- |
-| Select | Open destination/actions menu. |
+| Short Select | Open destination/actions menu. |
+| Hold Select for at least 700 ms | Recenter on current GPS without opening the menu. |
 | Up | Zoom in or move menu selection when menu active. |
 | Down | Zoom out or move menu selection when menu active. |
 | Back | Exit menu, clear route confirmation, or close app according to Pebble norms. |
@@ -255,7 +256,8 @@ Active route state:
 
 | Button | Behavior |
 | --- | --- |
-| Select | Open route actions menu or request reroute if route action is focused. |
+| Short Select | Open route actions menu or request reroute if route action is focused. |
+| Hold Select for at least 700 ms | Recenter while preserving the active route and instruction. |
 | Back | First press asks/indicates route stop; second press clears route. |
 
 Touch-capable map state:

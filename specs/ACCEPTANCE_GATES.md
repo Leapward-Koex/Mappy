@@ -58,6 +58,8 @@ manual release checks before the corresponding milestone is considered done.
   preference and normalize unsupported orientation values to north-up.
 - Unit tests round-trip `CMD_TILE_ANIMATION` and normalize unsupported animation
   values to no animation.
+- Unit tests round-trip `CMD_HAPTIC_MODE` and `CMD_GLANCE_MODE`; missing or
+  unsupported values normalize to All.
 - Watch decode tests reject malformed, truncated, oversized, and unsupported
   payloads without fixed-buffer overflow.
 - Phone replay tests can handle `CMD_TILE_REQUEST`, `CMD_ROUTE_REQUEST`, and
@@ -66,6 +68,8 @@ manual release checks before the corresponding milestone is considered done.
   route, GPS, destination, or nav-step state.
 - Phone/watch replay tests can apply `CMD_TILE_ANIMATION` without clearing
   route, GPS, destination, nav-step, provider, or tile-cache state.
+- Phone/watch replay tests can apply haptic and glance presets independently
+  without clearing state or replaying consumed feedback events.
 - Phone/native tests can start a route from a resolved autocomplete destination
   without a saved-location record.
 - Missing setup state returns `CMD_ERROR_STATE` rather than silent failure.
@@ -159,11 +163,21 @@ manual release checks before the corresponding milestone is considered done.
   dots.
 - Bike and drive route lines are clipped at the current on-route GPS projection;
   moving the simulated GPS backward reveals previously hidden line segments.
-- Fresh/user-visible walking route start vibrates once, switches to maximum
-  supported map zoom, and requests visible tiles at that zoom.
-- Upcoming non-final maneuvers fire one preview vibration before the turn and one
-  stronger vibration when the turn is due; repeating the same GPS positions or
-  moving backward over thresholds does not repeat either cue.
+- Fresh/user-visible walking route start emits one feedback event, switches to
+  maximum supported map zoom, and requests visible tiles at that zoom. Only the
+  All preset outputs that event.
+- Upcoming non-final maneuvers consume one preview event before the turn and one
+  turn-now event when due; repeating GPS positions or moving backward does not
+  repeat either event, including when its outputs were disabled.
+- Haptics and Glance independently implement All, Turns, Arrival, and Off. An
+  enabled glance calls the transient interaction backlight API, does not latch
+  the light, and remains independent of the face-forward wrist-look detector.
+- Arrival always clears the trip and shows its modal even with both outputs Off.
+- Changing Haptics cancels queued Mappy vibration. Navigation feedback follows
+  its presets during Pebble Quiet Time.
+- A sub-700 ms Select press retains its normal menu action. A hold of at least
+  700 ms recenters once without opening Actions; menu holds are inert, arrival
+  holds only dismiss the modal, and no-GPS holds show `Waiting for GPS`.
 - Changing travel mode while a route is active queues a reroute and updates the
   route overlay style when the replacement route arrives.
 - Zero-point route clears route and step state.
@@ -198,6 +212,8 @@ manual release checks before the corresponding milestone is considered done.
   recenter rather than forcing an immediate camera jump.
 - Tile animation changes persist locally and push `CMD_TILE_ANIMATION` without
   clearing provider caches, re-requesting tiles, or restarting active navigation.
+- Haptic and glance changes persist locally, push their independent protocol
+  commands, survive reconnect, and are editable from both watch and phone.
 - Native bridge is the only AppMessage responder.
 - Native bridge uses PebbleKit Android 2 bound-service communication, not the
   legacy `com.getpebble.action.app.*` broadcast protocol.

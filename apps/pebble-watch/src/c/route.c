@@ -459,6 +459,34 @@ static void enqueue_arrival_vibration(void) {
   });
 }
 
+static void dispatch_navigation_feedback(NavigationFeedbackEvent event) {
+  bool haptic_allowed = navigation_feedback_mode_allows_event(s_haptic_mode,
+                                                               event);
+  bool glance_allowed = navigation_feedback_mode_allows_event(s_glance_mode,
+                                                               event);
+
+  if (glance_allowed && s_backlight_mode != 1) {
+    light_enable_interaction();
+  }
+
+  if (haptic_allowed) {
+    switch (event) {
+      case NavigationFeedbackEventRouteStart:
+        vibes_short_pulse();
+        break;
+      case NavigationFeedbackEventTurnPreview:
+        enqueue_turn_preview_vibration();
+        break;
+      case NavigationFeedbackEventTurnNow:
+        enqueue_turn_now_vibration();
+        break;
+      case NavigationFeedbackEventArrival:
+        enqueue_arrival_vibration();
+        break;
+    }
+  }
+}
+
 static bool route_destination_reached(RouteProjection gps_projection,
                                       int32_t progress) {
   if (!gps_projection.valid || s_route_point_count < 2 ||
@@ -489,7 +517,10 @@ static void finish_route_at_destination(void) {
     return;
   }
 
-  enqueue_arrival_vibration();
+  // Consume arrival before dispatch so changing feedback settings cannot
+  // replay it, even when both output channels are currently disabled.
+  s_arrival_dialog_visible = true;
+  dispatch_navigation_feedback(NavigationFeedbackEventArrival);
   cancel_menu_highlight_animation();
   complete_tile_animations();
   cancel_tile_redraw();
@@ -498,7 +529,6 @@ static void finish_route_at_destination(void) {
   int32_t completed_request_id = s_active_route_request_id;
   clear_route_local();
   s_active_route_request_id = completed_request_id;
-  s_arrival_dialog_visible = true;
   pause_map_bearing_rendering();
   s_route_complete_pending = true;
   s_route_clear_armed = false;
@@ -533,8 +563,8 @@ static void maybe_fire_turn_haptic_alert(int32_t progress) {
     if (s_turn_now_alerted_global_index != global_index) {
       s_turn_now_alerted_global_index = global_index;
       s_turn_preview_alerted_global_index = global_index;
-      enqueue_turn_now_vibration();
-      APP_LOG(APP_LOG_LEVEL_INFO, "Turn haptic now step=%d", (int)global_index);
+      dispatch_navigation_feedback(NavigationFeedbackEventTurnNow);
+      APP_LOG(APP_LOG_LEVEL_INFO, "Turn feedback now step=%d", (int)global_index);
     }
     return;
   }
@@ -542,8 +572,8 @@ static void maybe_fire_turn_haptic_alert(int32_t progress) {
   if (remaining_px >= 0 && remaining_px <= preview_px &&
       s_turn_preview_alerted_global_index != global_index) {
     s_turn_preview_alerted_global_index = global_index;
-    enqueue_turn_preview_vibration();
-    APP_LOG(APP_LOG_LEVEL_INFO, "Turn haptic preview step=%d", (int)global_index);
+    dispatch_navigation_feedback(NavigationFeedbackEventTurnPreview);
+    APP_LOG(APP_LOG_LEVEL_INFO, "Turn feedback preview step=%d", (int)global_index);
   }
 }
 
@@ -763,7 +793,7 @@ void apply_route_points(DictionaryIterator *iter) {
   if (user_visible_route && s_active_route_mode == TRAVEL_MODE_WALK &&
       s_last_walk_start_feedback_generation != s_route_generation) {
     s_last_walk_start_feedback_generation = s_route_generation;
-    vibes_short_pulse();
+    dispatch_navigation_feedback(NavigationFeedbackEventRouteStart);
     zoom_to_max_map_level();
   }
   update_state_after_map_change();

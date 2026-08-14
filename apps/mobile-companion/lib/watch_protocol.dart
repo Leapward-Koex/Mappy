@@ -55,12 +55,14 @@ abstract final class WatchCommands {
   static const units = 403;
   static const backlight = 404;
   static const declination = 405;
+  static const hapticMode = 406;
+  static const glanceMode = 407;
   static const debugCompass = 901;
   static const debugTile = 902;
   static const debugRouteProgress = 903;
 }
 
-const watchProtocolVersion = 2;
+const watchProtocolVersion = 3;
 
 const watchTileWidth = 54;
 const watchTileHeight = 63;
@@ -150,6 +152,27 @@ enum WatchBacklightMode {
     return switch (value) {
       1 => WatchBacklightMode.keepOn,
       _ => WatchBacklightMode.system,
+    };
+  }
+}
+
+enum WatchNavigationFeedbackMode {
+  all(3, 'All'),
+  turns(1, 'Turns'),
+  arrival(2, 'Arrival'),
+  off(0, 'Off');
+
+  const WatchNavigationFeedbackMode(this.protocolValue, this.label);
+
+  final int protocolValue;
+  final String label;
+
+  static WatchNavigationFeedbackMode fromProtocol(int? value) {
+    return switch (value) {
+      0 => WatchNavigationFeedbackMode.off,
+      1 => WatchNavigationFeedbackMode.turns,
+      2 => WatchNavigationFeedbackMode.arrival,
+      _ => WatchNavigationFeedbackMode.all,
     };
   }
 }
@@ -404,6 +427,8 @@ String watchCommandName(int? command) {
     WatchCommands.mapSettings => 'CMD_MAP_SETTINGS',
     WatchCommands.backlight => 'CMD_BACKLIGHT',
     WatchCommands.declination => 'CMD_DECLINATION',
+    WatchCommands.hapticMode => 'CMD_HAPTIC_MODE',
+    WatchCommands.glanceMode => 'CMD_GLANCE_MODE',
     WatchCommands.errorState => 'CMD_ERROR_STATE',
     WatchCommands.mapOrientation => 'CMD_MAP_ORIENTATION',
     WatchCommands.tileAnimation => 'CMD_TILE_ANIMATION',

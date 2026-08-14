@@ -24,6 +24,8 @@ Status labels:
 | Tile cache | MVP design | `watch/WATCH_APP_MVP.md` | Target a 5x5 visible grid on `emery`, subject to measured memory limits. |
 | Theme | MVP | `watch/WATCH_APP_MVP.md` | Theme changes clear tile cache and request fresh tiles. |
 | Backlight | MVP | `watch/WATCH_APP_MVP.md` | Watch reports startup value; phone can push user setting. |
+| Navigation feedback controls | MVP design | `watch/TURN_HAPTIC_ALERT_SPEC.md`, `shared/PROTOCOL_MVP.md` | Independent Haptics and Glance presets synchronize between watch and phone. |
+| Long-Select recenter | MVP design | `watch/WATCH_APP_MVP.md`, `watch/WATCH_TOUCH_INPUT_SPEC.md` | A 700 ms Select hold recenters the map without entering Actions. |
 | Units | MVP | `shared/PROTOCOL_MVP.md` | Phone pushes imperial/metric mode. |
 | Saved locations | MVP | `shared/PROTOCOL_MVP.md`, `mobile-companion/MOBILE_COMPANION_MVP.md` | Use a dynamic watch-visible list with 30-byte labels and a versioned payload marker. |
 | Missing saved-location ID | MVP design | `watch/WATCH_APP_MVP.md`, `shared/PROTOCOL_MVP.md` | A stale or missing ID returns category 8. |

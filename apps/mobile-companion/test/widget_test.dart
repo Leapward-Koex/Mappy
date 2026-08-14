@@ -536,6 +536,11 @@ void main() {
 
     await tester.tap(find.text('Settings').last);
     await tester.pumpAndSettle();
+    await tester.scrollUntilVisible(
+      find.text('Map Tiles'),
+      500,
+      scrollable: find.byType(Scrollable).first,
+    );
     expect(find.text('Map Tiles'), findsOneWidget);
     expect(find.text('Road'), findsWidgets);
 
@@ -583,6 +588,11 @@ void main() {
 
     await tester.tap(find.text('Settings').last);
     await tester.pumpAndSettle();
+    await tester.scrollUntilVisible(
+      find.text('Map Orientation'),
+      400,
+      scrollable: find.byType(Scrollable).first,
+    );
     expect(find.text('Map Orientation'), findsOneWidget);
 
     await tester.ensureVisible(find.text('Face forward').last);
@@ -628,6 +638,14 @@ void main() {
     expect(find.text('Units'), findsWidgets);
     expect(find.text('Default Travel Mode'), findsOneWidget);
     expect(find.text('Backlight'), findsWidgets);
+    expect(find.text('Haptics'), findsWidgets);
+    expect(find.text('Navigation Glance'), findsOneWidget);
+    expect(
+      find.text(
+        'Briefly wakes the watch backlight for selected navigation events.',
+      ),
+      findsOneWidget,
+    );
 
     await tester.tap(find.text('Night').last);
     await tester.pumpAndSettle();
@@ -639,6 +657,8 @@ void main() {
         WatchCommands.travelMode,
         WatchCommands.units,
         WatchCommands.backlight,
+        WatchCommands.hapticMode,
+        WatchCommands.glanceMode,
         WatchCommands.mapOrientation,
         WatchCommands.tileAnimation,
       ]),
@@ -663,6 +683,16 @@ void main() {
     await tester.tap(find.text('Keep on').last);
     await tester.pumpAndSettle();
     expect(watchDispatcher.backlightMode, WatchBacklightMode.keepOn);
+
+    await tester.ensureVisible(find.text('Turns').first);
+    await tester.tap(find.text('Turns').first);
+    await tester.pumpAndSettle();
+    expect(watchDispatcher.hapticMode, WatchNavigationFeedbackMode.turns);
+
+    await tester.ensureVisible(find.text('Arrival').last);
+    await tester.tap(find.text('Arrival').last);
+    await tester.pumpAndSettle();
+    expect(watchDispatcher.glanceMode, WatchNavigationFeedbackMode.arrival);
 
     await tester.ensureVisible(find.text('Fade + Zoom').last);
     await tester.tap(find.text('Fade + Zoom').last);
@@ -1773,6 +1803,8 @@ class RecordingWatchMessageDispatcher implements WatchMessageDispatcher {
   WatchTravelMode travelMode = WatchTravelMode.drive;
   WatchUnitsMode unitsMode = WatchUnitsMode.metric;
   WatchBacklightMode backlightMode = WatchBacklightMode.system;
+  WatchNavigationFeedbackMode hapticMode = WatchNavigationFeedbackMode.all;
+  WatchNavigationFeedbackMode glanceMode = WatchNavigationFeedbackMode.all;
   WatchMapOrientation mapOrientation = WatchMapOrientation.northUp;
   WatchTileAnimationMode tileAnimationMode = WatchTileAnimationMode.fadeIn;
   int orientationSaveCount = 0;
@@ -1805,6 +1837,8 @@ class RecordingWatchMessageDispatcher implements WatchMessageDispatcher {
         travelMode: travelMode,
         unitsMode: unitsMode,
         backlightMode: backlightMode,
+        hapticMode: hapticMode,
+        glanceMode: glanceMode,
         mapOrientation: mapOrientation,
         tileAnimationMode: tileAnimationMode,
       );
@@ -1835,6 +1869,8 @@ class RecordingWatchMessageDispatcher implements WatchMessageDispatcher {
     travelMode = settings.travelMode;
     unitsMode = settings.unitsMode;
     backlightMode = settings.backlightMode;
+    hapticMode = settings.hapticMode;
+    glanceMode = settings.glanceMode;
     mapOrientation = settings.mapOrientation;
     tileAnimationMode = settings.tileAnimationMode;
     displaySettingsSaveCount += 1;

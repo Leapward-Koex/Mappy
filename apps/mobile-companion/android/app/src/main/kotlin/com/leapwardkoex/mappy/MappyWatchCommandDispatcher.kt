@@ -62,6 +62,8 @@ internal class MappyWatchCommandDispatcher(
             CMD_TRAVEL_MODE -> updateScalarSetting(CMD_TRAVEL_MODE, intValue(message, KEY_BUTTON_ID))
             CMD_UNITS -> updateScalarSetting(CMD_UNITS, intValue(message, KEY_BUTTON_ID))
             CMD_BACKLIGHT -> updateScalarSetting(CMD_BACKLIGHT, intValue(message, KEY_BUTTON_ID))
+            CMD_HAPTIC_MODE -> updateScalarSetting(CMD_HAPTIC_MODE, intValue(message, KEY_BUTTON_ID))
+            CMD_GLANCE_MODE -> updateScalarSetting(CMD_GLANCE_MODE, intValue(message, KEY_BUTTON_ID))
             CMD_MAP_ORIENTATION -> updateScalarSetting(CMD_MAP_ORIENTATION, intValue(message, KEY_BUTTON_ID))
             CMD_TILE_ANIMATION -> updateScalarSetting(CMD_TILE_ANIMATION, intValue(message, KEY_BUTTON_ID))
             CMD_BUTTON, CMD_LOG_EVENT -> emptyList()
@@ -169,6 +171,8 @@ internal class MappyWatchCommandDispatcher(
             intValue(raw, TRAVEL_MODE_SETTING)?.let { next = next.copy(travelMode = travelProtocolValue(it)); messages.add(travelModeMessage(next)) }
             intValue(raw, UNITS_MODE_SETTING)?.let { next = next.copy(unitsMode = unitsProtocolValue(it)); messages.add(unitsMessage(next)) }
             intValue(raw, BACKLIGHT_MODE_SETTING)?.let { next = next.copy(backlightMode = backlightProtocolValue(it)); messages.add(backlightMessage(next)) }
+            intValue(raw, HAPTIC_MODE_SETTING)?.let { next = next.copy(hapticMode = feedbackModeProtocolValue(it)); messages.add(hapticModeMessage(next)) }
+            intValue(raw, GLANCE_MODE_SETTING)?.let { next = next.copy(glanceMode = feedbackModeProtocolValue(it)); messages.add(glanceModeMessage(next)) }
             intValue(raw, MAP_ORIENTATION_SETTING)?.let { next = next.copy(mapOrientation = mapOrientationProtocolValue(it)); messages.add(mapOrientationMessage(next)) }
             intValue(raw, TILE_ANIMATION_MODE_SETTING)?.let { next = next.copy(tileAnimationMode = tileAnimationProtocolValue(it)); messages.add(tileAnimationMessage(next)) }
             settings = next
@@ -202,7 +206,8 @@ internal class MappyWatchCommandDispatcher(
         val responses = mutableListOf(
             watchMessage(CMD_PHONE_READY, mapOf(KEY_PROTOCOL_VERSION to WATCH_PROTOCOL_VERSION)),
             themeMessage(currentSettings), travelModeMessage(currentSettings), unitsMessage(currentSettings),
-            backlightMessage(currentSettings), mapSettingsMessage(0), mapOrientationMessage(currentSettings),
+            backlightMessage(currentSettings), hapticModeMessage(currentSettings), glanceModeMessage(currentSettings),
+            mapSettingsMessage(0), mapOrientationMessage(currentSettings),
             tileAnimationMessage(currentSettings), destinationsMessage()
         )
         val providerStatus = mapTilesProvider.providerStatus()
@@ -405,33 +410,46 @@ internal class MappyWatchCommandDispatcher(
         })
 
     private fun updateScalarSetting(command: Int, value: Int?): List<Map<String, Any?>> {
-        synchronized(lock) {
+        val (updatedSettings, responses) = synchronized(lock) {
             settings = when (command) {
                 CMD_THEME -> settings.copy(themeMode = themeProtocolValue(value))
                 CMD_TRAVEL_MODE -> settings.copy(travelMode = travelProtocolValue(value))
                 CMD_UNITS -> settings.copy(unitsMode = unitsProtocolValue(value))
                 CMD_BACKLIGHT -> settings.copy(backlightMode = backlightProtocolValue(value))
+                CMD_HAPTIC_MODE -> settings.copy(hapticMode = feedbackModeProtocolValue(value))
+                CMD_GLANCE_MODE -> settings.copy(glanceMode = feedbackModeProtocolValue(value))
                 CMD_MAP_ORIENTATION -> settings.copy(mapOrientation = mapOrientationProtocolValue(value))
                 CMD_TILE_ANIMATION -> settings.copy(tileAnimationMode = tileAnimationProtocolValue(value))
                 else -> settings
             }
             saveNativeDisplaySettings(appContext, settings)
-            return when (command) {
+            val messages = when (command) {
                 CMD_THEME -> listOf(themeMessage(settings), mapSettingsMessage(4))
                 CMD_TRAVEL_MODE -> listOf(travelModeMessage(settings))
                 CMD_UNITS -> listOf(unitsMessage(settings))
                 CMD_BACKLIGHT -> listOf(backlightMessage(settings))
+                CMD_HAPTIC_MODE -> listOf(hapticModeMessage(settings))
+                CMD_GLANCE_MODE -> listOf(glanceModeMessage(settings))
                 CMD_MAP_ORIENTATION -> listOf(mapOrientationMessage(settings))
                 CMD_TILE_ANIMATION -> listOf(tileAnimationMessage(settings))
                 else -> emptyList()
             }
+            settings to messages
         }
+        eventSink(mapOf(
+            "event" to "displaySettingsChanged",
+            "source" to "watch",
+            "settings" to displaySettingsMap(updatedSettings)
+        ))
+        return responses
     }
 
     private fun themeMessage(value: NativeDisplaySettings) = watchMessage(CMD_THEME, mapOf(KEY_BUTTON_ID to value.themeMode))
     private fun travelModeMessage(value: NativeDisplaySettings) = watchMessage(CMD_TRAVEL_MODE, mapOf(KEY_BUTTON_ID to value.travelMode))
     private fun unitsMessage(value: NativeDisplaySettings) = watchMessage(CMD_UNITS, mapOf(KEY_BUTTON_ID to value.unitsMode))
     private fun backlightMessage(value: NativeDisplaySettings) = watchMessage(CMD_BACKLIGHT, mapOf(KEY_BUTTON_ID to value.backlightMode))
+    private fun hapticModeMessage(value: NativeDisplaySettings) = watchMessage(CMD_HAPTIC_MODE, mapOf(KEY_BUTTON_ID to value.hapticMode))
+    private fun glanceModeMessage(value: NativeDisplaySettings) = watchMessage(CMD_GLANCE_MODE, mapOf(KEY_BUTTON_ID to value.glanceMode))
     private fun tileAnimationMessage(value: NativeDisplaySettings) = watchMessage(CMD_TILE_ANIMATION, mapOf(KEY_BUTTON_ID to value.tileAnimationMode))
     private fun mapOrientationMessage(value: NativeDisplaySettings) = watchMessage(CMD_MAP_ORIENTATION, mapOf(
         KEY_BUTTON_ID to value.mapOrientation,

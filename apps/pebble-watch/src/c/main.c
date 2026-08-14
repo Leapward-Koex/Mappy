@@ -52,6 +52,12 @@ void load_settings(void) {
   s_tile_animation_mode = normalize_tile_animation_mode(
       persist_exists(PERSIST_TILE_ANIMATION) ?
           persist_read_int(PERSIST_TILE_ANIMATION) : TILE_ANIMATION_FADE);
+  s_haptic_mode = navigation_feedback_normalize_mode(
+      persist_exists(PERSIST_HAPTIC_MODE) ?
+          persist_read_int(PERSIST_HAPTIC_MODE) : NavigationFeedbackModeAll);
+  s_glance_mode = navigation_feedback_normalize_mode(
+      persist_exists(PERSIST_GLANCE_MODE) ?
+          persist_read_int(PERSIST_GLANCE_MODE) : NavigationFeedbackModeAll);
   s_viewport_zoom = persist_exists(PERSIST_ZOOM) ? persist_read_int(PERSIST_ZOOM) : ROUTE_WORLD_ZOOM;
   if (s_viewport_zoom < MIN_MAP_ZOOM || s_viewport_zoom > MAX_MAP_ZOOM) {
     s_viewport_zoom = ROUTE_WORLD_ZOOM;

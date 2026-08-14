@@ -330,6 +330,9 @@ class _CompanionHomeState extends State<CompanionHome> {
     if (!mounted) {
       return;
     }
+    if (event.type == 'displaySettingsChanged') {
+      unawaited(_loadDisplaySettings());
+    }
     final status = event.status;
     setState(() {
       switch (event.type) {
@@ -4824,6 +4827,16 @@ class SettingsScreen extends StatelessWidget {
               value: displaySettings.backlightMode.label,
             ),
             StatusRow(
+              icon: Icons.vibration,
+              label: 'Haptics',
+              value: displaySettings.hapticMode.label,
+            ),
+            StatusRow(
+              icon: Icons.visibility_outlined,
+              label: 'Navigation glance',
+              value: displaySettings.glanceMode.label,
+            ),
+            StatusRow(
               icon: Icons.explore_outlined,
               label: 'Map orientation',
               value: displaySettings.mapOrientation.label,
@@ -4911,6 +4924,37 @@ class SettingsScreen extends StatelessWidget {
           onChanged: (backlightMode) => onDisplaySettingsChanged(
             displaySettings.copyWith(backlightMode: backlightMode),
           ),
+        ),
+        const SizedBox(height: 12),
+        _SegmentedSetting<WatchNavigationFeedbackMode>(
+          title: 'Haptics',
+          icon: Icons.vibration,
+          value: displaySettings.hapticMode,
+          enabled: !isSavingDisplaySettings,
+          values: WatchNavigationFeedbackMode.values,
+          labelFor: (value) => value.label,
+          iconFor: _navigationFeedbackIcon,
+          onChanged: (hapticMode) => onDisplaySettingsChanged(
+            displaySettings.copyWith(hapticMode: hapticMode),
+          ),
+        ),
+        const SizedBox(height: 12),
+        _SegmentedSetting<WatchNavigationFeedbackMode>(
+          title: 'Navigation Glance',
+          icon: Icons.visibility_outlined,
+          value: displaySettings.glanceMode,
+          enabled: !isSavingDisplaySettings,
+          values: WatchNavigationFeedbackMode.values,
+          labelFor: (value) => value.label,
+          iconFor: _navigationFeedbackIcon,
+          onChanged: (glanceMode) => onDisplaySettingsChanged(
+            displaySettings.copyWith(glanceMode: glanceMode),
+          ),
+        ),
+        const SizedBox(height: 8),
+        Text(
+          'Briefly wakes the watch backlight for selected navigation events.',
+          style: Theme.of(context).textTheme.bodySmall,
         ),
         const SizedBox(height: 12),
         _SegmentedSetting<WatchMapOrientation>(
@@ -5013,6 +5057,15 @@ class SettingsScreen extends StatelessWidget {
       ],
     );
   }
+}
+
+IconData _navigationFeedbackIcon(WatchNavigationFeedbackMode mode) {
+  return switch (mode) {
+    WatchNavigationFeedbackMode.all => Icons.notifications_active_outlined,
+    WatchNavigationFeedbackMode.turns => Icons.alt_route_outlined,
+    WatchNavigationFeedbackMode.arrival => Icons.flag_outlined,
+    WatchNavigationFeedbackMode.off => Icons.notifications_off_outlined,
+  };
 }
 
 class _SegmentedSetting<T> extends StatelessWidget {

@@ -11,6 +11,7 @@
 
 #include "bearing_smoothing.h"
 #include "motion_detector.h"
+#include "navigation_feedback.h"
 #include "pan_inertia.h"
 #include "tile_codec.h"
 #include "tile_storage.h"
@@ -40,6 +41,8 @@
 #define CMD_UNITS 403
 #define CMD_BACKLIGHT 404
 #define CMD_DECLINATION 405
+#define CMD_HAPTIC_MODE 406
+#define CMD_GLANCE_MODE 407
 #define CMD_DEBUG_COMPASS 901
 #define CMD_DEBUG_TILE 902
 #define CMD_DEBUG_ROUTE_PROGRESS 903
@@ -69,7 +72,7 @@
 #define MESSAGE_KEY_protocol_version 71
 #endif
 
-#define WATCH_PROTOCOL_VERSION 2
+#define WATCH_PROTOCOL_VERSION 3
 
 #define DEFAULT_TILE_W 54
 #define DEFAULT_TILE_H 63
@@ -137,6 +140,8 @@
 #define PERSIST_MAP_ORIENTATION 5
 #define PERSIST_UNITS 6
 #define PERSIST_TILE_ANIMATION 7
+#define PERSIST_HAPTIC_MODE 8
+#define PERSIST_GLANCE_MODE 9
 #define TILE_ANIMATION_NONE 0
 #define TILE_ANIMATION_FADE 1
 #define TILE_ANIMATION_FADE_ZOOM 2
@@ -302,11 +307,12 @@ typedef struct {
 } MapRenderTransform;
 
 typedef struct {
-  bool pending;
   int category;
   int detail;
   int detail2;
-  char text[MAX_INSTRUCTION_BYTES + 1];
+  // Queued diagnostics are always static app strings; retaining the pointer
+  // avoids duplicating the same bounded text in every queue slot.
+  const char *text;
 } PendingLogEvent;
 
 typedef enum {
@@ -450,6 +456,8 @@ extern int s_backlight_mode;
 extern int s_map_orientation;
 extern int s_units_mode;
 extern int s_tile_animation_mode;
+extern int s_haptic_mode;
+extern int s_glance_mode;
 extern int s_tile_width;
 extern int s_tile_height;
 extern int s_tile_pixels;
@@ -709,6 +717,8 @@ void send_units(void);
 void send_backlight(void);
 void send_map_orientation(void);
 void send_tile_animation(void);
+void send_haptic_mode(void);
+void send_glance_mode(void);
 void send_nav_steps_request(void);
 bool apply_destinations_payload(const uint8_t *data, uint16_t len);
 void apply_gps(DictionaryIterator *iter);
@@ -751,6 +761,7 @@ void change_zoom(int delta);
 void up_click_handler(ClickRecognizerRef recognizer, void *context);
 void down_click_handler(ClickRecognizerRef recognizer, void *context);
 void select_click_handler(ClickRecognizerRef recognizer, void *context);
+void select_long_click_handler(ClickRecognizerRef recognizer, void *context);
 void back_click_handler(ClickRecognizerRef recognizer, void *context);
 void click_config_provider(void *context);
 GColor chrome_bg(void);

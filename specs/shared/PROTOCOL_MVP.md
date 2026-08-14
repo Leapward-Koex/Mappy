@@ -63,7 +63,7 @@ by domain so additions remain predictable and reviewable.
 | `gps_accuracy_cm` | 68 | phone -> watch | Optional horizontal accuracy in centimeters, or `-1` if unavailable. |
 | `gps_provider` | 69 | phone -> watch | Optional short provider label, for example `gps` or `network`. |
 | `request_id` | 70 | both | Positive request identity for tile and route delivery; responses must echo it. |
-| `protocol_version` | 71 | both | Mandatory protocol version; current phone and watch require version 2. |
+| `protocol_version` | 71 | both | Mandatory protocol version; current phone and watch require version 3. |
 
 Phone and watch code use the same `world_x`, `world_y`, and `tile_zoom` names so
 wire data and internal geometry remain unambiguous.
@@ -77,7 +77,7 @@ MVP commands:
 | 101 | `CMD_INIT` | watch -> phone | Watch ready; sends persisted settings. |
 | 102 | `CMD_ERROR_STATE` | phone -> watch | Recoverable error/status message. |
 | 103 | `CMD_LOG_EVENT` | watch -> phone | Structured diagnostic event. |
-| 104 | `CMD_PHONE_READY` | phone -> watch | Confirms protocol version 2 and completes the startup handshake. |
+| 104 | `CMD_PHONE_READY` | phone -> watch | Confirms protocol version 3 and completes the startup handshake. |
 | 201 | `CMD_GPS` | phone -> watch | Current location as zoom-16 world pixels plus heading. |
 | 202 | `CMD_TILE_REQUEST` | watch -> phone | Request one map tile crop using the current negotiated rendered tile size. |
 | 203 | `CMD_TILE` | phone -> watch | Packed map tile crop with explicit width/height; may arrive in multiple chunks. |
@@ -99,6 +99,8 @@ MVP commands:
 | 403 | `CMD_UNITS` | phone -> watch | Display units. |
 | 404 | `CMD_BACKLIGHT` | phone -> watch | Backlight setting, if supported. |
 | 405 | `CMD_DECLINATION` | phone -> watch | Optional magnetic declination correction in centidegrees. |
+| 406 | `CMD_HAPTIC_MODE` | both | Navigation haptic feedback preset. |
+| 407 | `CMD_GLANCE_MODE` | both | Navigation backlight-glance feedback preset. |
 
 Debug-only emulator/test commands:
 
@@ -115,21 +117,21 @@ Post-MVP features continue the grouped command ranges defined here.
 
 ## Lifecycle
 
-Protocol version 2 is mandatory. `CMD_INIT` and `CMD_PHONE_READY` both carry
-`protocol_version = 2`. A missing or different value is a terminal
+Protocol version 3 is mandatory. `CMD_INIT` and `CMD_PHONE_READY` both carry
+`protocol_version = 3`. A missing or different value is a terminal
 synchronization error for that session: the phone records a diagnostic and the
 watch displays an update-required state. There is no legacy fallback or payload
 downgrade.
 
 Startup:
 
-1. Watch initializes AppMessage and sends `CMD_INIT` with protocol version 2.
+1. Watch initializes AppMessage and sends `CMD_INIT` with protocol version 3.
 2. `CMD_INIT` includes persisted settings:
    - `tile_zoom`: theme mode, `0` auto, `1` day, `2` night.
    - `button_id`: travel mode, `0` walk, `1` bike, `2` drive.
    - `total_bytes`: backlight mode, `0` auto, `1` always on.
    - `chunk_offset`: centered-map orientation, `0` north up, `1` facing up.
-3. Phone sends `CMD_PHONE_READY` with protocol version 2. Only this reply
+3. Phone sends `CMD_PHONE_READY` with protocol version 3. Only this reply
    completes watch initialization.
 4. Phone worker verifies that MVP prerequisites are available:
    - phone location permission,
@@ -391,10 +393,10 @@ Behavior:
 - If the active route mode is walk or bike, the watch route display must include
   the required provider warning for beta pedestrian/bicycling routes.
 - If the active route mode is walk and the successful route response is
-  fresh/user-visible, the watch gives exactly one short vibration and moves the
-  viewport to its maximum supported map zoom before requesting tiles for the
-  walking route. Silent route refreshes and route-detail windows do not trigger
-  this behavior.
+  fresh/user-visible, the watch consumes one route-start feedback event and
+  moves the viewport to its maximum supported map zoom before requesting tiles
+  for the walking route. Only an All feedback preset produces output for that
+  event. Silent route refreshes and route-detail windows do not trigger it.
 
 Phone-initiated Navigate Now search is not represented by a watch-originated
 `CMD_ROUTE_REQUEST`, because no watch button event occurred. Flutter asks the
@@ -443,9 +445,9 @@ with `CMD_ERROR_STATE` category 7 so the watch has user-visible text. Successful
 routes must contain 2..128 points; one-point routes are invalid provider output.
 
 For successful walking routes, `button_id = 1` means this is a user-visible
-walking route start and the watch performs the one-shot haptic plus maximum-zoom
-start behavior. `button_id = 0` means a silent refresh and must not vibrate or
-force zoom.
+walking route start and the watch performs the one-shot policy-controlled
+feedback plus maximum-zoom start behavior. `button_id = 0` means a silent
+refresh and must not produce feedback or force zoom.
 
 For nonzero route payloads, `is_color` is the route mode that controls watch
 route rendering and future active-route reroutes. It is required for
@@ -569,10 +571,13 @@ without making another network call.
 | `CMD_DECLINATION` | phone -> watch | `button_id`: signed magnetic declination correction in centidegrees, `-36000..36000` |
 | `CMD_MAP_ORIENTATION` | both | `button_id`: `0` north up, `1` facing up |
 | `CMD_TILE_ANIMATION` | both | `button_id`: `0` no animation, `1` fade in, `2` fade + zoom |
+| `CMD_HAPTIC_MODE` | both | `button_id`: `0` off, `1` turns, `2` arrival, `3` all |
+| `CMD_GLANCE_MODE` | both | `button_id`: `0` off, `1` turns, `2` arrival, `3` all |
 
 The watch may persist theme, travel mode, backlight, centered map orientation,
-and tile animation for fast startup. The phone persists the user-visible
-settings and reconciles them after `CMD_INIT`. If the watch changes
+tile animation, haptic mode, and glance mode for fast startup. The phone
+persists the user-visible settings and reconciles them after `CMD_INIT`. If the
+watch changes
 `CMD_TRAVEL_MODE` while an active route is displayed and the selected mode
 differs from the active route mode, the watch queues a `CMD_ROUTE_REQUEST`
 active-route reroute using the new mode.
@@ -648,6 +653,24 @@ On receipt, the watch must:
    caches unchanged.
 4. Apply the new value only to future tile arrivals, except for the immediate
    completion behavior required when switching to `0`.
+
+### `CMD_HAPTIC_MODE = 406` and `CMD_GLANCE_MODE = 407`
+
+Direction: both.
+
+Both commands use the same feedback preset encoding: `0` off, `1` turns,
+`2` arrival, and `3` all. Missing or unsupported values normalize to `3` all.
+`Turns` covers turn preview and turn-now events, `Arrival` covers only route
+completion, and `All` additionally covers a fresh user-visible walking route
+start. The haptic and glance modes are independent and changing either affects
+future one-shot events only; it must not reset alert indexes or replay an event
+whose threshold was already consumed.
+
+The watch persists locally selected values and sends them to the phone. The
+phone persists connected-watch updates, exposes both controls to the user, and
+resends its durable values after startup reconciliation. `CMD_GLANCE_MODE`
+requests a normal transient interaction backlight wake, not an always-on light
+or a wrist-motion subscription.
 
 ## Error Command
 
@@ -726,12 +749,13 @@ any external server by MVP code.
   watch UUID across every protocol peer and emulator script.
 - Watch and phone command constants include `CMD_MAP_SETTINGS = 204`,
   `CMD_MAP_ORIENTATION = 205`, `CMD_TILE_ANIMATION = 206`, and
-  `CMD_DECLINATION = 405`.
+  `CMD_DECLINATION = 405`, `CMD_HAPTIC_MODE = 406`, and
+  `CMD_GLANCE_MODE = 407`.
 - A unit test round-trips each binary payload type.
 - A protocol replay test can feed `CMD_TILE_REQUEST`, `CMD_ROUTE_REQUEST`,
-  `CMD_NAV_STEPS`, `CMD_MAP_SETTINGS`, `CMD_MAP_ORIENTATION`, and
-  `CMD_TILE_ANIMATION` messages into the phone/watch harness without a physical
-  watch.
+  `CMD_NAV_STEPS`, `CMD_MAP_SETTINGS`, `CMD_MAP_ORIENTATION`,
+  `CMD_TILE_ANIMATION`, `CMD_HAPTIC_MODE`, and `CMD_GLANCE_MODE` messages into
+  the phone/watch harness without a physical watch.
 - A watch-side decode test rejects oversized destination, route, and nav-step
   payloads without writing past fixed buffers.
 - A missing Google API key produces `CMD_ERROR_STATE` rather than a silent

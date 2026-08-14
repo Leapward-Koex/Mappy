@@ -25,8 +25,11 @@ Fixture mode must:
 
 - be opt-in through a build-time flag or an explicit emulator tooling command,
 - generate deterministic synthetic map, route, and destination payloads with no API key,
-- send startup settings, destinations, GPS, map tiles, route points, and nav
-  steps through the same AppMessage command IDs used by production,
+- send startup settings, including protocol-v3 Haptics and Glance defaults,
+  destinations, GPS, map tiles, route points, and nav steps through the same
+  AppMessage command IDs used by production,
+- echo watch-originated `CMD_HAPTIC_MODE` and `CMD_GLANCE_MODE` values for
+  bidirectional Settings testing,
 - make screenshots visibly distinct during startup before GPS/tiles arrive,
 - avoid any provider or network request at runtime,
 - remain scoped to Pebble emulator testing and local development.
