@@ -13,6 +13,7 @@ typedef enum {
 } SettingsRow;
 
 void recenter_viewport(void) {
+  settle_pan_motion();
   if (!s_has_gps) {
     set_bottom_text("Waiting for GPS");
     return;
@@ -27,13 +28,77 @@ void recenter_viewport(void) {
   }
   sync_map_bearing_smoothing(true);
   update_state_after_map_change();
-  queue_visible_tiles();
+  if (!s_tile_requests_interaction_paused) {
+    queue_visible_tiles();
+  }
   refresh_motion_detection_service();
   layer_mark_dirty(s_map_layer);
 }
 
 
 #ifdef PBL_TOUCH
+static PanInertiaState s_pan_inertia;
+static time_t s_pan_clock_seconds;
+static uint16_t s_pan_clock_ms;
+static bool s_pan_clock_valid;
+static bool s_pan_settlement_pending;
+static bool s_touch_teardown;
+
+#ifdef MAPPY_WATCH_PHONE_MODE_FIXTURE
+static int32_t saturating_viewport_add(int32_t value, int32_t delta) {
+  if (delta > 0 && value > INT32_MAX - delta) {
+    return INT32_MAX;
+  }
+  if (delta < 0 && value < INT32_MIN - delta) {
+    return INT32_MIN;
+  }
+  return value + delta;
+}
+#endif
+
+static int32_t saturating_viewport_subtract(int32_t value, int32_t delta) {
+  if (delta > 0 && value < INT32_MIN + delta) {
+    return INT32_MIN;
+  }
+  if (delta < 0 && value > INT32_MAX + delta) {
+    return INT32_MAX;
+  }
+  return value - delta;
+}
+
+static void reset_pan_clock(void) {
+  s_pan_clock_seconds = 0;
+  s_pan_clock_ms = 0;
+  s_pan_clock_valid = false;
+}
+
+static void start_pan_clock(void) {
+  time_ms(&s_pan_clock_seconds, &s_pan_clock_ms);
+  s_pan_clock_valid = true;
+}
+
+static uint32_t consume_pan_clock_elapsed_ms(void) {
+  time_t now_seconds;
+  uint16_t now_ms;
+  time_ms(&now_seconds, &now_ms);
+  if (!s_pan_clock_valid) {
+    s_pan_clock_seconds = now_seconds;
+    s_pan_clock_ms = now_ms;
+    s_pan_clock_valid = true;
+    return 0;
+  }
+
+  int64_t elapsed =
+      ((int64_t)now_seconds - (int64_t)s_pan_clock_seconds) * 1000 +
+      (int32_t)now_ms - (int32_t)s_pan_clock_ms;
+  s_pan_clock_seconds = now_seconds;
+  s_pan_clock_ms = now_ms;
+  if (elapsed <= 0) {
+    return 0;
+  }
+  return elapsed > UINT32_MAX ? UINT32_MAX : (uint32_t)elapsed;
+}
+
 void reset_touch_state(void) {
   s_touch_active = false;
   s_transient_zoom_scale_q8 = TRANSIENT_SCALE_Q8_ONE;
@@ -68,43 +133,107 @@ static bool apply_pan_interaction_position(int16_t screen_x, int16_t screen_y,
   screen_delta_to_world_delta(screen_x - s_touch_start_x,
                               screen_y - s_touch_start_y,
                               &world_dx, &world_dy);
-  int32_t next_viewport_x = s_touch_start_viewport_x - world_dx;
-  int32_t next_viewport_y = s_touch_start_viewport_y - world_dy;
-  if (next_viewport_x == s_viewport_x && next_viewport_y == s_viewport_y) {
+  int32_t next_viewport_x = saturating_viewport_subtract(
+      s_touch_start_viewport_x, world_dx);
+  int32_t next_viewport_y = saturating_viewport_subtract(
+      s_touch_start_viewport_y, world_dy);
+  bool changed = next_viewport_x != s_viewport_x ||
+      next_viewport_y != s_viewport_y;
+  if (changed) {
+    s_viewport_x = next_viewport_x;
+    s_viewport_y = next_viewport_y;
+  }
+  // Observe even an unchanged liftoff so a held release invalidates velocity.
+  pan_inertia_observe(&s_pan_inertia, s_viewport_x, s_viewport_y,
+                      consume_pan_clock_elapsed_ms());
+#ifdef MAPPY_WATCH_HARDWARE_PERF
+  if (changed) {
+    hardware_perf_note_pan_input(hardware_perf_input_seconds,
+                                 hardware_perf_input_ms);
+  }
+#endif
+  if (changed && mark_dirty && s_map_layer) {
+    layer_mark_dirty(s_map_layer);
+  }
+  return changed;
+}
+
+static bool settle_pan_motion_internal(bool mark_dirty, bool cancelled) {
+  (void)cancelled;
+  bool should_settle = s_pan_settlement_pending;
+#ifdef MAPPY_WATCH_HARDWARE_PERF
+  uint8_t inertia_ticks = s_pan_inertia.tick_count;
+#endif
+  pan_inertia_cancel(&s_pan_inertia);
+  reset_pan_clock();
+  reset_touch_state();
+  if (!should_settle) {
     return false;
   }
-  s_viewport_x = next_viewport_x;
-  s_viewport_y = next_viewport_y;
+
+  s_pan_settlement_pending = false;
 #ifdef MAPPY_WATCH_HARDWARE_PERF
-  hardware_perf_note_pan_input(hardware_perf_input_seconds,
-                               hardware_perf_input_ms);
+  hardware_perf_pan_settled(inertia_ticks, cancelled);
 #endif
+  s_manual_pan = true;
+  sync_map_bearing_smoothing(false);
+  update_state_after_map_change();
+  resume_tile_requests_after_interaction();
+  refresh_motion_detection_service();
   if (mark_dirty && s_map_layer) {
     layer_mark_dirty(s_map_layer);
   }
   return true;
 }
 
+static void cancel_pan_for_new_touch(void) {
+#ifdef MAPPY_WATCH_HARDWARE_PERF
+  if (s_pan_settlement_pending) {
+    hardware_perf_pan_settled(s_pan_inertia.tick_count, true);
+  }
+#endif
+  pan_inertia_cancel(&s_pan_inertia);
+  reset_pan_clock();
+  reset_touch_state();
+  release_visual_animation_tick_if_idle();
+}
+
 static void finish_touch_pan(bool apply_final_position, int16_t screen_x,
-                             int16_t screen_y) {
+                             int16_t screen_y, bool allow_inertia) {
   if (!s_touch_active) {
     return;
   }
+  bool changed = false;
   if (apply_final_position) {
-    apply_pan_interaction_position(screen_x, screen_y, false);
+    changed = apply_pan_interaction_position(screen_x, screen_y, false);
   }
   reset_touch_state();
   s_manual_pan = true;
   sync_map_bearing_smoothing(false);
-  update_state_after_map_change();
-  resume_tile_requests_after_interaction();
-  refresh_motion_detection_service();
-  if (s_map_layer) {
-    layer_mark_dirty(s_map_layer);
+
+  bool inertia_started = allow_inertia && pan_inertia_start(&s_pan_inertia);
+#ifdef MAPPY_WATCH_HARDWARE_PERF
+  hardware_perf_pan_release(inertia_started);
+#endif
+  if (inertia_started) {
+    start_pan_clock();
+    schedule_visual_animation_tick();
+    if (s_visual_animation_timer) {
+      if (changed && s_map_layer) {
+        layer_mark_dirty(s_map_layer);
+      }
+      return;
+    }
+    // AppTimer exhaustion must not leave requests paused indefinitely.
+    pan_inertia_cancel(&s_pan_inertia);
   }
+  settle_pan_motion_internal(true, false);
 }
 
 void begin_pan_interaction(int16_t screen_x, int16_t screen_y) {
+  // A new finger takes ownership of the current coast position. Keep the tile
+  // pause in force so requests are not briefly resumed between gestures.
+  cancel_pan_for_new_touch();
 #ifdef MAPPY_WATCH_HARDWARE_PERF
   hardware_perf_begin_pan();
 #endif
@@ -116,6 +245,9 @@ void begin_pan_interaction(int16_t screen_x, int16_t screen_y) {
   s_touch_start_viewport_x = s_viewport_x;
   s_touch_start_viewport_y = s_viewport_y;
   s_manual_pan = true;
+  s_pan_settlement_pending = true;
+  pan_inertia_reset(&s_pan_inertia, s_viewport_x, s_viewport_y);
+  start_pan_clock();
   refresh_motion_detection_service();
   sync_map_bearing_smoothing(false);
   if (s_map_layer) {
@@ -129,13 +261,94 @@ void update_pan_interaction(int16_t screen_x, int16_t screen_y) {
 }
 
 void end_pan_interaction(int16_t screen_x, int16_t screen_y) {
-  finish_touch_pan(true, screen_x, screen_y);
+  finish_touch_pan(true, screen_x, screen_y, true);
 }
 
+bool pan_inertia_animation_active(void) {
+  return pan_inertia_is_active(&s_pan_inertia);
+}
+
+bool advance_pan_inertia_animation(void) {
+  if (!pan_inertia_is_active(&s_pan_inertia)) {
+    return false;
+  }
+  bool changed = pan_inertia_advance(&s_pan_inertia,
+                                      consume_pan_clock_elapsed_ms(),
+                                      &s_viewport_x, &s_viewport_y);
+  if (!pan_inertia_is_active(&s_pan_inertia)) {
+    // Return a changed frame for settlement too, but let the shared scheduler
+    // perform the callback's single coalesced layer dirty.
+    changed = settle_pan_motion_internal(false, false) || changed;
+  }
+  return changed;
+}
+
+void settle_pan_motion(void) {
+  settle_pan_motion_internal(true, true);
+  release_visual_animation_tick_if_idle();
+}
+
+void cancel_pan_motion_for_teardown(void) {
+#ifdef MAPPY_WATCH_HARDWARE_PERF
+  if (s_pan_settlement_pending) {
+    hardware_perf_pan_settled(s_pan_inertia.tick_count, true);
+  }
+  hardware_perf_flush_pan();
+#endif
+  pan_inertia_cancel(&s_pan_inertia);
+  reset_pan_clock();
+  reset_touch_state();
+  s_pan_settlement_pending = false;
+  s_touch_teardown = true;
+  if (s_touch_subscribed) {
+    touch_service_unsubscribe();
+    s_touch_subscribed = false;
+  }
+  if (s_tile_request_resume_timer) {
+    app_timer_cancel(s_tile_request_resume_timer);
+    s_tile_request_resume_timer = NULL;
+  }
+}
+
+#ifdef MAPPY_WATCH_PHONE_MODE_FIXTURE
+bool fixture_start_pan_inertia(int32_t viewport_dx, int32_t viewport_dy,
+                               uint16_t elapsed_ms) {
+  cancel_pan_for_new_touch();
+  pause_tile_requests_for_interaction();
+  complete_gps_smoothing();
+  s_manual_pan = true;
+  s_pan_settlement_pending = true;
+  pan_inertia_reset(&s_pan_inertia, s_viewport_x, s_viewport_y);
+  s_viewport_x = saturating_viewport_add(s_viewport_x, viewport_dx);
+  s_viewport_y = saturating_viewport_add(s_viewport_y, viewport_dy);
+  pan_inertia_observe(&s_pan_inertia, s_viewport_x, s_viewport_y, elapsed_ms);
+  sync_map_bearing_smoothing(false);
+  refresh_motion_detection_service();
+  if (!pan_inertia_start(&s_pan_inertia)) {
+    settle_pan_motion_internal(true, false);
+    return false;
+  }
+
+  start_pan_clock();
+  schedule_visual_animation_tick();
+  if (!s_visual_animation_timer) {
+    pan_inertia_cancel(&s_pan_inertia);
+    settle_pan_motion_internal(true, true);
+    return false;
+  }
+  if (s_map_layer) {
+    layer_mark_dirty(s_map_layer);
+  }
+  return true;
+}
+#endif
+
 void touch_handler(const TouchEvent *event, void *context) {
-  if (!event || s_menu_mode != MenuNone || !touch_service_is_enabled()) {
+  if (!event || s_menu_mode != MenuNone || s_arrival_dialog_visible ||
+      !touch_service_is_enabled()) {
     if (event && !touch_service_is_enabled()) {
       log_touch_disabled_once();
+      settle_pan_motion();
     }
     return;
   }
@@ -162,7 +375,8 @@ void touch_handler(const TouchEvent *event, void *context) {
 }
 
 void update_touch_subscription(void) {
-  bool should_subscribe = s_menu_mode == MenuNone && s_has_gps;
+  bool should_subscribe = !s_touch_teardown && s_menu_mode == MenuNone &&
+      !s_arrival_dialog_visible && s_has_gps;
   bool touch_enabled = should_subscribe && touch_service_is_enabled();
   if (touch_enabled && !s_touch_subscribed) {
     touch_service_subscribe(touch_handler, NULL);
@@ -171,11 +385,9 @@ void update_touch_subscription(void) {
     log_pinch_unavailable_once();
 #endif
   } else if ((!touch_enabled || !should_subscribe) && s_touch_subscribed) {
-    if (s_touch_active) {
-      // Menu transitions and service loss finalize the last accepted position
-      // through the same scheduler path so tile dispatch cannot remain paused.
-      finish_touch_pan(false, 0, 0);
-    }
+    // Menu/modal transitions and service loss settle the last accepted
+    // position so tile dispatch cannot remain paused.
+    settle_pan_motion();
     touch_service_unsubscribe();
     s_touch_subscribed = false;
     reset_touch_state();
@@ -184,6 +396,30 @@ void update_touch_subscription(void) {
   }
 }
 #else
+bool pan_inertia_animation_active(void) {
+  return false;
+}
+
+bool advance_pan_inertia_animation(void) {
+  return false;
+}
+
+void settle_pan_motion(void) {
+}
+
+void cancel_pan_motion_for_teardown(void) {
+}
+
+#ifdef MAPPY_WATCH_PHONE_MODE_FIXTURE
+bool fixture_start_pan_inertia(int32_t viewport_dx, int32_t viewport_dy,
+                               uint16_t elapsed_ms) {
+  (void)viewport_dx;
+  (void)viewport_dy;
+  (void)elapsed_ms;
+  return false;
+}
+#endif
+
 void update_touch_subscription(void) {
   s_transient_zoom_scale_q8 = TRANSIENT_SCALE_Q8_ONE;
 }
@@ -195,6 +431,7 @@ bool has_active_route(void) {
 }
 
 void open_menu(MenuMode mode) {
+  settle_pan_motion();
   bool opening_overlay = s_menu_mode == MenuNone;
   complete_tile_animations();
   s_menu_mode = mode;
@@ -494,6 +731,7 @@ void select_menu_item(void) {
 
 
 bool set_viewport_zoom(int next_zoom, int notification_delta) {
+  settle_pan_motion();
   complete_gps_smoothing();
   s_transient_zoom_scale_q8 = TRANSIENT_SCALE_Q8_ONE;
   if (next_zoom < MIN_MAP_ZOOM) {
@@ -527,7 +765,9 @@ bool set_viewport_zoom(int next_zoom, int notification_delta) {
       send_zoom_button(delta > 0 ? 1 : -1);
     }
   }
-  queue_visible_tiles();
+  if (!s_tile_requests_interaction_paused) {
+    queue_visible_tiles();
+  }
   layer_mark_dirty(s_map_layer);
   return true;
 }
@@ -543,6 +783,7 @@ void change_zoom(int delta) {
 }
 
 void up_click_handler(ClickRecognizerRef recognizer, void *context) {
+  settle_pan_motion();
   if (dismiss_arrival_dialog()) {
     return;
   }
@@ -560,6 +801,7 @@ void up_click_handler(ClickRecognizerRef recognizer, void *context) {
 }
 
 void down_click_handler(ClickRecognizerRef recognizer, void *context) {
+  settle_pan_motion();
   if (dismiss_arrival_dialog()) {
     return;
   }
@@ -577,6 +819,7 @@ void down_click_handler(ClickRecognizerRef recognizer, void *context) {
 }
 
 void select_click_handler(ClickRecognizerRef recognizer, void *context) {
+  settle_pan_motion();
   if (dismiss_arrival_dialog()) {
     return;
   }
@@ -589,6 +832,7 @@ void select_click_handler(ClickRecognizerRef recognizer, void *context) {
 }
 
 void back_click_handler(ClickRecognizerRef recognizer, void *context) {
+  settle_pan_motion();
   if (dismiss_arrival_dialog()) {
     return;
   }

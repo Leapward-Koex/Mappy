@@ -82,6 +82,25 @@ manual release checks before the corresponding milestone is considered done.
 - Visible tile cache covers full target screen for worst-case crop alignment.
 - On real `emery` hardware with `PBL_TOUCH` enabled, single-finger pan changes
   the viewport and produces only normal tile requests.
+- A qualifying recent fast liftoff coasts watch-locally in the release direction
+  for 1..12 logical 30 ms ticks, no more than 360 ms and approximately 70 px.
+  Slow, tap, held, and stale releases settle immediately.
+- Tile requests and new tile-response decoding remain paused during drag and
+  kinetic coast, and kinetic scheduler frames do not initiate route-detail
+  requests. Settlement rebuilds request coverage once and resumes normal tile
+  requests once after the existing 100 ms grace period; the visible grid
+  completes within 5 seconds without transfer error.
+- A new touchdown interrupts kinetic coast at its current viewport without an
+  intermediate request resume. Menu/modal opening, zoom, recenter, touch loss,
+  and other button actions settle before acting; teardown cancels without
+  restarting work.
+- Kinetic pan uses the existing shared visual scheduler and adds no heap
+  allocation or phone/protocol/settings surface. Measured with
+  `arm-none-eabi-size` against an identical-mode baseline, it grows production
+  data+BSS by at most 64 bytes and the production binary by at most 3 KiB.
+- On real `emery`, kinetic pan meets p95 input-to-first-changed-frame latency of
+  at most 100 ms, p95 north-up coast draw time of at most 50 ms, no coast draw
+  over 100 ms, and settlement within 450 ms.
 - On real `emery` hardware with reliable pinch or multi-touch data, pinch out
   zooms in and pinch in zooms out using only existing `CMD_BUTTON` zoom
   notifications plus normal tile requests. If smooth pinch zoom is not shipped,

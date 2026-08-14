@@ -569,6 +569,7 @@ bool dismiss_arrival_dialog(void) {
     return false;
   }
   s_arrival_dialog_visible = false;
+  update_touch_subscription();
   resume_map_bearing_rendering();
   update_state_after_map_change();
   s_tile_redraw_deferred = false;
@@ -712,6 +713,7 @@ void apply_route_points(DictionaryIterator *iter) {
   bool dismissed_arrival_dialog = s_arrival_dialog_visible;
   s_arrival_dialog_visible = false;
   if (dismissed_arrival_dialog) {
+    update_touch_subscription();
     resume_map_bearing_rendering();
   }
   bool user_visible_route = !fresh_tuple || fresh_tuple->value->int32 != 0;

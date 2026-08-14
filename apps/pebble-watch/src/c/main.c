@@ -12,6 +12,7 @@ void window_load(Window *window) {
 }
 
 void window_unload(Window *window) {
+  cancel_pan_motion_for_teardown();
   s_menu_mode = MenuNone;
   stop_motion_detection_service();
   update_touch_subscription();
@@ -123,6 +124,7 @@ void init(void) {
 void deinit(void) {
   cancel_init_retry();
   cancel_route_action_retry();
+  cancel_pan_motion_for_teardown();
   s_menu_mode = MenuNone;
   stop_motion_detection_service();
   stop_compass_service();
