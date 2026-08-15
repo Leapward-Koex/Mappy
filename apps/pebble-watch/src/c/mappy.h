@@ -145,11 +145,13 @@
 #define TILE_ANIMATION_NONE 0
 #define TILE_ANIMATION_FADE 1
 #define TILE_ANIMATION_FADE_ZOOM 2
-#define TILE_ANIMATION_FADE_MS 480
-#define TILE_ANIMATION_FADE_ZOOM_MS 640
+#define TILE_ANIMATION_FADE_MS 180
+#define TILE_ANIMATION_FADE_ZOOM_MS 220
 #define VISUAL_ANIMATION_TICK_MS 30
+#define TILE_ANIMATION_TICK_MS 40
+#define TILE_ANIMATION_MAX_ACTIVE 2
 #define BEARING_SMOOTHING_MAX_CATCHUP_TICKS 4
-#define TILE_ANIMATION_ZOOM_START_Q8 205
+#define TILE_ANIMATION_ZOOM_START_Q8 236
 #define TILE_REQUEST_STALE_MS 8000
 #define TILE_REQUEST_WATCHDOG_MS 1000
 #define TILE_REQUEST_MAX_FLIGHTS 2
@@ -637,6 +639,8 @@ bool orientation_tile_coverage_changed(void);
 uint16_t tile_animation_duration_ms(uint8_t mode);
 uint16_t tile_animation_elapsed_ms(const TileCacheEntry *entry);
 uint16_t tile_animation_progress_q8(const TileCacheEntry *entry);
+uint16_t tile_animation_progress_at_q8(const TileCacheEntry *entry,
+                                       time_t now_s, uint16_t now_ms);
 uint16_t tile_animation_eased_q8(uint16_t progress_q8);
 void complete_tile_animation(TileCacheEntry *entry);
 bool any_tile_animation_active(void);

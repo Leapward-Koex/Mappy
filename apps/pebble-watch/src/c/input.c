@@ -246,6 +246,10 @@ void begin_pan_interaction(int16_t screen_x, int16_t screen_y) {
 #endif
   pause_tile_requests_for_interaction();
   complete_gps_smoothing();
+  // Prioritize direct manipulation over decorative tile work. New tile
+  // animations are already suppressed while touch is active, but an animation
+  // that started before touch would otherwise keep forcing full map redraws.
+  complete_tile_animations();
   s_touch_active = true;
   s_touch_start_x = screen_x;
   s_touch_start_y = screen_y;

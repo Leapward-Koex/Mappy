@@ -186,7 +186,7 @@ static int32_t q8_to_nearest_int(int32_t value) {
 typedef struct {
   TileCacheEntry *entry;
   const uint8_t *stored;
-  uint16_t progress_q8;
+  uint16_t visibility_q8;
   uint16_t scale_q8;
 } RotatedTileCell;
 
@@ -250,6 +250,9 @@ static bool prepare_rotated_tile_lookup(TileCacheEntry **entries, int entry_coun
 
   lookup->cols = cols;
   lookup->rows = rows;
+  bool animation_time_captured = false;
+  time_t animation_now_s = 0;
+  uint16_t animation_now_ms = 0;
   for (int i = 0; i < entry_count; i++) {
     TileCacheEntry *entry = entries[i];
     if (!entry || !entry->valid) {
@@ -257,19 +260,23 @@ static bool prepare_rotated_tile_lookup(TileCacheEntry **entries, int entry_coun
     }
 
     entry->last_used = ++s_access_counter;
-    uint16_t progress_q8 = 256;
+    uint16_t visibility_q8 = 256;
     uint16_t scale_q8 = 256;
     if (entry->animation_active) {
-      progress_q8 = tile_animation_progress_q8(entry);
+      if (!animation_time_captured) {
+        time_ms(&animation_now_s, &animation_now_ms);
+        animation_time_captured = true;
+      }
+      uint16_t progress_q8 = tile_animation_progress_at_q8(
+          entry, animation_now_s, animation_now_ms);
       if (progress_q8 >= 256) {
         complete_tile_animation(entry);
-        progress_q8 = 256;
       } else {
         lookup->has_animation = true;
+        visibility_q8 = tile_animation_eased_q8(progress_q8);
         if (entry->animation_mode == TILE_ANIMATION_FADE_ZOOM) {
-          uint16_t eased_q8 = tile_animation_eased_q8(progress_q8);
           scale_q8 = TILE_ANIMATION_ZOOM_START_Q8 +
-              (((256 - TILE_ANIMATION_ZOOM_START_Q8) * eased_q8) / 256);
+              (((256 - TILE_ANIMATION_ZOOM_START_Q8) * visibility_q8) / 256);
         }
       }
     }
@@ -283,7 +290,7 @@ static bool prepare_rotated_tile_lookup(TileCacheEntry **entries, int entry_coun
     RotatedTileCell *cell = &lookup->cells[row * cols + col];
     cell->entry = entry;
     cell->stored = tile_storage_data(&s_tile_storage_arena, &entry->storage);
-    cell->progress_q8 = progress_q8;
+    cell->visibility_q8 = visibility_q8;
     cell->scale_q8 = scale_q8;
   }
   return true;
@@ -345,7 +352,7 @@ static inline bool sample_rotated_tile_lookup_palette_index(
 
   int sample_x = local_x;
   int sample_y = local_y;
-  if (lookup->has_animation && cell->progress_q8 < 256) {
+  if (lookup->has_animation && cell->visibility_q8 < 256) {
     if (cell->scale_q8 < 256) {
       int32_t center_x_q8 = ((int32_t)s_tile_width * 256) / 2;
       int32_t center_y_q8 = ((int32_t)s_tile_height * 256) / 2;
@@ -360,7 +367,8 @@ static inline bool sample_rotated_tile_lookup_palette_index(
         return false;
       }
     }
-    if (!tile_animation_draws_pixel(sample_x, sample_y, cell->progress_q8)) {
+    if (!tile_animation_draws_pixel(sample_x, sample_y,
+                                    cell->visibility_q8)) {
       return false;
     }
   }
@@ -918,7 +926,7 @@ static void draw_tile_framebuffer_animated(uint8_t *framebuffer_data,
                                            int dst_origin_y,
                                            int screen_w,
                                            int screen_h,
-                                           uint16_t progress_q8,
+                                           uint16_t visibility_q8,
                                            uint16_t scale_q8,
                                            uint8_t *row_scratch,
                                            size_t row_scratch_bytes) {
@@ -939,7 +947,7 @@ static void draw_tile_framebuffer_animated(uint8_t *framebuffer_data,
     }
     uint8_t *dst_row = framebuffer_data + (dst_y * bytes_per_row);
     for (int px = 0; px < s_tile_width; px++) {
-      if (!tile_animation_draws_pixel(px, py, progress_q8)) {
+      if (!tile_animation_draws_pixel(px, py, visibility_q8)) {
         continue;
       }
 
@@ -1080,6 +1088,9 @@ bool draw_tiles_framebuffer_fast(GContext *ctx, const GColor *palette,
                              fallback_count, row_scratch,
                              sizeof(row_scratch));
   }
+  bool animation_time_captured = false;
+  time_t animation_now_s = 0;
+  uint16_t animation_now_ms = 0;
   for (int i = 0; i < entry_count; i++) {
     TileCacheEntry *entry = entries[i];
     if (!entry || !entry->valid) {
@@ -1091,20 +1102,25 @@ bool draw_tiles_framebuffer_fast(GContext *ctx, const GColor *palette,
     int dst_origin_x = center_x + (int)(entry->world_x - render_viewport_x());
     int dst_origin_y = center_y + (int)(entry->world_y - render_viewport_y());
     if (entry->animation_active) {
-      uint16_t progress_q8 = tile_animation_progress_q8(entry);
+      if (!animation_time_captured) {
+        time_ms(&animation_now_s, &animation_now_ms);
+        animation_time_captured = true;
+      }
+      uint16_t progress_q8 = tile_animation_progress_at_q8(
+          entry, animation_now_s, animation_now_ms);
       if (progress_q8 >= 256) {
         complete_tile_animation(entry);
       } else {
+        uint16_t visibility_q8 = tile_animation_eased_q8(progress_q8);
         uint16_t scale_q8 = 256;
         if (entry->animation_mode == TILE_ANIMATION_FADE_ZOOM) {
-          uint16_t eased_q8 = tile_animation_eased_q8(progress_q8);
           scale_q8 = TILE_ANIMATION_ZOOM_START_Q8 +
-              (((256 - TILE_ANIMATION_ZOOM_START_Q8) * eased_q8) / 256);
+              (((256 - TILE_ANIMATION_ZOOM_START_Q8) * visibility_q8) / 256);
         }
         draw_tile_framebuffer_animated(framebuffer_data, bytes_per_row,
                                        palette_argb, entry, dst_origin_x,
                                        dst_origin_y, screen_w, screen_h,
-                                       progress_q8, scale_q8, row_scratch,
+                                       visibility_q8, scale_q8, row_scratch,
                                        sizeof(row_scratch));
         continue;
       }
@@ -1164,11 +1180,12 @@ void draw_tile_entry_slow(GContext *ctx, TileCacheEntry *entry,
     complete_tile_animation(entry);
     progress_q8 = 256;
   }
-  uint16_t zoom_eased_q8 = tile_animation_eased_q8(progress_q8);
+  uint16_t visibility_q8 = entry->animation_active ?
+      tile_animation_eased_q8(progress_q8) : 256;
   uint16_t scale_q8 = 256;
   if (entry->animation_active && entry->animation_mode == TILE_ANIMATION_FADE_ZOOM) {
     scale_q8 = TILE_ANIMATION_ZOOM_START_Q8 +
-        (((256 - TILE_ANIMATION_ZOOM_START_Q8) * zoom_eased_q8) / 256);
+        (((256 - TILE_ANIMATION_ZOOM_START_Q8) * visibility_q8) / 256);
   }
 
   uint8_t row_scratch[(MAX_TILE_W + 1) / 2];
@@ -1179,7 +1196,8 @@ void draw_tile_entry_slow(GContext *ctx, TileCacheEntry *entry,
       continue;
     }
     for (int px = 0; px < s_tile_width; px++) {
-      if (entry->animation_active && !tile_animation_draws_pixel(px, py, progress_q8)) {
+      if (entry->animation_active &&
+          !tile_animation_draws_pixel(px, py, visibility_q8)) {
         continue;
       }
       int32_t world_x = entry->world_x + px;
