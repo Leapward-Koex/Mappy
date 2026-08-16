@@ -102,7 +102,7 @@ class WatchSessionForegroundService : Service() {
             Notification.Builder(this)
         }
         return builder
-            .setSmallIcon(R.mipmap.ic_launcher)
+            .setSmallIcon(R.drawable.ic_stat_mappy)
             .setContentTitle("Mappy")
             .setContentText("Watch session active")
             .setContentIntent(pendingIntent)
