@@ -8,6 +8,8 @@ zoom state, while the phone remains the owner of map tile generation.
 ## Goals
 
 - Support direct map panning on real touch-capable watches.
+- Give qualifying fast pans a short watch-local kinetic coast without adding
+  heap allocation, another animation timer, or per-frame phone work.
 - Support pinch-to-zoom and pinch-to-zoom-out when the watch SDK and hardware
   expose reliable multi-touch or pinch-distance data.
 - Prefer smooth visual zoom while a pinch gesture is active.
@@ -41,10 +43,11 @@ single-finger events.
 
 The current production watch build uses the documented no-pinch fallback. Touch
 references are compiled only behind `PBL_TOUCH`; when touch is available, the
-watch supports single-finger panning and sends ordinary tile requests for the
-new viewport. The touch event shape currently used by the build exposes one
-contact point and no reliable second-contact, pinch-distance, or scale data, so
-pinch zoom is not advertised as supported for this build.
+watch supports single-finger panning with a qualifying kinetic coast and sends
+ordinary tile requests for the settled viewport. The touch event shape currently
+used by the build exposes one contact point and no reliable second-contact,
+pinch-distance, or scale data, so pinch zoom is not advertised as supported for
+this build.
 
 Until a real `emery` SDK/hardware probe proves reliable pinch or multi-touch
 data, zoom remains available through the hardware Up/Down buttons. The watch
@@ -58,7 +61,7 @@ The watch owns these touch gestures:
 
 | Gesture | Watch behavior | Phone behavior |
 | --- | --- | --- |
-| Single-finger drag | Pan viewport locally. | Receives only normal `CMD_TILE_REQUEST` messages for missing crops. |
+| Single-finger drag | Pan viewport locally; a qualifying fast liftoff coasts briefly before settlement. | Receives only normal `CMD_TILE_REQUEST` messages for missing crops after settlement. |
 | Two-finger pinch in | Zoom out locally. | Receives existing `CMD_BUTTON` zoom notification and later tile requests. |
 | Two-finger pinch out | Zoom in locally. | Receives existing `CMD_BUTTON` zoom notification and later tile requests. |
 | Tap or ambiguous touch | No MVP map action. | No command. |
@@ -80,6 +83,7 @@ transient_zoom_scale
 map_orientation
 camera_mode
 manual_pan
+pan_inertia
 ```
 
 Rules:
@@ -107,8 +111,12 @@ Pan behavior follows `WATCH_APP_MVP.md`:
    `manual_pan = true`, suspends heading-driven rotation, and treats the browsed
    map as north-up.
 3. Position updates adjust the viewport center by the drag delta in current
-   screen/world scale.
-4. Liftoff finalizes the viewport and queues visible missing tile crops.
+   screen/world scale and record timestamped viewport samples.
+4. Liftoff applies its newest coordinates, then starts kinetic panning only when
+   recent samples show a qualifying fast release.
+5. A slow drag, tap, held release, or stale release settles immediately.
+6. A qualifying release coasts locally, then settles and queues visible missing
+   tile crops once.
 
 Dragging map content right/down moves the viewport center left/up in world-pixel
 space. If the drag began from facing-up follow mode, the first accepted drag
@@ -118,6 +126,55 @@ Each accepted position update redraws the current-location overlay. Once its
 white puck halo is completely outside the screen, the edge line defined by
 `CURRENT_LOCATION_VIEW_CONE_SPEC.md` must move directly with the clamped GPS
 projection and wrap continuously around corners.
+
+## Kinetic Pan And Settlement
+
+Kinetic panning is a small fixed-point extension of single-finger pan. It does
+not change the phone protocol, persisted settings, or user-visible controls.
+Its internal math API provides reset, sample observation, conditional start,
+active-state query, elapsed-time advance, and cancellation operations using only
+standard C types, so it remains independent of Pebble types for host tests.
+
+Release sampling and velocity rules:
+
+- Timestamp viewport samples with `time_ms()` because touch events do not carry
+  timestamps.
+- Coalesce samples less than 8 ms apart and discard history older than 120 ms.
+- Reject inertia when the last movement is more than 80 ms before liftoff.
+- Estimate velocity in Q8 world pixels per 30 ms logical tick, weighting the
+  newest sample 75 percent.
+- Start at approximately 2 px per logical tick, and cap the direction-preserving
+  velocity vector at 14 px per tick.
+
+Coast rules:
+
+- Add kinetic pan as the fifth source in the shared 30 ms visual scheduler; do
+  not register a second animation timer for inertia.
+- Apply fractional fixed-point displacement and decay velocity by `208/256`
+  after each logical tick.
+- Stop below 0.5 px per tick or after 12 logical ticks (360 ms), with total
+  displacement bounded to approximately 70 px for a capped release.
+- When a scheduler callback is delayed, consume the elapsed logical ticks in
+  one callback and dirty the map only once.
+- Add displacement to signed viewport coordinates with saturation. Kinetic pan
+  does not introduce geographic wrapping or new viewport clamping.
+- Coast frames stay in north-up manual-browse mode and use the same cached map,
+  route, destination, and current-location rendering path as drag frames.
+
+The pan settle operation is idempotent. Tile request dispatch, request-queue
+coverage rebuilding, and new tile-response decoding remain paused from accepted
+drag until settlement. Kinetic scheduler frames do not initiate route-detail
+requests; unrelated route activity is not globally paused. Settlement updates
+map/route state once, starts the existing 100 ms tile-resume grace period,
+rebuilds the visible request queue once, refreshes motion-service state, and
+issues one final redraw.
+
+A new touchdown stops an active coast at its current viewport without briefly
+resuming tile requests; the new gesture inherits the paused state. Opening a
+menu/modal, zooming, recentering, losing touch input, or another button action
+settles kinetic pan before performing that action. App teardown cancels kinetic
+pan without resuming work. Failure to register the shared scheduler callback
+falls back to immediate settlement.
 
 ## Pinch Zoom
 
@@ -194,7 +251,8 @@ reliable multi-touch, pinch-distance, or SDK-provided scale data.
 ## Interaction With Menus And Navigation
 
 - Menus, modals, and confirmation prompts own input while visible; map touch
-  gestures must be unsubscribed or ignored during those states.
+  gestures must be unsubscribed or ignored during those states. Opening one
+  settles an active kinetic pan before transferring input ownership.
 - Pinch zoom is allowed during normal map view and active navigation.
 - Pinch zoom must not resize or move top/bottom UI bands, menu rows, or modal
   chrome.
@@ -204,6 +262,8 @@ reliable multi-touch, pinch-distance, or SDK-provided scale data.
 - Navigation instruction text remains anchored in the bottom band while the map,
   route, marker, and destination projections zoom underneath it.
 - Back, Select, Up, and Down keep their existing behavior.
+- Zoom, recenter, touch-service loss, and other button actions settle active
+  kinetic pan before acting. Teardown cancels it without queueing new work.
 
 ## Protocol And Tile Flow
 
@@ -220,6 +280,12 @@ Pinch zoom uses existing MVP protocol:
 No phone code may branch on whether the viewport change came from buttons, GPS
 follow, pan, pinch, or orientation except for diagnostics labels.
 
+Pan drag and kinetic coast remain entirely watch-local. The watch keeps tile
+requests paused across both phases, then rebuilds request coverage once after
+settlement and resumes ordinary `CMD_TILE_REQUEST` traffic after the existing
+100 ms grace period. An interrupting touchdown continues the pause rather than
+producing an intermediate request burst.
+
 ## Diagnostics
 
 Watch diagnostics may record bounded local events for:
@@ -233,6 +299,11 @@ Watch diagnostics may record bounded local events for:
 Diagnostics must not include raw touch coordinate traces beyond short numeric
 summaries needed to debug gesture handling.
 
+The opt-in real-watch performance build emits one aggregate
+`MAPPY_HW_COAST` summary per release (qualification, logical ticks, rendered
+frames, first-frame latency, total/max draw time, settlement time, and
+cancellation), not a log line for every coast frame.
+
 ## Verification
 
 Real-watch verification on `emery` is required before pinch is called supported:
@@ -241,6 +312,16 @@ Real-watch verification on `emery` is required before pinch is called supported:
 - Confirm runtime touch service availability.
 - Confirm single-finger pan changes viewport and produces only normal tile
   requests.
+- Confirm a qualifying recent fast liftoff coasts in the release direction for
+  1..12 logical ticks, settles within 450 ms, and travels no more than the
+  approximately 70 px bound. Confirm slow, tap, held, and stale releases settle
+  immediately.
+- Confirm tile request dispatch and new tile-response decoding stay paused
+  during drag and coast, request coverage rebuilds once at settlement, and the
+  visible grid completes within the existing 5-second fill gate without
+  transfer errors.
+- Confirm a new touchdown interrupts coast without resuming requests, and menu,
+  modal, zoom, recenter, touch loss, and button actions settle deterministically.
 - Confirm single-finger pan from facing-up GPS-follow enters manual-browse
   north-up mode, ignores later heading changes for map rotation, and keeps route
   progress/current-location updates active.
@@ -251,6 +332,8 @@ Real-watch verification on `emery` is required before pinch is called supported:
 - If the capability probe reports no reliable pinch data, confirm pinch is not
   advertised or interpreted and hardware-button zoom remains available.
 - Confirm button zoom still works after touch gestures.
+- Collect repeated slow and fast `MAPPY_HW_COAST` summaries; calculate latency
+  percentiles from those aggregates without enabling per-frame coast logging.
 - Confirm no touch gesture works while a menu/modal is active.
 - Confirm map, route, current marker, heading, and destination projections stay
   aligned during pan and zoom.
@@ -267,6 +350,18 @@ replace the real-watch pinch availability check.
 ## Acceptance Criteria
 
 - Real `emery` hardware can pan the map with one finger when touch is enabled.
+- A recent fast release produces a subtle watch-local coast of at most 12
+  logical 30 ms ticks and approximately 70 px; slow, tap, held, and stale
+  releases settle immediately.
+- Kinetic pan produces no phone command, setting, persistence, heap allocation,
+  or protocol change. Its production data+BSS increase is at most 64 bytes and
+  its binary-size increase is at most 3 KiB against an identical-mode baseline.
+- Tile requests remain paused through drag and coast, then request coverage is
+  rebuilt and resumed once after settlement; a new touchdown interrupts without
+  an intermediate resume.
+- On real `emery`, p95 input-to-first-changed-frame latency is at most 100 ms,
+  p95 north-up coast draw time is at most 50 ms, no coast draw exceeds 100 ms,
+  and kinetic settlement completes within 450 ms.
 - Panning away from the centered current location suspends auto-follow and
   facing-up rotation instead of disabling panning.
 - Panning the complete puck halo off-screen shows the specified blue/white edge

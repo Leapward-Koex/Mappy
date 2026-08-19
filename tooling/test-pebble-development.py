@@ -155,6 +155,7 @@ class RepositoryWorkflowTest(unittest.TestCase):
             "test-tooling",
             "test-protocol",
             "test-motion-host",
+            "test-pan-inertia-host",
             "test-tile-cache-host",
             "test-tile-scheduler-host",
             "test-face-forward-render-host",
@@ -180,8 +181,10 @@ class RepositoryWorkflowTest(unittest.TestCase):
             self.assertIn(command, result.stdout)
 
         helper_text = helper.read_text(encoding="utf-8")
+        self.assertIn("test_pan_inertia_host", helper_text)
         self.assertIn("test_tile_scheduler_host", helper_text)
         self.assertIn("test_rapid_zoom_reversal", helper_text)
+        self.assertTrue((ROOT / "tooling" / "test-pan-inertia.c").is_file())
         self.assertTrue((ROOT / "tooling" / "test-tile-request-scheduler.c").is_file())
         self.assertIn('PEBBLE_QEMU_CAPTURE_FRAMES:-60', helper_text)
         self.assertIn('PEBBLE_QEMU_CAPTURE_INTERVAL:-0.2', helper_text)

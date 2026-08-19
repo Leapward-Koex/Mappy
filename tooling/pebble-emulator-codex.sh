@@ -18,6 +18,7 @@ Commands:
   test-tooling             Run deterministic Pebble development-tool tests.
   test-protocol            Check protocol constants across specs and runtimes.
   test-motion-host         Run allocation-free motion and bearing host tests.
+  test-pan-inertia-host    Run fixed-point kinetic pan host tests.
   test-tile-cache-host     Run bounded tile codec and arena host tests.
   test-tile-scheduler-host Run deterministic two-flight scheduler host tests.
   test-face-forward-render-host
@@ -308,6 +309,7 @@ test_tooling() {
   require_pebble
   "$(pebble_tool_python)" "$ROOT_DIR/tooling/test-pebble-development.py"
   test_motion_host
+  test_pan_inertia_host
   test_tile_cache_host
   test_tile_scheduler_host
   test_face_forward_render_host
@@ -333,6 +335,24 @@ test_motion_host() {
     "$WATCH_DIR/src/c/bearing_smoothing.c" \
     -o "$output"
   cd "$ROOT_DIR"
+  "$output"
+  rm -f "$output"
+  trap - RETURN
+}
+
+test_pan_inertia_host() {
+  local compiler="${CC:-cc}"
+  if ! command -v "$compiler" >/dev/null 2>&1; then
+    echo "C compiler was not found: $compiler" >&2
+    return 127
+  fi
+  local output
+  output="$(mktemp "${TMPDIR:-/tmp}/mappy-pan-inertia-tests.XXXXXX")"
+  trap 'rm -f "$output"' RETURN
+  "$compiler" -std=c99 -Wall -Wextra -Werror \
+    "$ROOT_DIR/tooling/test-pan-inertia.c" \
+    "$WATCH_DIR/src/c/pan_inertia.c" \
+    -o "$output"
   "$output"
   rm -f "$output"
   trap - RETURN
@@ -700,6 +720,12 @@ perf_summary_value() {
   local line="$1"
   local key="$2"
   sed -nE "s/.*(^|[[:space:]])${key}=([0-9]+).*/\\2/p" <<<"$line"
+}
+
+perf_summary_signed_value() {
+  local line="$1"
+  local key="$2"
+  sed -nE "s/.*(^|[[:space:]])${key}=(-?[0-9]+).*/\\2/p" <<<"$line"
 }
 
 perf_summary_pair_value() {
@@ -1212,6 +1238,292 @@ run_pan_under_load_case() {
     "$perf_summary"
 }
 
+run_pan_inertia_case() {
+  local width="$1"
+  local height="$2"
+  local orientation="$3"
+  local orientation_name="north"
+  if [[ "$orientation" == "1" ]]; then
+    orientation_name="facing"
+  fi
+  local label="${width}x${height}-${orientation_name}-inertia"
+  local log_file="$OUT_DIR/pan-under-load-${label}.log"
+  rm -f "$log_file"
+
+  cd "$WATCH_DIR"
+  PYTHONUNBUFFERED=1 pebble logs --emulator "$PLATFORM" >"$log_file" 2>&1 &
+  local log_pid=$!
+  sleep 1
+  send_fixture_map_orientation "$orientation"
+  sleep 0.15
+  send_fixture_tile_animation 0
+  sleep 0.15
+  send_debug_compass_recenter 0
+  sleep 0.5
+
+  local started_ms
+  started_ms="$(date +%s%3N)"
+  send_debug_pan_under_load 5
+  local start_deadline=$((SECONDS + 1))
+  while (( SECONDS <= start_deadline )); do
+    if grep -q 'MAPPY_PAN_INERTIA' "$log_file"; then
+      break
+    fi
+    sleep 0.01
+  done
+  local inertia_marker start_line
+  inertia_marker="$(grep 'MAPPY_PAN_INERTIA' "$log_file" | tail -1 || true)"
+  start_line="$(grep -n 'MAPPY_PAN_INERTIA' "$log_file" | tail -1 | cut -d: -f1 || true)"
+  if [[ -z "$start_line" || "$inertia_marker" != *"active=1"* ]]; then
+    kill "$log_pid" >/dev/null 2>&1 || true
+    wait "$log_pid" 2>/dev/null || true
+    echo "Pan inertia fixture did not start for $label: $inertia_marker" >&2
+    return 1
+  fi
+
+  local summary_deadline=$((SECONDS + 2))
+  while (( SECONDS < summary_deadline )); do
+    if tail -n "+$start_line" "$log_file" | grep -q 'MAPPY_PERF'; then
+      break
+    fi
+    sleep 0.02
+  done
+  local perf_summary inertia_summary rotated_summary summary_line input_frame
+  perf_summary="$(tail -n "+$start_line" "$log_file" | grep 'MAPPY_PERF' | tail -1 || true)"
+  inertia_summary="$(tail -n "+$start_line" "$log_file" | grep 'MAPPY_IPERF' | tail -1 || true)"
+  rotated_summary="$(tail -n "+$start_line" "$log_file" | grep 'MAPPY_RPERF' | tail -1 || true)"
+  summary_line="$(grep -n 'MAPPY_PERF' "$log_file" | tail -1 | cut -d: -f1 || true)"
+  input_frame="$(tail -n "+$start_line" "$log_file" | grep 'MAPPY_PAN_FRAME' | head -1 || true)"
+  if [[ -z "$perf_summary" || -z "$inertia_summary" ||
+        -z "$rotated_summary" || -z "$summary_line" ]]; then
+    kill "$log_pid" >/dev/null 2>&1 || true
+    wait "$log_pid" 2>/dev/null || true
+    echo "Pan inertia fixture did not finish for $label: $(windows_path "$log_file")" >&2
+    return 1
+  fi
+
+  if awk -v start="$start_line" -v finish="$summary_line" \
+      'NR > start && NR < finish && (/Tile accept/ || /MAPPY_GRID/) { found = 1 }
+       END { exit !found }' "$log_file"; then
+    kill "$log_pid" >/dev/null 2>&1 || true
+    wait "$log_pid" 2>/dev/null || true
+    echo "Tile decode churn occurred during coast for $label" >&2
+    return 1
+  fi
+
+  local load_complete=0
+  local fill_ms=0
+  while (( $(date +%s%3N) - started_ms < 5000 )); do
+    if awk -v start="$summary_line" \
+        'NR > start && /MAPPY_GRID/ { found = 1 } END { exit !found }' \
+        "$log_file"; then
+      fill_ms=$(($(date +%s%3N) - started_ms))
+      load_complete=1
+      break
+    fi
+    sleep 0.05
+  done
+  sleep 0.1
+  kill "$log_pid" >/dev/null 2>&1 || true
+  wait "$log_pid" 2>/dev/null || true
+
+  local errors active_ticks changed_ticks coast_dx coast_dy coast_ms
+  local draws draw_max tile_advances orientation_work rotated_pixels
+  local input_frame_ms
+  errors="$(perf_summary_value "$perf_summary" e)"
+  active_ticks="$(perf_summary_value "$inertia_summary" a)"
+  changed_ticks="$(perf_summary_value "$inertia_summary" c)"
+  coast_dx="$(perf_summary_signed_value "$inertia_summary" x)"
+  coast_dy="$(perf_summary_signed_value "$inertia_summary" y)"
+  coast_ms="$(perf_summary_signed_value "$inertia_summary" ms)"
+  draws="$(perf_summary_value "$perf_summary" d)"
+  draw_max="$(perf_summary_pair_value "$perf_summary" q max)"
+  tile_advances="$(perf_summary_value "$perf_summary" l)"
+  orientation_work="$(perf_summary_value "$perf_summary" o)"
+  rotated_pixels="$(perf_summary_value "$rotated_summary" p)"
+  input_frame_ms="$(perf_summary_value "$input_frame" i)"
+
+  if [[ -z "$errors" || "$errors" != "0" ]]; then
+    echo "Pan inertia fixture reported errors for $label: $perf_summary" >&2
+    return 1
+  fi
+  if [[ -z "$active_ticks" || -z "$changed_ticks" ]] ||
+      (( active_ticks < 1 || changed_ticks < 1 || changed_ticks > 12 ||
+         changed_ticks > active_ticks )); then
+    echo "Pan inertia scheduler bounds failed for $label: $inertia_summary" >&2
+    return 1
+  fi
+  if [[ -z "$draws" ]] || (( draws < 1 || draws > changed_ticks + 1 )); then
+    echo "Pan inertia redraw coalescing failed for $label: $perf_summary" >&2
+    return 1
+  fi
+  if [[ -z "$input_frame_ms" ]] ||
+      (( input_frame_ms < 0 || input_frame_ms > 100 )); then
+    echo "Pan inertia first frame exceeded 100 ms for $label: ${input_frame_ms} ms" >&2
+    return 1
+  fi
+  if [[ -z "$draw_max" ]] || (( draw_max > 50 )); then
+    echo "North-up inertia draw exceeded 50 ms for $label: $perf_summary" >&2
+    return 1
+  fi
+  if [[ -z "$tile_advances" || "$tile_advances" != "0" ||
+        -z "$orientation_work" || "$orientation_work" != "0" ||
+        -z "$rotated_pixels" || "$rotated_pixels" != "0" ]]; then
+    echo "Pan inertia performed tile/orientation animation work for $label: $perf_summary / $rotated_summary" >&2
+    return 1
+  fi
+  if [[ -z "$coast_dx" || -z "$coast_dy" ]] ||
+      (( coast_dx >= 0 || coast_dy >= 0 )); then
+    echo "Pan inertia direction failed for $label: $inertia_summary" >&2
+    return 1
+  fi
+  local abs_dx=$((-coast_dx))
+  local abs_dy=$((-coast_dy))
+  local coast_distance
+  if (( abs_dx >= abs_dy )); then
+    coast_distance=$((abs_dx + abs_dy / 2))
+  else
+    coast_distance=$((abs_dy + abs_dx / 2))
+  fi
+  if (( coast_distance < 40 || coast_distance > 72 )); then
+    echo "Pan inertia displacement was outside 40..72 px for $label: $inertia_summary" >&2
+    return 1
+  fi
+  if (( load_complete != 1 || fill_ms > 5000 )); then
+    echo "Settled inertia grid did not complete within 5 seconds for $label" >&2
+    return 1
+  fi
+  if ! awk -v start="$summary_line" \
+      'NR > start && /Tile accept / { found = 1 } END { exit !found }' \
+      "$log_file"; then
+    echo "Settled inertia did not load a new tile for $label" >&2
+    return 1
+  fi
+  if grep -Eqi 'Tile flight expired|tile chunk reject|tile decode failed|inbox dropped' \
+      "$log_file"; then
+    echo "Tile transfer error reported for $label: $(windows_path "$log_file")" >&2
+    return 1
+  fi
+
+  printf '%s (%d ms first frame, %d ms coast, %d ms fill, %d px): %s / %s\n' \
+    "$label" "$input_frame_ms" "$coast_ms" "$fill_ms" "$coast_distance" \
+    "$perf_summary" "$inertia_summary"
+}
+
+run_pan_inertia_cancel_case() {
+  local action="$1"
+  local cancellation="$2"
+  local resume_grace_ms=100
+  local label="108x126-north-cancel-${cancellation}"
+  local log_file="$OUT_DIR/pan-under-load-${label}.log"
+  rm -f "$log_file"
+
+  cd "$WATCH_DIR"
+  local log_pid=""
+  local log_attempt
+  for log_attempt in 1 2 3; do
+    : >"$log_file"
+    PYTHONUNBUFFERED=1 pebble logs --emulator "$PLATFORM" >"$log_file" 2>&1 &
+    log_pid=$!
+    sleep 1
+    if kill -0 "$log_pid" >/dev/null 2>&1; then
+      break
+    fi
+    wait "$log_pid" 2>/dev/null || true
+    log_pid=""
+  done
+  if [[ -z "$log_pid" ]]; then
+    echo "Pebble log capture did not start for $label" >&2
+    return 1
+  fi
+  send_fixture_map_orientation 0
+  sleep 0.15
+  send_fixture_tile_animation 0
+  sleep 0.15
+  send_debug_compass_recenter 0
+  sleep 0.5
+
+  local started_ms
+  started_ms="$(date +%s%3N)"
+  send_debug_pan_under_load "$action"
+  local cancel_deadline=$((SECONDS + 1))
+  while (( SECONDS <= cancel_deadline )); do
+    if grep -q "MAPPY_PAN_CANCEL kind=${action}" "$log_file"; then
+      break
+    fi
+    sleep 0.01
+  done
+  local marker marker_line lifecycle_ms
+  marker="$(grep "MAPPY_PAN_CANCEL kind=${action}" "$log_file" | tail -1 || true)"
+  marker_line="$(grep -n "MAPPY_PAN_CANCEL kind=${action}" "$log_file" |
+      tail -1 | cut -d: -f1 || true)"
+  lifecycle_ms=$(($(date +%s%3N) - started_ms))
+  if [[ -z "$marker" || -z "$marker_line" ]]; then
+    kill "$log_pid" >/dev/null 2>&1 || true
+    wait "$log_pid" 2>/dev/null || true
+    echo "Pan inertia $cancellation cancellation marker was not observed" >&2
+    return 1
+  fi
+
+  local summary_deadline=$((SECONDS + 2))
+  while (( SECONDS < summary_deadline )); do
+    if tail -n "+$marker_line" "$log_file" | grep -q 'MAPPY_PERF'; then
+      break
+    fi
+    sleep 0.02
+  done
+  local perf_summary inertia_summary
+  perf_summary="$(tail -n "+$marker_line" "$log_file" |
+      grep 'MAPPY_PERF' | tail -1 || true)"
+  inertia_summary="$(tail -n "+$marker_line" "$log_file" |
+      grep 'MAPPY_IPERF' | tail -1 || true)"
+  sleep 0.1
+  kill "$log_pid" >/dev/null 2>&1 || true
+  wait "$log_pid" 2>/dev/null || true
+
+  if [[ -z "$perf_summary" || -z "$inertia_summary" ]]; then
+    echo "Pan inertia $cancellation cancellation summary was not observed: $(windows_path "$log_file")" >&2
+    return 1
+  fi
+  local started failures active paused grace touch errors
+  local active_ticks changed_ticks
+  started="$(perf_summary_value "$marker" started)"
+  failures="$(perf_summary_value "$marker" f)"
+  active="$(perf_summary_value "$marker" active)"
+  paused="$(perf_summary_value "$marker" paused)"
+  grace="$(perf_summary_value "$marker" grace)"
+  touch="$(perf_summary_value "$marker" touch)"
+  errors="$(perf_summary_value "$perf_summary" e)"
+  active_ticks="$(perf_summary_value "$inertia_summary" a)"
+  changed_ticks="$(perf_summary_value "$inertia_summary" c)"
+
+  if [[ "$started" != "1" || "$failures" != "0" || "$active" != "0" ||
+        "$paused" != "0" || "$grace" != "0" || "$touch" != "0" ]]; then
+    echo "Pan inertia $cancellation cancellation lifecycle failed: $marker" >&2
+    return 1
+  fi
+  if [[ -z "$errors" || "$errors" != "0" ]]; then
+    echo "Pan inertia $cancellation cancellation reported errors: $perf_summary" >&2
+    return 1
+  fi
+  if [[ "$active_ticks" != "0" || "$changed_ticks" != "0" ]]; then
+    echo "Pan inertia $cancellation advanced after synchronous cancellation: $inertia_summary" >&2
+    return 1
+  fi
+  if (( lifecycle_ms < resume_grace_ms || lifecycle_ms > 1000 )); then
+    echo "Pan inertia $cancellation grace lifecycle took ${lifecycle_ms} ms" >&2
+    return 1
+  fi
+  if grep -Eqi 'Tile flight expired|tile chunk reject|tile decode failed|inbox dropped' \
+      "$log_file"; then
+    echo "Tile transfer error during $cancellation cancellation: $(windows_path "$log_file")" >&2
+    return 1
+  fi
+
+  printf '%s (%d ms lifecycle): %s / %s\n' \
+    "$label" "$lifecycle_ms" "$marker" "$perf_summary"
+}
+
 test_pan_under_load() {
   require_pebble
   local prompt_only="${1:-}"
@@ -1253,10 +1565,14 @@ test_pan_under_load() {
     height="${geometry##*:}"
     export MAPPY_FIXTURE_TILE_WIDTH="$width"
     export MAPPY_FIXTURE_TILE_HEIGHT="$height"
-    pebble kill >/dev/null 2>&1 || true
-    install_app_with_recovery
-    sleep 6
     for orientation in 0 1; do
+      # Keep each orientation's normal-pan and inertia cases under the same
+      # load, but reset the in-memory cache before switching modes so prior
+      # cases cannot exhaust tile storage and strand the settlement check.
+      pebble kill >/dev/null 2>&1 || true
+      install_app_with_recovery
+      sleep 6
+      run_pan_inertia_case "$width" "$height" "$orientation"
       run_pan_under_load_case "$width" "$height" "$orientation" 0
     done
   done
@@ -1269,6 +1585,10 @@ test_pan_under_load() {
   sleep 6
   run_pan_under_load_case 108 126 1 1 1
   run_pan_under_load_case 108 126 1 1
+  run_pan_inertia_cancel_case 6 new-touch
+  run_pan_inertia_cancel_case 7 zoom
+  run_pan_inertia_cancel_case 8 recenter
+  run_pan_inertia_cancel_case 9 menu
   pebble kill >/dev/null 2>&1 || true
   trap - RETURN
   printf 'Pan-under-load logs: %s\n' \
@@ -1618,6 +1938,9 @@ main() {
       ;;
     test-motion-host)
       test_motion_host
+      ;;
+    test-pan-inertia-host)
+      test_pan_inertia_host
       ;;
     test-tile-cache-host)
       test_tile_cache_host

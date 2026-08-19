@@ -4,7 +4,8 @@
 
 bool visual_animations_active(void) {
   return map_bearing_smoothing_active() || gps_smoothing_animation_active() ||
-      any_tile_animation_active() || menu_highlight_animation_active();
+      any_tile_animation_active() || menu_highlight_animation_active() ||
+      pan_inertia_animation_active();
 }
 
 void cancel_visual_animation_timer(void) {
@@ -23,15 +24,19 @@ static void visual_animation_timer_callback(void *data) {
   bool gps_active = gps_smoothing_animation_active();
   bool tile_active = any_tile_animation_active();
   bool menu_active = menu_highlight_animation_active();
+  bool inertia_active = pan_inertia_animation_active();
 #endif
   bool bearing_changed = advance_map_bearing_smoothing();
   bool changed = bearing_changed;
   changed = advance_gps_smoothing() || changed;
+  bool inertia_changed = advance_pan_inertia_animation();
+  changed = inertia_changed || changed;
   changed = advance_tile_animations() || changed;
   changed = advance_menu_highlight_animation() || changed;
 #ifdef MAPPY_WATCH_PHONE_MODE_FIXTURE
   fixture_perf_scheduler_tick(bearing_active, gps_active, tile_active,
-                              menu_active, bearing_changed);
+                              menu_active, inertia_active, bearing_changed,
+                              inertia_changed);
 #endif
 
   if (visual_animations_active()) {
@@ -54,6 +59,11 @@ void schedule_visual_animation_tick(void) {
   if (!s_visual_animation_timer && visual_animations_active()) {
     s_visual_animation_timer = app_timer_register(
         VISUAL_ANIMATION_TICK_MS, visual_animation_timer_callback, NULL);
+    if (!s_visual_animation_timer && pan_inertia_animation_active()) {
+      // Never strand interaction-paused tile requests if AppTimer resources
+      // disappear during a coast rather than at its initial registration.
+      settle_pan_motion();
+    }
   }
 }
 

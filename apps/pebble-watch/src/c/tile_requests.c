@@ -639,6 +639,9 @@ static void rebuild_visible_tile_queue(void) {
 }
 
 void queue_visible_tiles(void) {
+  if (s_tile_requests_interaction_paused) {
+    return;
+  }
   rebuild_visible_tile_queue();
   schedule_tile_request_watchdog();
   send_next_tile_request();

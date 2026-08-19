@@ -11,6 +11,7 @@
 
 #include "bearing_smoothing.h"
 #include "motion_detector.h"
+#include "pan_inertia.h"
 #include "tile_codec.h"
 #include "tile_storage.h"
 
@@ -787,12 +788,17 @@ bool visual_animations_active(void);
 void schedule_visual_animation_tick(void);
 void release_visual_animation_tick_if_idle(void);
 void cancel_visual_animation_timer(void);
+bool pan_inertia_animation_active(void);
+bool advance_pan_inertia_animation(void);
+void settle_pan_motion(void);
+void cancel_pan_motion_for_teardown(void);
 #ifdef MAPPY_WATCH_PHONE_MODE_FIXTURE
 void fixture_perf_begin(void);
 void fixture_perf_bearing_immediate_step(void);
 void fixture_perf_scheduler_tick(bool bearing_active, bool gps_active,
                                  bool tile_active, bool menu_active,
-                                 bool bearing_changed);
+                                 bool inertia_active, bool bearing_changed,
+                                 bool inertia_changed);
 void fixture_perf_map_draw(void);
 void fixture_perf_map_draw_complete(void);
 void fixture_perf_rotated_render(uint32_t destination_pixels,
@@ -813,12 +819,17 @@ void fixture_perf_start_mixed_sources(void);
 void fixture_perf_enter_manual_browse(void);
 void fixture_set_location_screen_position(int32_t screen_x, int32_t screen_y);
 void fixture_perf_pan_under_load(int action);
+bool fixture_start_pan_inertia(int32_t viewport_dx, int32_t viewport_dy,
+                               uint16_t elapsed_ms);
 void fixture_perf_maybe_emit(void);
 #endif
 #ifdef MAPPY_WATCH_HARDWARE_PERF
 void hardware_perf_begin_zoom(void);
 void hardware_perf_begin_pan(void);
 void hardware_perf_note_pan_input(time_t seconds, uint16_t milliseconds);
+void hardware_perf_pan_release(bool inertia_started);
+void hardware_perf_pan_settled(uint8_t ticks, bool cancelled);
+void hardware_perf_flush_pan(void);
 void hardware_perf_map_draw_begin(void);
 void hardware_perf_map_draw_complete(void);
 #endif

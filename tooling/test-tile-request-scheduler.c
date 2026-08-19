@@ -622,6 +622,54 @@ static void test_resume_waits_full_grace_period(void) {
         "tile dispatch should resume at the 100ms boundary");
 }
 
+static void test_interrupting_touchdown_restarts_resume_grace_once(void) {
+  reset_fixture();
+  set_visible_origins(1);
+  pause_tile_requests_for_interaction();
+  resume_tile_requests_after_interaction();
+
+  AppTimer *interrupted_resume = s_tile_request_resume_timer;
+  CHECK(interrupted_resume != NULL,
+        "the interrupted release should initially arm a resume timer");
+  advance_time(40);
+
+  // Equivalent to a new touchdown while the previous interaction is waiting
+  // to resume tile work: cancel that resume and inherit the paused state.
+  pause_tile_requests_for_interaction();
+  CHECK(tile_requests_paused() && s_tile_send_count == 0,
+        "an interrupting touchdown must keep tile dispatch paused");
+  CHECK(s_tile_request_resume_timer == NULL,
+        "an interrupting touchdown should clear the pending resume timer");
+  CHECK(interrupted_resume && !interrupted_resume->active,
+        "the interrupted resume callback must be canceled");
+  queue_visible_tiles();
+  CHECK(s_request_count == 0 && s_tile_send_count == 0,
+        "coverage rebuilds must remain deferred throughout interaction pause");
+
+  advance_time(TILE_REQUEST_TOUCH_RESUME_MS);
+  CHECK(tile_requests_paused() && s_tile_send_count == 0,
+        "the canceled resume must not start requests at its old deadline");
+
+  resume_tile_requests_after_interaction();
+  CHECK(s_tile_request_resume_timer != NULL &&
+            s_tile_request_resume_timer->due_ms ==
+                s_now_ms + TILE_REQUEST_TOUCH_RESUME_MS,
+        "the settled replacement interaction should start a fresh full "
+        "grace period");
+  advance_time(TILE_REQUEST_TOUCH_RESUME_MS - 1);
+  CHECK(tile_requests_paused() && s_tile_send_count == 0,
+        "replacement tile work must stay paused through its full grace period");
+  advance_time(1);
+  CHECK(!tile_requests_paused() && s_tile_request_resume_timer == NULL &&
+            s_tile_send_count == 1 && active_tile_flight_count() == 1,
+        "replacement tile work should start exactly once at the grace "
+        "boundary");
+
+  advance_time(TILE_REQUEST_TOUCH_RESUME_MS);
+  CHECK(s_tile_send_count == 1 && active_tile_flight_count() == 1,
+        "no stale resume callback may start duplicate tile work");
+}
+
 static void test_timeout_retry_isolated_from_other_flight(void) {
   reset_fixture();
   set_visible_origins(2);
@@ -753,6 +801,7 @@ int main(void) {
   test_touchdown_retires_flights_and_clears_queue();
   test_pause_resume_replaces_flights_and_ignores_late_chunks();
   test_resume_waits_full_grace_period();
+  test_interrupting_touchdown_restarts_resume_grace_once();
   test_timeout_retry_isolated_from_other_flight();
   test_discard_timeout_does_not_retry();
   test_tile_error_requires_exact_request_id();

@@ -16,7 +16,8 @@ The watch app must:
   and keep marker/navigation state fresh while manually panned.
 - Request visible map tile crops.
 - On touch-capable builds, support watch-local map panning without adding a
-  phone-side touch command.
+  phone-side touch command, including a short fixed-point kinetic coast for
+  qualifying fast releases.
 - On real touch hardware that exposes reliable multi-touch or pinch-distance
   data, support pinch-to-zoom-in and pinch-to-zoom-out as defined by
   `WATCH_TOUCH_INPUT_SPEC.md`.
@@ -79,6 +80,9 @@ Heap acceptance must include the compressed arena, shared scratch, cache
 metadata, a 4,096-byte
 AppMessage inbox, outbound queue storage, route buffers for 128 points, nav-step
 buffers, saved-location records, layers, fonts, and menu/UI allocations.
+Kinetic panning adds no heap allocation. Against an identical-mode build without
+kinetic panning, production data+BSS growth must be at most 64 bytes and binary
+growth at most 3 KiB.
 
 ## App State Model
 
@@ -411,8 +415,20 @@ Touch input on `PBL_TOUCH` platforms:
   suspends facing-up rotation, and uses north-up manual-browse mapping.
   Dragging the map right/down should move map content right/down, which means
   the viewport center moves left/up in world pixel space.
-- `TouchEvent_Liftoff` finalizes the panned viewport and queues missing visible
-  tile crops using normal `CMD_TILE_REQUEST` messages.
+- `TouchEvent_Liftoff` applies its newest coordinates. A recent fast release may
+  coast in fixed-point world pixels for at most 12 logical 30 ms ticks / 360 ms
+  and approximately 70 px; slow, tap, held, and stale releases settle
+  immediately. Detailed sampling, velocity, and decay rules are defined in
+  `WATCH_TOUCH_INPUT_SPEC.md`.
+- Add kinetic pan as the fifth source in the shared visual scheduler. Do not
+  allocate another timer or heap state. Coast frames do not rebuild request
+  coverage or initiate route-detail requests.
+- Keep tile requests and new tile-response decoding paused through drag and
+  coast. Settlement updates state and redraws once, rebuilds request coverage
+  once, then resumes normal tile traffic after the existing 100 ms grace period.
+- A new touchdown interrupts coast at its current viewport and keeps requests
+  paused. Menu/modal opening, zoom, recenter, touch loss, and other button
+  actions settle before acting; teardown cancels without restarting work.
 - Touch panning must not send a new touch-specific phone command. It may only
   produce normal tile requests and bounded diagnostics.
 - Pinch zoom must not send a new touch-specific phone command. It uses the same
@@ -606,6 +622,16 @@ Watch does not persist:
   safely to north-up when heading is invalid or stale.
 - Manual pan while facing-up is active suspends auto-rotation and keeps later
   heading changes from rotating the map until recenter.
+- A qualifying recent fast pan release coasts north-up for no more than 12
+  logical ticks / 360 ms and approximately 70 px; slow, tap, held, and stale
+  releases settle immediately.
+- Tile requests and new tile-response decoding remain paused through drag and
+  coast, then resume after one settled request-coverage rebuild and the existing
+  grace period. Interrupting touchdown does not cause an intermediate resume.
+- Kinetic pan adds no heap allocation or phone/protocol/settings surface. On
+  real `emery`, p95 first-changed-frame latency is at most 100 ms, p95 coast draw
+  is at most 50 ms, no coast draw exceeds 100 ms, settlement is within 450 ms,
+  and the post-settle visible grid fills within 5 seconds without transfer error.
 - Plausible short GPS movement is visually smoothed: facing-up GPS-follow
   glides the map under the centered current-location puck, and north-up glides
   the puck/cone display point. Large or stale movements snap.

@@ -661,11 +661,13 @@ static void apply_gps_fix(int32_t world_x, int32_t world_y, int32_t zoom,
   }
   copy_bounded_text(s_top_text, sizeof(s_top_text), "Map");
   update_nav_progress_from_gps();
-  update_state_after_map_change();
-  if (visible_grid_has_missing_tiles()) {
-    queue_visible_tiles();
-  } else {
-    send_next_tile_request();
+  if (!s_tile_requests_interaction_paused) {
+    update_state_after_map_change();
+    if (visible_grid_has_missing_tiles()) {
+      queue_visible_tiles();
+    } else {
+      send_next_tile_request();
+    }
   }
   if (s_map_layer) {
     layer_mark_dirty(s_map_layer);
