@@ -118,9 +118,11 @@ On init:
    - theme mode,
    - travel mode,
    - backlight mode,
-   - centered map orientation,
-   - tile animation if stored watch-side,
-   - units if stored watch-side,
+    - centered map orientation,
+    - tile animation if stored watch-side,
+    - haptic feedback mode,
+    - navigation glance mode,
+    - units if stored watch-side,
    - last zoom if implemented.
 4. Send `CMD_INIT`:
 
@@ -162,6 +164,8 @@ The watch must handle these MVP inbound commands:
 | `CMD_BACKLIGHT` | Store/apply backlight setting if SDK support permits. |
 | `CMD_MAP_ORIENTATION` | Store centered map orientation; if GPS-follow is active, recalculate visible tile coverage, queue missing tiles, and redraw. If manual browse is active, defer facing-up projection until recenter. |
 | `CMD_TILE_ANIMATION` | Store tile animation mode; apply it to future tile arrivals without invalidating map tiles. |
+| `CMD_HAPTIC_MODE` | Store the normalized navigation haptic preset and cancel any queued Mappy vibration when it changes. |
+| `CMD_GLANCE_MODE` | Store the normalized transient navigation-backlight preset. |
 | `CMD_ERROR_STATE` | Show recoverable setup/tile/route/location error. |
 
 Inbound handlers must validate tuple presence, length, ranges, and binary payload
@@ -187,6 +191,8 @@ The watch sends:
 | `CMD_TRAVEL_MODE` | User changes travel mode on watch. If an active route uses a different mode, queue an active-route reroute using the new mode. |
 | `CMD_MAP_ORIENTATION` | User changes centered map orientation on watch, if watch UI exposes it. |
 | `CMD_TILE_ANIMATION` | User changes tile animation on watch, if watch UI exposes it. |
+| `CMD_HAPTIC_MODE` | User changes the haptic feedback preset on watch. |
+| `CMD_GLANCE_MODE` | User changes the navigation glance preset on watch. |
 | `CMD_LOG_EVENT` | Diagnostic event. |
 
 Outbound tile requests must be deduplicated against valid cache entries and the
@@ -198,8 +204,10 @@ phone can cancel stale tile work for the prior zoom. Menu-only button actions
 remain local and do not send `CMD_BUTTON`.
 
 When a nonzero `CMD_ROUTE_POINTS` payload starts a fresh/user-visible walking
-route, the watch must give exactly one short vibration and immediately move the
-viewport to the maximum supported map zoom before requesting fresh tiles.
+route, the watch must dispatch one route-start feedback event and immediately
+move the viewport to the maximum supported map zoom before requesting fresh
+tiles. The event vibrates and/or wakes the backlight only when its corresponding
+feedback preset is `All`.
 This is a route-start behavior only: silent route refreshes, route detail window
 updates, bike routes, and drive routes must not trigger the haptic or automatic
 zoom jump. The zoom jump follows the normal local zoom path, including cache
@@ -391,13 +399,16 @@ MVP buttons:
 | Input | Map view behavior | Navigation behavior |
 | --- | --- | --- |
 | Up | Zoom in or move selection in menus. | Zoom in or move selection in menus. |
-| Select | Open destination/menu or confirm selection. | Open nav actions menu. |
+| Short Select | Open destination/menu or confirm selection. | Open nav actions menu. |
+| Hold Select for at least 700 ms | Recenter on the current GPS fix. | Recenter without changing the active route or instruction. |
 | Down | Zoom out or move selection in menus. | Zoom out or move selection in menus. |
 | Back | Exit menu; if navigating, prompt/clear route. | Exit menu or clear route. |
 
 When the arrival dialog is visible, any hardware button press dismisses the
 dialog and returns to the normal map without also performing its usual button
-action.
+action. A long Select press follows this modal rule and only dismisses the
+dialog. While any menu is visible, long Select is a no-op that preserves the
+menu and selection.
 
 Touch input on `PBL_TOUCH` platforms:
 
@@ -443,9 +454,10 @@ Touch input on `PBL_TOUCH` platforms:
 - Fresh GPS updates continue to move the current-location marker and navigation
   progress, but must not immediately recenter the viewport while an active pan
   gesture or manual-pan state is in effect.
-- The watch must expose a compact recenter action, such as a menu item, to clear
-  manual-pan state, return the viewport center to current GPS, and reapply the
-  selected centered-map orientation.
+- The watch exposes both an Actions-menu Recenter row and a 700 ms Select hold
+  to clear manual-pan state, return the viewport center to current GPS, and
+  reapply the selected centered-map orientation. With no GPS fix, the hold uses
+  the existing `Waiting for GPS` status and changes no route state.
 - Route overlays, destination markers, and heading/current-location markers must
   be projected from the same viewport state as map tiles while panned.
 
@@ -455,8 +467,9 @@ MVP menus:
   `CMD_DESTINATIONS` payload. Primary ad-hoc
   destination search happens in the phone app, not on the watch.
 - Active route actions: reroute, clear route, change travel mode.
-- Settings summary: theme, units, backlight, centered map orientation, tile
-  animation, diagnostics status. Full editing remains in the phone app.
+- Settings controls: theme, units, backlight, haptics, navigation glance,
+  centered map orientation, tile animation, and diagnostics status. Haptics and
+  glance cycle independently through All, Turns, Arrival, and Off.
 
 The watch menu renders only configured saved locations. If the incoming list
 is empty, the menu shows a local "No destinations" row and does not send a route
@@ -517,16 +530,21 @@ MVP progression:
 - If progression cannot be computed reliably, retain the current step and emit a
   diagnostic event rather than skipping instructions aggressively.
 
-## Turn Haptic Alerts
+## Navigation Feedback Alerts
 
 The watch must implement `TURN_HAPTIC_ALERT_SPEC.md`:
 
 - Use existing route projection plus `CMD_NAV_STEPS` starts and remaining meters.
-- Fire one subtle preview vibration before each non-start, non-arrival maneuver.
-- Fire one stronger vibration when the same maneuver is due.
-- Suppress repeats for the same `global_idx`, including GPS jitter and walking
-  backward over the threshold.
-- Reset haptic alert state when the route is cleared or replaced.
+- Dispatch one preview event before each non-start, non-arrival maneuver and one
+  turn-now event when that maneuver is due.
+- Independently gate the existing vibration pattern and a transient
+  `light_enable_interaction()` request through the Haptics and Glance presets.
+- Consume the event even when both outputs are disabled, suppress repeats for
+  the same `global_idx`, and never replay an event after a setting change.
+- Reset alert state only when the route is cleared or replaced.
+- Do not treat the face-forward wrist-look detector as a general backlight-wake
+  signal. Mappy navigation feedback follows its selected presets even during
+  Pebble Quiet Time.
 
 ## Destination Arrival
 
@@ -538,7 +556,8 @@ projection used for nav-step progression:
 - Treat arrival as reached when the projected remaining route distance or direct
   destination distance is within 20 meters, with a conservative route-pixel
   fallback if meter scaling is unavailable.
-- Fire one distinct arrival vibration.
+- Dispatch one arrival feedback event; output depends on the independent
+  Haptics and Glance presets.
 - Clear route geometry, route-detail windows, nav-step state, turn-alert state,
   route progress, and route loading/error status.
 - Send or queue `CMD_ROUTE_CLEAR` so the phone clears the active route cache.
@@ -611,9 +630,9 @@ Watch does not persist:
 - Walk and bike route displays include the compact provider warning.
 - A zero-point route payload clears route and step display.
 - A nav-step chunk displays the first instruction and can request the next chunk.
-- Moving GPS to the destination finishes the active trip, vibrates once, sends
-  or queues `CMD_ROUTE_CLEAR`, and shows an arrival dialog that any hardware
-  button dismisses.
+- Moving GPS to the destination finishes the active trip, dispatches one
+  policy-controlled arrival event, sends or queues `CMD_ROUTE_CLEAR`, and shows
+  an arrival dialog that any hardware button dismisses.
 - Invalid heading hides the current-location view cone and leaves a neutral
   blue puck.
 - `CMD_MAP_ORIENTATION` switches the centered-map preference between north-up

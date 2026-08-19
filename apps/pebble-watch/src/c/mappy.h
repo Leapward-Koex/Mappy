@@ -11,6 +11,7 @@
 
 #include "bearing_smoothing.h"
 #include "motion_detector.h"
+#include "navigation_feedback.h"
 #include "pan_inertia.h"
 #include "tile_codec.h"
 #include "tile_storage.h"
@@ -40,6 +41,8 @@
 #define CMD_UNITS 403
 #define CMD_BACKLIGHT 404
 #define CMD_DECLINATION 405
+#define CMD_HAPTIC_MODE 406
+#define CMD_GLANCE_MODE 407
 #define CMD_DEBUG_COMPASS 901
 #define CMD_DEBUG_TILE 902
 #define CMD_DEBUG_ROUTE_PROGRESS 903
@@ -69,7 +72,7 @@
 #define MESSAGE_KEY_protocol_version 71
 #endif
 
-#define WATCH_PROTOCOL_VERSION 2
+#define WATCH_PROTOCOL_VERSION 3
 
 #define DEFAULT_TILE_W 54
 #define DEFAULT_TILE_H 63
@@ -137,14 +140,18 @@
 #define PERSIST_MAP_ORIENTATION 5
 #define PERSIST_UNITS 6
 #define PERSIST_TILE_ANIMATION 7
+#define PERSIST_HAPTIC_MODE 8
+#define PERSIST_GLANCE_MODE 9
 #define TILE_ANIMATION_NONE 0
 #define TILE_ANIMATION_FADE 1
 #define TILE_ANIMATION_FADE_ZOOM 2
-#define TILE_ANIMATION_FADE_MS 480
-#define TILE_ANIMATION_FADE_ZOOM_MS 640
+#define TILE_ANIMATION_FADE_MS 180
+#define TILE_ANIMATION_FADE_ZOOM_MS 220
 #define VISUAL_ANIMATION_TICK_MS 30
+#define TILE_ANIMATION_TICK_MS 40
+#define TILE_ANIMATION_MAX_ACTIVE 2
 #define BEARING_SMOOTHING_MAX_CATCHUP_TICKS 4
-#define TILE_ANIMATION_ZOOM_START_Q8 205
+#define TILE_ANIMATION_ZOOM_START_Q8 236
 #define TILE_REQUEST_STALE_MS 8000
 #define TILE_REQUEST_WATCHDOG_MS 1000
 #define TILE_REQUEST_MAX_FLIGHTS 2
@@ -302,11 +309,12 @@ typedef struct {
 } MapRenderTransform;
 
 typedef struct {
-  bool pending;
   int category;
   int detail;
   int detail2;
-  char text[MAX_INSTRUCTION_BYTES + 1];
+  // Queued diagnostics are always static app strings; retaining the pointer
+  // avoids duplicating the same bounded text in every queue slot.
+  const char *text;
 } PendingLogEvent;
 
 typedef enum {
@@ -450,6 +458,8 @@ extern int s_backlight_mode;
 extern int s_map_orientation;
 extern int s_units_mode;
 extern int s_tile_animation_mode;
+extern int s_haptic_mode;
+extern int s_glance_mode;
 extern int s_tile_width;
 extern int s_tile_height;
 extern int s_tile_pixels;
@@ -629,6 +639,8 @@ bool orientation_tile_coverage_changed(void);
 uint16_t tile_animation_duration_ms(uint8_t mode);
 uint16_t tile_animation_elapsed_ms(const TileCacheEntry *entry);
 uint16_t tile_animation_progress_q8(const TileCacheEntry *entry);
+uint16_t tile_animation_progress_at_q8(const TileCacheEntry *entry,
+                                       time_t now_s, uint16_t now_ms);
 uint16_t tile_animation_eased_q8(uint16_t progress_q8);
 void complete_tile_animation(TileCacheEntry *entry);
 bool any_tile_animation_active(void);
@@ -709,6 +721,8 @@ void send_units(void);
 void send_backlight(void);
 void send_map_orientation(void);
 void send_tile_animation(void);
+void send_haptic_mode(void);
+void send_glance_mode(void);
 void send_nav_steps_request(void);
 bool apply_destinations_payload(const uint8_t *data, uint16_t len);
 void apply_gps(DictionaryIterator *iter);
@@ -751,6 +765,7 @@ void change_zoom(int delta);
 void up_click_handler(ClickRecognizerRef recognizer, void *context);
 void down_click_handler(ClickRecognizerRef recognizer, void *context);
 void select_click_handler(ClickRecognizerRef recognizer, void *context);
+void select_long_click_handler(ClickRecognizerRef recognizer, void *context);
 void back_click_handler(ClickRecognizerRef recognizer, void *context);
 void click_config_provider(void *context);
 GColor chrome_bg(void);

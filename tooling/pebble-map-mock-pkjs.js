@@ -28,6 +28,8 @@
   var CMD_TRAVEL_MODE = 402;
   var CMD_UNITS = 403;
   var CMD_BACKLIGHT = 404;
+  var CMD_HAPTIC_MODE = 406;
+  var CMD_GLANCE_MODE = 407;
 
   var TILE_W = 54;
   var TILE_H = 63;
@@ -67,6 +69,12 @@
     if (!isFinite(value)) return fallback;
     value = Math.round(value);
     return Math.max(minValue, Math.min(maxValue, value));
+  }
+
+  function feedbackMode(value) {
+    if (value === undefined || value === null || value === '') return 3;
+    var mode = Number(value);
+    return mode === 0 || mode === 1 || mode === 2 || mode === 3 ? mode : 3;
   }
 
   function positiveModulo(value, divisor) {
@@ -271,7 +279,7 @@
     didSendStartupState = true;
     enqueue('phone-ready', {
       cmd: CMD_PHONE_READY,
-      protocol_version: 2
+      protocol_version: 3
     });
     enqueue('theme', { cmd: CMD_THEME, button_id: 1 });
     enqueue('map-settings', {
@@ -281,6 +289,8 @@
     });
     enqueue('units', { cmd: CMD_UNITS, button_id: 1 });
     enqueue('backlight', { cmd: CMD_BACKLIGHT, button_id: 0 });
+    enqueue('haptic-mode', { cmd: CMD_HAPTIC_MODE, button_id: 3 });
+    enqueue('glance-mode', { cmd: CMD_GLANCE_MODE, button_id: 3 });
     if (tileAnimationMode >= 0) {
       enqueue('tile-animation', {
         cmd: CMD_TILE_ANIMATION,
@@ -462,6 +472,14 @@
       enqueue('travel-mode', {
         cmd: CMD_TRAVEL_MODE,
         button_id: Number(travelMode === undefined ? 2 : travelMode)
+      });
+      return;
+    }
+
+    if (cmd === CMD_HAPTIC_MODE || cmd === CMD_GLANCE_MODE) {
+      enqueue(cmd === CMD_HAPTIC_MODE ? 'haptic-mode' : 'glance-mode', {
+        cmd: cmd,
+        button_id: feedbackMode(pick(payload, 'button_id', KEY_BUTTON_ID))
       });
       return;
     }

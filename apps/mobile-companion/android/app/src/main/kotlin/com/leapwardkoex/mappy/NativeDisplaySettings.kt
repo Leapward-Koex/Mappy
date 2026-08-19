@@ -8,7 +8,9 @@ internal data class NativeDisplaySettings(
     val unitsMode: Int,
     val backlightMode: Int,
     val mapOrientation: Int,
-    val tileAnimationMode: Int
+    val tileAnimationMode: Int,
+    val hapticMode: Int = DEFAULT_HAPTIC_MODE,
+    val glanceMode: Int = DEFAULT_GLANCE_MODE
 )
 
 internal fun loadNativeDisplaySettings(context: Context): NativeDisplaySettings {
@@ -18,6 +20,12 @@ internal fun loadNativeDisplaySettings(context: Context): NativeDisplaySettings 
         travelMode = travelProtocolValue(preferences.getInt(TRAVEL_MODE_SETTING, DEFAULT_TRAVEL_PROTOCOL_MODE)),
         unitsMode = unitsProtocolValue(preferences.getInt(UNITS_MODE_SETTING, DEFAULT_UNITS_MODE)),
         backlightMode = backlightProtocolValue(preferences.getInt(BACKLIGHT_MODE_SETTING, DEFAULT_BACKLIGHT_MODE)),
+        hapticMode = feedbackModeProtocolValue(
+            preferences.getInt(HAPTIC_MODE_SETTING, DEFAULT_HAPTIC_MODE)
+        ),
+        glanceMode = feedbackModeProtocolValue(
+            preferences.getInt(GLANCE_MODE_SETTING, DEFAULT_GLANCE_MODE)
+        ),
         mapOrientation = mapOrientationProtocolValue(
             preferences.getInt(MAP_ORIENTATION_SETTING, DEFAULT_MAP_ORIENTATION)
         ),
@@ -37,6 +45,8 @@ internal fun saveNativeDisplaySettings(
         .putInt(TRAVEL_MODE_SETTING, travelProtocolValue(settings.travelMode))
         .putInt(UNITS_MODE_SETTING, unitsProtocolValue(settings.unitsMode))
         .putInt(BACKLIGHT_MODE_SETTING, backlightProtocolValue(settings.backlightMode))
+        .putInt(HAPTIC_MODE_SETTING, feedbackModeProtocolValue(settings.hapticMode))
+        .putInt(GLANCE_MODE_SETTING, feedbackModeProtocolValue(settings.glanceMode))
         .putInt(MAP_ORIENTATION_SETTING, mapOrientationProtocolValue(settings.mapOrientation))
         .putInt(TILE_ANIMATION_MODE_SETTING, tileAnimationProtocolValue(settings.tileAnimationMode))
         .apply()
@@ -48,6 +58,8 @@ internal fun displaySettingsMap(settings: NativeDisplaySettings): Map<String, An
         TRAVEL_MODE_SETTING to settings.travelMode,
         UNITS_MODE_SETTING to settings.unitsMode,
         BACKLIGHT_MODE_SETTING to settings.backlightMode,
+        HAPTIC_MODE_SETTING to settings.hapticMode,
+        GLANCE_MODE_SETTING to settings.glanceMode,
         MAP_ORIENTATION_SETTING to settings.mapOrientation,
         TILE_ANIMATION_MODE_SETTING to settings.tileAnimationMode
     )

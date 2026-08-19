@@ -92,7 +92,7 @@ The native bridge exposes a small Flutter method/event channel API:
 | `startNavigation` | Flutter -> native | Start routing from current location or a resolved explicit origin to a resolved ad-hoc or saved-location target. |
 | `setDestinations` | Flutter -> native | Push normalized saved-location records. |
 | `setDestination` | Flutter -> native | Patch one normalized saved-location record. |
-| `setSettings` | Flutter -> native | Push theme, units, travel mode, backlight, and centered map orientation. |
+| `setSettings` | Flutter -> native | Push theme, units, travel mode, backlight, centered map orientation, tile animation, haptics, and navigation glance. |
 | `setMapTileSettings` | Flutter -> native | Push map source and rendered tile size. |
 | `requestLocationPermissionState` | Flutter -> native | Return permission state and prompt availability. |
 | `clearCaches` | Flutter -> native | Clear tile, route, or provider-validation cache/status. |
@@ -336,6 +336,8 @@ MVP settings:
 | Units imperial/metric | Phone UI | `CMD_UNITS` |
 | Travel mode default | Phone UI, watch can change current mode | `CMD_TRAVEL_MODE` |
 | Backlight auto/always | Phone UI, watch can report startup persisted value | `CMD_BACKLIGHT` |
+| Haptics all/turns/arrival/off | Phone UI, watch can report and change persisted value | `CMD_HAPTIC_MODE` |
+| Navigation glance all/turns/arrival/off | Phone UI, watch can report and change persisted value | `CMD_GLANCE_MODE` |
 | Centered map orientation north-up/face-forward | Phone UI, watch can report startup persisted value | `CMD_MAP_ORIENTATION` |
 | Tile animation none/fade/fade+zoom | Phone UI, watch can report startup persisted value | `CMD_TILE_ANIMATION` |
 | Map source | Phone UI | `CMD_MAP_SETTINGS` invalidates watch tile cache |
@@ -358,6 +360,11 @@ Tile animation is a display setting specified by
 and send `CMD_TILE_ANIMATION`, but it must not call `setMapTileSettings`, clear
 Google provider sessions, clear phone tile caches, re-request visible tiles, or
 refresh the active route.
+
+Haptics and Navigation glance are independent display settings. Both default to
+All, use `0` off, `1` turns, `2` arrival, and `3` all, and synchronize in both
+directions. Changing either affects future one-shot navigation events only and
+must not clear provider state, restart navigation, or replay a consumed alert.
 
 ### Map Tile Settings
 

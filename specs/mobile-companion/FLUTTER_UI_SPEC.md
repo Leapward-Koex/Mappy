@@ -313,6 +313,8 @@ MVP controls:
 | Default travel mode | Drive, walk, bike | Phone and watch reconciled |
 | Theme | Auto/day, day, night | Phone and watch reconciled |
 | Backlight | System/default, keep on during app where supported | Watch/phone reconciled |
+| Haptics | All, turns, arrival, off | Watch/phone reconciled |
+| Navigation glance | All, turns, arrival, off | Watch/phone reconciled |
 | Centered map orientation | North up, face forward | Phone UI pushed to watch |
 | Tile animation | No animation, fade in, fade + zoom | Phone UI pushed to watch |
 | Map source | Road, satellite, hybrid, terrain | Phone UI/native provider |
@@ -330,11 +332,19 @@ Rules:
 - Tile animation changes must call the normal display settings path and send
   `CMD_TILE_ANIMATION`; they must not call `setMapTileSettings`, clear provider
   caches, re-request tiles, or refresh the active route.
+- Haptics and Navigation glance changes must use the normal display-settings
+  path and send `CMD_HAPTIC_MODE` or `CMD_GLANCE_MODE`. Both default to All and
+  must be independently editable without refreshing a route or replaying an
+  already consumed alert.
 - Map source and rendered tile size changes must call native
   `setMapTileSettings`, clear affected tile caches, and send `CMD_MAP_SETTINGS`
   to the watch through the native bridge.
 - Walk and bike modes must display the provider warning required by
   `../shared/ROUTING_MVP.md`.
+
+Navigation glance UI must explain that it briefly wakes the watch backlight for
+the selected navigation events; it is not the Keep on backlight setting or a
+wrist-raise detector.
 
 Centered map orientation UI:
 

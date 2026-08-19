@@ -6,6 +6,8 @@ from __future__ import annotations
 import importlib.util
 import os
 from pathlib import Path
+import re
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -82,6 +84,97 @@ class CredentialLoadingTest(unittest.TestCase):
 
 
 class RepositoryWorkflowTest(unittest.TestCase):
+    def test_tile_animation_host_contract(self) -> None:
+        compiler = shutil.which(os.environ.get("CC", "cc"))
+        self.assertIsNotNone(compiler, "C compiler is required for host tests")
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output = Path(temp_dir) / "mappy-tile-animation-tests"
+            subprocess.run(
+                [
+                    compiler,
+                    "-std=c99",
+                    "-Wall",
+                    "-Wextra",
+                    "-Werror",
+                    "-DPBL_TOUCH",
+                    "-DMAPPY_H",
+                    "-include",
+                    str(ROOT / "tooling" / "tile-animation-host-shim.h"),
+                    str(ROOT / "tooling" / "test-tile-animation.c"),
+                    str(
+                        ROOT
+                        / "apps"
+                        / "pebble-watch"
+                        / "src"
+                        / "c"
+                        / "tile_animation.c"
+                    ),
+                    "-o",
+                    str(output),
+                ],
+                check=True,
+            )
+            subprocess.run([str(output)], check=True)
+
+    def test_tile_animation_constants_and_touch_cancellation(self) -> None:
+        header = (
+            ROOT / "apps" / "pebble-watch" / "src" / "c" / "mappy.h"
+        ).read_text(encoding="utf-8")
+
+        def macro_value(name: str) -> int:
+            match = re.search(rf"^#define {name} (\d+)$", header, re.MULTILINE)
+            self.assertIsNotNone(match, f"missing {name}")
+            return int(match.group(1))
+
+        self.assertEqual(macro_value("TILE_ANIMATION_FADE_MS"), 180)
+        self.assertEqual(macro_value("TILE_ANIMATION_FADE_ZOOM_MS"), 220)
+        self.assertEqual(macro_value("TILE_ANIMATION_ZOOM_START_Q8"), 236)
+        self.assertEqual(macro_value("TILE_ANIMATION_TICK_MS"), 40)
+        self.assertEqual(macro_value("TILE_ANIMATION_MAX_ACTIVE"), 2)
+
+        render_source = (
+            ROOT / "apps" / "pebble-watch" / "src" / "c" / "render.c"
+        ).read_text(encoding="utf-8")
+        fade_arguments = re.findall(
+            r"tile_animation_draws_pixel\(\s*[\w.>\-]+\s*,\s*[\w.>\-]+\s*,"
+            r"\s*([\w.>\-]+)\s*\)",
+            render_source,
+        )
+        self.assertEqual(len(fade_arguments), 3)
+        self.assertTrue(
+            all(argument.endswith("visibility_q8") for argument in fade_arguments),
+            "every rendering path must dither with eased visibility",
+        )
+
+        input_source = (
+            ROOT / "apps" / "pebble-watch" / "src" / "c" / "input.c"
+        ).read_text(encoding="utf-8")
+        pan_start = input_source.index("void begin_pan_interaction")
+        pan_end = input_source.index("void end_pan_interaction", pan_start)
+        pan_body = input_source[pan_start:pan_end]
+        self.assertIn("complete_tile_animations();", pan_body)
+
+        scheduler_source = (
+            ROOT
+            / "apps"
+            / "pebble-watch"
+            / "src"
+            / "c"
+            / "animation_scheduler.c"
+        ).read_text(encoding="utf-8")
+        cadence_end = scheduler_source.index("bool visual_animations_active")
+        cadence_body = scheduler_source[:cadence_end]
+        self.assertIn("return non_tile_active ?", cadence_body)
+        self.assertIn("TILE_ANIMATION_TICK_MS", cadence_body)
+        self.assertIn("VISUAL_ANIMATION_TICK_MS", cadence_body)
+        schedule_start = scheduler_source.index("void schedule_visual_animation_tick")
+        release_start = scheduler_source.index(
+            "void release_visual_animation_tick_if_idle", schedule_start
+        )
+        schedule_body = scheduler_source[schedule_start:release_start]
+        self.assertIn("if (!s_visual_animation_timer)", schedule_body)
+        self.assertIn("complete_tile_animations();", schedule_body)
+
     def test_watch_reserves_appmessage_before_bounded_tile_storage(self) -> None:
         main_source = (
             ROOT / "apps" / "pebble-watch" / "src" / "c" / "main.c"
@@ -123,6 +216,7 @@ class RepositoryWorkflowTest(unittest.TestCase):
         fixture = (
             ROOT / "tooling" / "pebble-map-mock-pkjs.js"
         ).read_text(encoding="utf-8")
+        generator = GENERATOR_PATH.read_text(encoding="utf-8")
         self.assertIn(
             "if (!ignoreStartupReady) setTimeout(sendReadyState, phoneReadyDelayMs);",
             fixture,
@@ -137,6 +231,15 @@ class RepositoryWorkflowTest(unittest.TestCase):
         )
         self.assertIn("offset += tileChunkBytes", fixture)
         self.assertIn("'tile-he-'", fixture)
+        feedback_echo = (
+            "button_id: feedbackMode(pick(payload, 'button_id', KEY_BUTTON_ID))"
+        )
+        for source in (fixture, generator):
+            self.assertIn(feedback_echo, source)
+            self.assertIn(
+                "mode === 0 || mode === 1 || mode === 2 || mode === 3 ? mode : 3",
+                source,
+            )
 
     def test_shell_scripts_parse_and_help_lists_supported_commands(self) -> None:
         helper = ROOT / "tooling" / "pebble-emulator-codex.sh"

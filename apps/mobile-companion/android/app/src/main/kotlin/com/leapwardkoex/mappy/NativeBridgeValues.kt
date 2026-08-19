@@ -129,6 +129,12 @@ internal fun unitsProtocolValue(value: Int?): Int =
 internal fun backlightProtocolValue(value: Int?): Int =
     if (value == 1) 1 else DEFAULT_BACKLIGHT_MODE
 
+internal fun feedbackModeProtocolValue(value: Int?): Int =
+    when (value) {
+        0, 1, 2, 3 -> value
+        else -> DEFAULT_HAPTIC_MODE
+    }
+
 internal fun mapOrientationProtocolValue(value: Int?): Int =
     if (value == 1) 1 else DEFAULT_MAP_ORIENTATION
 

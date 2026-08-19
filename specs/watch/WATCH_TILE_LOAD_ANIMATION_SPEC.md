@@ -183,7 +183,8 @@ Rules:
 
 Complete active animations immediately when:
 
-- The user changes zoom.
+- The user changes zoom; this settles animations belonging to the previous zoom
+  generation before the viewport changes.
 - Theme changes.
 - `CMD_MAP_SETTINGS` invalidates the tile cache.
 - Centered map orientation changes while GPS-follow is active.
@@ -191,6 +192,11 @@ Complete active animations immediately when:
 - The tile is evicted or replaced.
 - The tile is no longer part of the current visible coverage.
 - A modal/menu becomes the active full-screen surface.
+- The user begins a direct pan/touch interaction.
+
+Tiles from the new zoom generation that arrive after the viewport change remain
+eligible to animate over the retained zoom fallback. The bounded burst policy
+still applies to those animations.
 
 During normal GPS-follow movement, active animations continue and use the latest
 viewport transform each frame. The tile moves with the map exactly as an
@@ -218,8 +224,17 @@ keep the map responsive, the watch may degrade for that burst:
 1. Fade + zoom degrades to fade in.
 2. Fade in degrades to no animation.
 
-The persisted user setting remains unchanged. A degraded burst should emit a
-bounded diagnostic event if diagnostics are enabled.
+The persisted user setting remains unchanged. Implementations may emit a
+bounded diagnostic event when diagnostics are enabled and the platform budget
+allows it.
+
+The current responsiveness policy treats direct manipulation and pan inertia as
+higher priority than decorative tile animation and suppresses animation during
+those interactions. Retained zoom fallback remains animated so zoom changes
+preserve their configured tile reveal. Every burst is limited to two concurrent
+animated tiles, a second concurrent fade + zoom degrades to fade, and staggered
+arrivals inherit the oldest active tile's deadline. Tile-only bursts use a 25 fps
+cadence; other visual animation sources retain their shared 30 ms cadence.
 
 ## Test Requirements
 

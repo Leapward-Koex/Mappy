@@ -261,7 +261,12 @@ reliable multi-touch, pinch-distance, or SDK-provided scale data.
   recenters, matching Google Maps navigation behavior.
 - Navigation instruction text remains anchored in the bottom band while the map,
   route, marker, and destination projections zoom underneath it.
-- Back, Select, Up, and Down keep their existing behavior.
+- Back, Up, and Down keep their existing behavior. A sub-700 ms Select press
+  retains the existing short-click action; a Select hold of at least 700 ms
+  settles any active pan and recenters through the normal GPS-follow path.
+- Long Select must not open Actions on release or repeat while held. It is inert
+  while a menu owns input, and it only dismisses an arrival modal. With no GPS
+  fix it reports the existing `Waiting for GPS` state.
 - Zoom, recenter, touch-service loss, and other button actions settle active
   kinetic pan before acting. Teardown cancels it without queueing new work.
 

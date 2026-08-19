@@ -2,6 +2,18 @@
 
 // One cadence and one redraw for all visual animation sources.
 
+static uint32_t visual_animation_tick_ms(void) {
+  // Tile reveals tolerate the specification's 20-30 fps target. Keep the
+  // existing cadence whenever an interaction or position animation shares the
+  // scheduler, but give tile-only frames more event-loop headroom.
+  bool non_tile_active = map_bearing_smoothing_active() ||
+      gps_smoothing_animation_active() || menu_highlight_animation_active() ||
+      pan_inertia_animation_active();
+  // The caller has already established that some visual source is active, so
+  // no non-tile source necessarily means this is a tile-only tick.
+  return non_tile_active ? VISUAL_ANIMATION_TICK_MS : TILE_ANIMATION_TICK_MS;
+}
+
 bool visual_animations_active(void) {
   return map_bearing_smoothing_active() || gps_smoothing_animation_active() ||
       any_tile_animation_active() || menu_highlight_animation_active() ||
@@ -46,9 +58,8 @@ static void visual_animation_timer_callback(void *data) {
     layer_mark_dirty(s_map_layer);
   }
 #ifdef MAPPY_WATCH_PHONE_MODE_FIXTURE
-  // A render can complete the final animation while a sentinel timer is
-  // already queued. Let that timer close a fixture measurement even though it
-  // has no additional frame to dirty.
+  // Let a no-op tick close fixture measurements for sources that settled
+  // between scheduling and callback dispatch.
   if (!changed) {
     fixture_perf_maybe_emit();
   }
@@ -58,11 +69,24 @@ static void visual_animation_timer_callback(void *data) {
 void schedule_visual_animation_tick(void) {
   if (!s_visual_animation_timer && visual_animations_active()) {
     s_visual_animation_timer = app_timer_register(
-        VISUAL_ANIMATION_TICK_MS, visual_animation_timer_callback, NULL);
-    if (!s_visual_animation_timer && pan_inertia_animation_active()) {
-      // Never strand interaction-paused tile requests if AppTimer resources
-      // disappear during a coast rather than at its initial registration.
-      settle_pan_motion();
+        visual_animation_tick_ms(), visual_animation_timer_callback, NULL);
+    if (!s_visual_animation_timer) {
+      // A failed re-arm must not strand partially rendered state indefinitely.
+      // Settle every source synchronously and coalesce one final redraw.
+      complete_tile_animations();
+      complete_gps_smoothing();
+      cancel_menu_highlight_animation();
+      if (map_bearing_smoothing_active()) {
+        // Snap to the requested target and refresh bearing-dependent coverage;
+        // cancel_map_bearing_smoothing() would instead freeze mid-transition.
+        resume_map_bearing_rendering();
+      }
+      if (pan_inertia_animation_active()) {
+        settle_pan_motion();
+      }
+      if (s_map_layer) {
+        layer_mark_dirty(s_map_layer);
+      }
     }
   }
 }

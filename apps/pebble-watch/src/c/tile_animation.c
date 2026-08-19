@@ -2,15 +2,44 @@
 
 // Tile load animation timing and scheduling.
 
+static int active_tile_animation_count(
+    const TileCacheEntry **oldest_active) {
+  if (oldest_active) {
+    *oldest_active = NULL;
+  }
+  if (!s_tiles) {
+    return 0;
+  }
+
+  int count = 0;
+  int capacity = active_tile_cache_size();
+  for (int i = 0; i < capacity; i++) {
+    const TileCacheEntry *candidate = &s_tiles[i];
+    if (!candidate->animation_active ||
+        candidate->animation_mode == TILE_ANIMATION_NONE) {
+      continue;
+    }
+    count++;
+    if (oldest_active && !*oldest_active) {
+      // Every tile that joins a burst inherits this timestamp, so the first
+      // active entry is also the burst anchor.
+      *oldest_active = candidate;
+    }
+    if (count >= TILE_ANIMATION_MAX_ACTIVE) {
+      return count;
+    }
+  }
+  return count;
+}
+
 uint16_t tile_animation_duration_ms(uint8_t mode) {
   return mode == TILE_ANIMATION_FADE_ZOOM ?
       TILE_ANIMATION_FADE_ZOOM_MS : TILE_ANIMATION_FADE_MS;
 }
 
-uint16_t tile_animation_elapsed_ms(const TileCacheEntry *entry) {
-  time_t now_s;
-  uint16_t now_ms;
-  time_ms(&now_s, &now_ms);
+static uint16_t tile_animation_elapsed_at_ms(const TileCacheEntry *entry,
+                                             time_t now_s,
+                                             uint16_t now_ms) {
   int32_t elapsed = (int32_t)(now_s - entry->animation_started_s) * 1000 +
       (int32_t)now_ms - (int32_t)entry->animation_started_ms;
   if (elapsed < 0) {
@@ -22,16 +51,35 @@ uint16_t tile_animation_elapsed_ms(const TileCacheEntry *entry) {
   return (uint16_t)elapsed;
 }
 
-uint16_t tile_animation_progress_q8(const TileCacheEntry *entry) {
+uint16_t tile_animation_elapsed_ms(const TileCacheEntry *entry) {
+  time_t now_s;
+  uint16_t now_ms;
+  time_ms(&now_s, &now_ms);
+  return tile_animation_elapsed_at_ms(entry, now_s, now_ms);
+}
+
+uint16_t tile_animation_progress_at_q8(const TileCacheEntry *entry,
+                                       time_t now_s,
+                                       uint16_t now_ms) {
   if (!entry->animation_active) {
     return 256;
   }
   uint16_t duration = tile_animation_duration_ms(entry->animation_mode);
-  uint16_t elapsed = tile_animation_elapsed_ms(entry);
+  uint16_t elapsed = tile_animation_elapsed_at_ms(entry, now_s, now_ms);
   if (elapsed >= duration) {
     return 256;
   }
   return (uint16_t)(((uint32_t)elapsed * 256) / duration);
+}
+
+uint16_t tile_animation_progress_q8(const TileCacheEntry *entry) {
+  if (!entry->animation_active) {
+    return 256;
+  }
+  time_t now_s;
+  uint16_t now_ms;
+  time_ms(&now_s, &now_ms);
+  return tile_animation_progress_at_q8(entry, now_s, now_ms);
 }
 
 uint16_t tile_animation_eased_q8(uint16_t progress_q8) {
@@ -75,10 +123,13 @@ void complete_tile_animations(void) {
 
 bool advance_tile_animations(void) {
   bool visible_changed = false;
-  if (!s_tiles) {
+  if (!any_tile_animation_active()) {
     return false;
   }
   bool use_origin_snapshot = map_orientation_active();
+  time_t now_s;
+  uint16_t now_ms;
+  time_ms(&now_s, &now_ms);
   TileRequest origins[TILE_CACHE_SIZE];
   int origin_count = use_origin_snapshot ?
       visible_tile_origins(origins, active_tile_cache_size()) : 0;
@@ -97,15 +148,10 @@ bool advance_tile_animations(void) {
     }
     if (!visible) {
       complete_tile_animation(entry);
-    } else if (tile_animation_progress_q8(entry) >= 256) {
-      // Give the render pass one event-loop turn to draw and commit the final
-      // frame. NONE while active is the zero-allocation completion sentinel;
-      // the next scheduler tick cleans up entries outside the render set.
-      if (entry->animation_mode == TILE_ANIMATION_NONE) {
-        complete_tile_animation(entry);
-      } else {
-        entry->animation_mode = TILE_ANIMATION_NONE;
-      }
+    } else if (tile_animation_progress_at_q8(entry, now_s, now_ms) >= 256) {
+      // This callback already dirties the map below, so the final redraw uses
+      // the exact static tile without keeping a sentinel timer alive.
+      complete_tile_animation(entry);
     }
   }
   return visible_changed;
@@ -127,10 +173,39 @@ bool start_tile_animation(TileCacheEntry *entry, bool was_pending) {
     return false;
   }
 #endif
+  // Never let decorative tile work compete with direct manipulation or coast
+  // settlement. Retained zoom fallback deliberately remains eligible so zoom
+  // changes preserve their configured tile reveal; the bounded burst policy
+  // below keeps that extra composite work short.
+  if (pan_inertia_animation_active()) {
+    return false;
+  }
 
-  time_ms(&entry->animation_started_s, &entry->animation_started_ms);
+  const TileCacheEntry *oldest_active = NULL;
+  int active_count = active_tile_animation_count(&oldest_active);
+  if (active_count >= TILE_ANIMATION_MAX_ACTIVE) {
+    return false;
+  }
+  // Avoid multiplying the expensive scale path when several tiles arrive in
+  // one burst. The second tile still gets the cheaper reveal.
+  if (mode == TILE_ANIMATION_FADE_ZOOM && active_count > 0) {
+    mode = TILE_ANIMATION_FADE;
+  }
+
+  if (oldest_active) {
+    // Cohort staggered arrivals onto one bounded burst instead of granting each
+    // tile a fresh lifetime that can keep the map continuously dirty.
+    entry->animation_started_s = oldest_active->animation_started_s;
+    entry->animation_started_ms = oldest_active->animation_started_ms;
+  } else {
+    time_ms(&entry->animation_started_s, &entry->animation_started_ms);
+  }
   entry->animation_mode = (uint8_t)mode;
   entry->animation_active = true;
+  if (tile_animation_progress_q8(entry) >= 256) {
+    complete_tile_animation(entry);
+    return false;
+  }
   schedule_visual_animation_tick();
   if (!s_visual_animation_timer) {
     complete_tile_animation(entry);

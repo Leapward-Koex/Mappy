@@ -53,6 +53,8 @@ files, or tests.
 - `lib/bridge_channel.dart` exposes Pebble transport and diagnostic events.
 - `lib/watch_protocol.dart` encodes the Mappy watch protocol.
 - `lib/watch_phone_worker.dart` coordinates phone-side watch requests.
+- `icon/` contains the app-icon source and the documented regeneration
+  workflow.
 - `android/` implements secure key storage, Google provider calls, foreground
   location, and Pebble transport.
 - `ios/` is the Flutter iOS runner; Android-only native capabilities report as
@@ -79,6 +81,11 @@ Before a release, validate a restricted key on a build signed with the intended
 release identity. The in-app provider check verifies all required APIs and
 confirms that the configured Android package and certificate restrictions are
 enforced.
+
+To update launcher and notification artwork, follow
+[`icon/README.md`](icon/README.md). The launcher resources are generated with
+`flutter_launcher_icons`; Android notification artwork is maintained as the
+separate monochrome drawable required by the platform.
 
 ## Diagnostics and privacy
 

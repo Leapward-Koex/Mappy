@@ -154,7 +154,7 @@ Method channel requests:
 | `startNavigation` | Flutter -> native | origin policy/current-location or resolved explicit origin, resolved ad-hoc or saved-location target, travel mode | Starts route worker without requiring a saved-location record. |
 | `setDestinations` | Flutter -> native | normalized saved-location records up to the watch protocol payload count | Persisted and pushed when watch ready. |
 | `setDestination` | Flutter -> native | one normalized saved-location record or disabled slot | Persisted patch and pushed when watch ready. |
-| `setSettings` | Flutter -> native | units, theme, travel mode, backlight, centered map orientation | Persisted and pushed when applicable. |
+| `setSettings` | Flutter -> native | units, theme, travel mode, backlight, centered map orientation, tile animation, haptic mode, glance mode | Persisted and pushed when applicable. |
 | `requestLocationPermissionState` | Flutter -> native | none | Permission state and whether prompt is needed. |
 | `clearCaches` | Flutter -> native | cache kinds: `tiles`, `routes`, `provider_validation` | Counts/status removed. |
 | `clearDiagnostics` | Flutter -> native | none | Local diagnostic events cleared. |
@@ -195,6 +195,8 @@ Inbound commands handled by Android native for MVP:
 | `CMD_TRAVEL_MODE` | Persist watch-selected travel mode and notify Flutter. |
 | `CMD_MAP_ORIENTATION` | Persist watch-selected centered map orientation and notify Flutter, if watch-side editing is implemented. |
 | `CMD_TILE_ANIMATION` | Persist watch-selected tile animation mode and notify Flutter, if watch-side editing is implemented. |
+| `CMD_HAPTIC_MODE` | Persist the watch-selected haptic preset, echo normalized state, and notify Flutter. |
+| `CMD_GLANCE_MODE` | Persist the watch-selected navigation-glance preset, echo normalized state, and notify Flutter. |
 | `CMD_LOG_EVENT` | Store bounded diagnostic event. |
 | `CMD_BUTTON` | Accept zoom/button telemetry only if still used by watch implementation. |
 
@@ -406,6 +408,10 @@ Unit/replay tests:
   does not clear provider caches or restart active navigation.
 - `setSettings` with tile animation sends `CMD_TILE_ANIMATION` and does not
   clear provider caches, re-request tiles, or restart active navigation.
+- `setSettings` with haptic or glance mode persists and sends the corresponding
+  command without clearing provider caches or restarting active navigation.
+- Missing and invalid native preference values for haptic and glance mode
+  normalize to `3` All; startup resends both durable settings after phone-ready.
 - Queue prioritizes GPS/control over stale tiles.
 - Tile NACK drops after three failed attempts.
 - Repeated `CMD_INIT` is idempotent.

@@ -30,6 +30,8 @@ void main() {
         WatchCommands.mapSettings,
         WatchCommands.backlight,
         WatchCommands.declination,
+        WatchCommands.hapticMode,
+        WatchCommands.glanceMode,
         WatchCommands.errorState,
         WatchCommands.mapOrientation,
         WatchCommands.tileAnimation,
@@ -42,7 +44,7 @@ void main() {
         WatchCommands.debugRouteProgress,
       };
 
-      expect(commandIds, hasLength(28));
+      expect(commandIds, hasLength(30));
       expect(commandIds, everyElement(isPositive));
     });
 
@@ -130,8 +132,78 @@ void main() {
         'CMD_TILE_ANIMATION',
       );
       expect(
+        WatchMessage.command(WatchCommands.hapticMode, const {
+          WatchKeys.buttonId: 1,
+        }).fields,
+        equals(const {
+          WatchKeys.buttonId: 1,
+          WatchKeys.cmd: WatchCommands.hapticMode,
+        }),
+      );
+      expect(watchCommandName(WatchCommands.hapticMode), 'CMD_HAPTIC_MODE');
+      expect(watchCommandName(WatchCommands.glanceMode), 'CMD_GLANCE_MODE');
+      expect(
         watchCommandName(WatchCommands.debugRouteProgress),
         'CMD_DEBUG_ROUTE_PROGRESS',
+      );
+    });
+
+    test('navigation feedback modes normalize and serialize', () {
+      expect(watchProtocolVersion, 3);
+      expect(WatchNavigationFeedbackMode.values, const [
+        WatchNavigationFeedbackMode.all,
+        WatchNavigationFeedbackMode.turns,
+        WatchNavigationFeedbackMode.arrival,
+        WatchNavigationFeedbackMode.off,
+      ]);
+      expect(
+        WatchNavigationFeedbackMode.fromProtocol(0),
+        WatchNavigationFeedbackMode.off,
+      );
+      expect(
+        WatchNavigationFeedbackMode.fromProtocol(1),
+        WatchNavigationFeedbackMode.turns,
+      );
+      expect(
+        WatchNavigationFeedbackMode.fromProtocol(2),
+        WatchNavigationFeedbackMode.arrival,
+      );
+      expect(
+        WatchNavigationFeedbackMode.fromProtocol(3),
+        WatchNavigationFeedbackMode.all,
+      );
+      expect(
+        WatchNavigationFeedbackMode.fromProtocol(99),
+        WatchNavigationFeedbackMode.all,
+      );
+      expect(
+        WatchNavigationFeedbackMode.fromProtocol(null),
+        WatchNavigationFeedbackMode.all,
+      );
+
+      final defaults = WatchDisplaySettings.fromChannelMap(const {});
+      expect(defaults.hapticMode, WatchNavigationFeedbackMode.all);
+      expect(defaults.glanceMode, WatchNavigationFeedbackMode.all);
+
+      final settings = defaults.copyWith(
+        hapticMode: WatchNavigationFeedbackMode.off,
+        glanceMode: WatchNavigationFeedbackMode.arrival,
+      );
+      expect(settings.toChannelMap()['hapticMode'], 0);
+      expect(settings.toChannelMap()['glanceMode'], 2);
+      expect(
+        settings
+            .toMessages()
+            .where(
+              (message) =>
+                  message.command == WatchCommands.hapticMode ||
+                  message.command == WatchCommands.glanceMode,
+            )
+            .map(
+              (message) =>
+                  (message.command, message.fields[WatchKeys.buttonId]),
+            ),
+        [(WatchCommands.hapticMode, 0), (WatchCommands.glanceMode, 2)],
       );
     });
 
@@ -304,6 +376,63 @@ void main() {
   });
 
   group('watch phone worker', () {
+    test('synchronizes independent haptic and glance settings', () async {
+      final worker = WatchPhoneWorker(
+        locationRepository: const FakeLocationRepository(),
+        providerRepository: CountingProviderRepository(),
+      );
+
+      final saved = await worker.setDisplaySettings(
+        WatchDisplaySettings.defaults.copyWith(
+          hapticMode: WatchNavigationFeedbackMode.off,
+          glanceMode: WatchNavigationFeedbackMode.arrival,
+        ),
+      );
+      expect(worker.hapticMode, WatchNavigationFeedbackMode.off);
+      expect(worker.glanceMode, WatchNavigationFeedbackMode.arrival);
+      expect(
+        saved.map((message) => message.command),
+        containsAll([WatchCommands.hapticMode, WatchCommands.glanceMode]),
+      );
+
+      final hapticResponse = await worker.handleWatchMessage(
+        WatchMessage.command(WatchCommands.hapticMode, const {
+          WatchKeys.buttonId: 1,
+        }),
+      );
+      final glanceResponse = await worker.handleWatchMessage(
+        WatchMessage.command(WatchCommands.glanceMode, const {
+          WatchKeys.buttonId: 99,
+        }),
+      );
+      expect(worker.hapticMode, WatchNavigationFeedbackMode.turns);
+      expect(worker.glanceMode, WatchNavigationFeedbackMode.all);
+      expect(hapticResponse.single.fields[WatchKeys.buttonId], 1);
+      expect(glanceResponse.single.fields[WatchKeys.buttonId], 3);
+
+      final initResponses = await worker.handleWatchMessage(
+        WatchMessage.command(WatchCommands.init, const {
+          WatchKeys.protocolVersion: watchProtocolVersion,
+        }),
+      );
+      expect(
+        initResponses
+            .firstWhere(
+              (message) => message.command == WatchCommands.hapticMode,
+            )
+            .fields[WatchKeys.buttonId],
+        1,
+      );
+      expect(
+        initResponses
+            .firstWhere(
+              (message) => message.command == WatchCommands.glanceMode,
+            )
+            .fields[WatchKeys.buttonId],
+        3,
+      );
+    });
+
     test('GPS messages can carry ordering metadata', () {
       final worker = WatchPhoneWorker(
         locationRepository: const FakeLocationRepository(),

@@ -18,13 +18,15 @@ Commands:
   test-tooling             Run deterministic Pebble development-tool tests.
   test-protocol            Check protocol constants across specs and runtimes.
   test-motion-host         Run allocation-free motion and bearing host tests.
+  test-navigation-feedback-host
+                            Run navigation feedback preset policy host tests.
   test-pan-inertia-host    Run fixed-point kinetic pan host tests.
   test-tile-cache-host     Run bounded tile codec and arena host tests.
   test-tile-scheduler-host Run deterministic two-flight scheduler host tests.
   test-face-forward-render-host
                            Run exact rotated-raster tests and the host benchmark.
   test-face-forward-angles Run 0/30/45/60/75/90-degree Emery render gates.
-  test-render-performance  Run fixture bearing and mixed-animation assertions.
+  test-render-performance  Run fixture bearing and tile-animation matrix assertions.
   test-pan-under-load [prompt]
                            Run pan/load assertions, or only the prompt fade case.
   test-rapid-zoom-reversal Run A-to-B-to-A fallback eviction/refetch assertions.
@@ -309,6 +311,7 @@ test_tooling() {
   require_pebble
   "$(pebble_tool_python)" "$ROOT_DIR/tooling/test-pebble-development.py"
   test_motion_host
+  test_navigation_feedback_host
   test_pan_inertia_host
   test_tile_cache_host
   test_tile_scheduler_host
@@ -335,6 +338,24 @@ test_motion_host() {
     "$WATCH_DIR/src/c/bearing_smoothing.c" \
     -o "$output"
   cd "$ROOT_DIR"
+  "$output"
+  rm -f "$output"
+  trap - RETURN
+}
+
+test_navigation_feedback_host() {
+  local compiler="${CC:-cc}"
+  if ! command -v "$compiler" >/dev/null 2>&1; then
+    echo "C compiler was not found: $compiler" >&2
+    return 127
+  fi
+  local output
+  output="$(mktemp "${TMPDIR:-/tmp}/mappy-navigation-feedback-tests.XXXXXX")"
+  trap 'rm -f "$output"' RETURN
+  "$compiler" -std=c99 -Wall -Wextra -Werror \
+    "$ROOT_DIR/tooling/test-navigation-feedback.c" \
+    "$WATCH_DIR/src/c/navigation_feedback.c" \
+    -o "$output"
   "$output"
   rm -f "$output"
   trap - RETURN
@@ -745,7 +766,7 @@ test_render_performance() {
   require_pebble
   set_phone_mode fixture
   export MAPPY_FIXTURE_ROUTE_POINT_COUNT=128
-  export MAPPY_FIXTURE_TILE_ANIMATION_MODE=1
+  export MAPPY_FIXTURE_TILE_ANIMATION_MODE=0
   export MAPPY_FIXTURE_TILE_DELAY_MS=0
   export MAPPY_FIXTURE_TILE_STAGGER_MS=0
   mkdir -p "$OUT_DIR"
@@ -772,8 +793,30 @@ test_render_performance() {
   send_debug_compass 4
   sleep 2
 
-  send_debug_compass_mixed 200
-  sleep 3
+  # Measure the same facing-up mixed workload with every tile animation mode.
+  # Reset through manual browse before each case so GPS, menu, and camera state
+  # do not leak into the next result. Force animation off while resetting so a
+  # recenter-triggered tile response cannot overlap the measured animation.
+  # These controls do not begin a measurement.
+  local mixed_modes=(0 1 2)
+  # Hold the bearing steady so the same animated tile cannot rotate out of the
+  # visible coverage before its mode reaches the completion deadline.
+  local mixed_headings=(4 4 4)
+  local mixed_current_heading=4
+  local mixed_index
+  for mixed_index in "${!mixed_modes[@]}"; do
+    send_fixture_tile_animation 0
+    sleep 0.15
+    send_debug_compass_manual_browse "$mixed_current_heading"
+    sleep 0.15
+    send_debug_compass_recenter "$mixed_current_heading"
+    sleep 0.35
+    send_fixture_tile_animation "${mixed_modes[mixed_index]}"
+    sleep 0.15
+    send_debug_compass_mixed "${mixed_headings[mixed_index]}"
+    sleep 3
+    mixed_current_heading="${mixed_headings[mixed_index]}"
+  done
 
   send_debug_compass_manual_browse 200
   sleep 2
@@ -793,12 +836,20 @@ test_render_performance() {
   trap - RETURN
 
   mapfile -t summaries < <(grep 'MAPPY_PERF' "$log_file")
-  if (( ${#summaries[@]} < 7 )); then
-    echo "Expected at least seven MAPPY_PERF summaries; see $(windows_path "$log_file")" >&2
+  mapfile -t rotated_summaries < <(grep 'MAPPY_RPERF' "$log_file")
+  if (( ${#summaries[@]} < 9 || ${#rotated_summaries[@]} < 9 )); then
+    echo "Expected at least nine MAPPY_PERF/RPERF summary pairs; see $(windows_path "$log_file")" >&2
     return 1
   fi
-  local isolated="${summaries[${#summaries[@]}-4]}"
-  local mixed="${summaries[${#summaries[@]}-3]}"
+  local isolated="${summaries[${#summaries[@]}-6]}"
+  local mixed_none="${summaries[${#summaries[@]}-5]}"
+  local mixed_fade="${summaries[${#summaries[@]}-4]}"
+  local mixed_zoom="${summaries[${#summaries[@]}-3]}"
+  local mixed_none_rotated="${rotated_summaries[${#rotated_summaries[@]}-5]}"
+  local mixed_fade_rotated="${rotated_summaries[${#rotated_summaries[@]}-4]}"
+  local mixed_zoom_rotated="${rotated_summaries[${#rotated_summaries[@]}-3]}"
+  # Preserve the original mixed-source assertions against the fade case.
+  local mixed="$mixed_fade"
   local manual="${summaries[${#summaries[@]}-2]}"
   local recentered="${summaries[${#summaries[@]}-1]}"
   local isolated_draws isolated_steps isolated_projections
@@ -869,6 +920,70 @@ test_render_performance() {
     return 1
   fi
 
+  # The 180/220 ms animation contract should need no more than seven/eight
+  # tile advances with one cadence of timing tolerance. GPS and menu work can
+  # continue after the tile completes, so gate tile lifetime directly and use
+  # per-frame latency (not aggregate draw count/time) for responsiveness. This
+  # still prevents the old 480/640 ms animation lifetimes from returning.
+  local matrix_summaries=("$mixed_none" "$mixed_fade" "$mixed_zoom")
+  local matrix_rotated_summaries=(
+    "$mixed_none_rotated" "$mixed_fade_rotated" "$mixed_zoom_rotated")
+  local matrix_names=("none" "fade" "fade+zoom")
+  local matrix_min_tile_ticks=(0 5 6)
+  local matrix_max_tile_ticks=(0 7 8)
+  local matrix_summary matrix_name matrix_errors matrix_ticks
+  local matrix_draws matrix_tiles matrix_draw_total matrix_draw_max
+  local matrix_decode_errors
+  for mixed_index in "${!matrix_summaries[@]}"; do
+    matrix_summary="${matrix_summaries[mixed_index]}"
+    matrix_name="${matrix_names[mixed_index]}"
+    matrix_errors="$(perf_summary_value "$matrix_summary" e)"
+    matrix_ticks="$(perf_summary_value "$matrix_summary" t)"
+    matrix_draws="$(perf_summary_value "$matrix_summary" d)"
+    matrix_tiles="$(perf_summary_value "$matrix_summary" l)"
+    matrix_draw_total="$(perf_summary_pair_value "$matrix_summary" q total)"
+    matrix_draw_max="$(perf_summary_pair_value "$matrix_summary" q max)"
+    matrix_decode_errors="$(perf_summary_value \
+        "${matrix_rotated_summaries[mixed_index]}" e)"
+
+    if [[ -z "$matrix_errors" || "$matrix_errors" != "0" ]]; then
+      echo "Tile animation $matrix_name reported errors: $matrix_summary" >&2
+      return 1
+    fi
+    if [[ -z "$matrix_ticks" || -z "$matrix_draws" ||
+          -z "$matrix_tiles" || -z "$matrix_draw_total" ||
+          -z "$matrix_draw_max" ]] ||
+        (( matrix_ticks < 1 || matrix_ticks > 64 ||
+           matrix_draws < 1 ||
+           matrix_draws > matrix_ticks + 1 )); then
+      echo "Tile animation $matrix_name redraw/tick budget failed: scheduler=${matrix_ticks:-missing}/64 draws=${matrix_draws:-missing} summary=$matrix_summary" >&2
+      return 1
+    fi
+    if (( mixed_index == 0 )); then
+      if (( matrix_tiles != 0 )); then
+        echo "Disabled tile animation advanced unexpectedly: $matrix_summary" >&2
+        return 1
+      fi
+    elif (( matrix_tiles < matrix_min_tile_ticks[mixed_index] ||
+            matrix_tiles > matrix_max_tile_ticks[mixed_index] ||
+            matrix_draws < matrix_tiles )); then
+      echo "Tile animation $matrix_name lifetime budget failed: tileTicks=${matrix_tiles}/${matrix_min_tile_ticks[mixed_index]}..${matrix_max_tile_ticks[mixed_index]} draws=$matrix_draws summary=$matrix_summary" >&2
+      return 1
+    fi
+    # RPERF z measures cross-zoom fallback sampling, not tile-local animation
+    # scale. Keep the renderer integrity gate to decode failures; the isolated
+    # setting/reset sequence and tile lifetime counters distinguish the modes.
+    if [[ -z "$matrix_decode_errors" || "$matrix_decode_errors" != "0" ]]; then
+      echo "Tile animation $matrix_name renderer decode assertion failed: decodeErrors=${matrix_decode_errors:-missing} summary=${matrix_rotated_summaries[mixed_index]}" >&2
+      return 1
+    fi
+    if (( matrix_draw_total < matrix_draw_max || matrix_draw_max > 28 ||
+          matrix_draw_total > matrix_draws * 25 )); then
+      echo "Tile animation $matrix_name render budget failed: total=${matrix_draw_total}ms draws=${matrix_draws} averageLimit=25ms max=${matrix_draw_max}/28ms" >&2
+      return 1
+    fi
+  done
+
   if [[ -z "$manual_ticks" || -z "$manual_draws" || -z "$manual_steps" ||
         -z "$manual_advances" || -z "$manual_browse" ]] ||
       (( manual_ticks < 2 || manual_draws != manual_steps ||
@@ -923,8 +1038,9 @@ test_render_performance() {
     return 1
   fi
 
-  printf 'Isolated: %s\nMixed: %s\nManual browse: %s\nRecentered: %s\nPerformance log: %s\n' \
-    "$isolated" "$mixed" "$manual" "$recentered" \
+  printf 'Isolated: %s\nAnimation none: %s\nAnimation fade: %s\nAnimation fade+zoom: %s\nManual browse: %s\nRecentered: %s\nPerformance log: %s\n' \
+    "$isolated" "$mixed_none" "$mixed_fade" "$mixed_zoom" \
+    "$manual" "$recentered" \
     "$(windows_path "$log_file")"
   pebble kill >/dev/null 2>&1 || true
 }
@@ -1938,6 +2054,9 @@ main() {
       ;;
     test-motion-host)
       test_motion_host
+      ;;
+    test-navigation-feedback-host)
+      test_navigation_feedback_host
       ;;
     test-pan-inertia-host)
       test_pan_inertia_host

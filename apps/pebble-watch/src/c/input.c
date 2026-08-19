@@ -6,16 +6,23 @@ typedef enum {
   SettingsRowTheme,
   SettingsRowUnits,
   SettingsRowBacklight,
+  SettingsRowHaptics,
+  SettingsRowGlance,
   SettingsRowOrientation,
   SettingsRowTileAnimation,
   SettingsRowDiagnostics,
   SettingsRowCount,
 } SettingsRow;
 
+#define SELECT_LONG_CLICK_MS 700
+
 void recenter_viewport(void) {
   settle_pan_motion();
   if (!s_has_gps) {
     set_bottom_text("Waiting for GPS");
+    if (s_map_layer) {
+      layer_mark_dirty(s_map_layer);
+    }
     return;
   }
   complete_gps_smoothing();
@@ -239,6 +246,10 @@ void begin_pan_interaction(int16_t screen_x, int16_t screen_y) {
 #endif
   pause_tile_requests_for_interaction();
   complete_gps_smoothing();
+  // Prioritize direct manipulation over decorative tile work. New tile
+  // animations are already suppressed while touch is active, but an animation
+  // that started before touch would otherwise keep forcing full map redraws.
+  complete_tile_animations();
   s_touch_active = true;
   s_touch_start_x = screen_x;
   s_touch_start_y = screen_y;
@@ -511,6 +522,20 @@ const char *tile_animation_label(void) {
   }
 }
 
+static const char *navigation_feedback_mode_label(int mode) {
+  switch (navigation_feedback_normalize_mode(mode)) {
+    case NavigationFeedbackModeTurns:
+      return "turns";
+    case NavigationFeedbackModeArrival:
+      return "arrival";
+    case NavigationFeedbackModeOff:
+      return "off";
+    case NavigationFeedbackModeAll:
+    default:
+      return "all";
+  }
+}
+
 const char *menu_title(void) {
   switch (s_menu_mode) {
     case MenuDestinations:
@@ -552,6 +577,12 @@ void menu_item_label(int index, char *buffer, size_t buffer_size) {
         snprintf(buffer, buffer_size, "Units %s", s_units_mode == 1 ? "metric" : "imperial");
       } else if (index == SettingsRowBacklight) {
         snprintf(buffer, buffer_size, "Backlight %s", s_backlight_mode ? "on" : "auto");
+      } else if (index == SettingsRowHaptics) {
+        snprintf(buffer, buffer_size, "Haptics %s",
+                 navigation_feedback_mode_label(s_haptic_mode));
+      } else if (index == SettingsRowGlance) {
+        snprintf(buffer, buffer_size, "Glance %s",
+                 navigation_feedback_mode_label(s_glance_mode));
       } else if (index == SettingsRowOrientation) {
         snprintf(buffer, buffer_size, "Orient %s", orientation_label());
       } else if (index == SettingsRowTileAnimation) {
@@ -645,6 +676,19 @@ void select_menu_item(void) {
         persist_write_int(PERSIST_BACKLIGHT, s_backlight_mode);
         light_enable(s_backlight_mode == 1);
         send_backlight();
+      } else if (s_menu_selection == SettingsRowHaptics ||
+                 s_menu_selection == SettingsRowGlance) {
+        bool is_haptic = s_menu_selection == SettingsRowHaptics;
+        int *mode = is_haptic ? &s_haptic_mode : &s_glance_mode;
+        *mode = navigation_feedback_next_mode(*mode);
+        persist_write_int(is_haptic ? PERSIST_HAPTIC_MODE : PERSIST_GLANCE_MODE,
+                          *mode);
+        if (is_haptic) {
+          vibes_cancel();
+          send_haptic_mode();
+        } else {
+          send_glance_mode();
+        }
       } else if (s_menu_selection == SettingsRowOrientation) {
         complete_gps_smoothing();
         bool resume_follow_for_facing =
@@ -831,6 +875,18 @@ void select_click_handler(ClickRecognizerRef recognizer, void *context) {
   open_menu(MenuActions);
 }
 
+void select_long_click_handler(ClickRecognizerRef recognizer, void *context) {
+  if (s_menu_mode != MenuNone) {
+    return;
+  }
+  settle_pan_motion();
+  if (dismiss_arrival_dialog()) {
+    return;
+  }
+  s_route_clear_armed = false;
+  recenter_viewport();
+}
+
 void back_click_handler(ClickRecognizerRef recognizer, void *context) {
   settle_pan_motion();
   if (dismiss_arrival_dialog()) {
@@ -857,5 +913,7 @@ void click_config_provider(void *context) {
   window_single_click_subscribe(BUTTON_ID_UP, up_click_handler);
   window_single_click_subscribe(BUTTON_ID_DOWN, down_click_handler);
   window_single_click_subscribe(BUTTON_ID_SELECT, select_click_handler);
+  window_long_click_subscribe(BUTTON_ID_SELECT, SELECT_LONG_CLICK_MS,
+                              select_long_click_handler, NULL);
   window_single_click_subscribe(BUTTON_ID_BACK, back_click_handler);
 }
