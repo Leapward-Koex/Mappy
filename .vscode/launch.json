@@ -20,6 +20,15 @@
       "request": "launch",
       "type": "dart",
       "flutterMode": "release"
+    },
+    {
+      "name": "pebble-watch (release install)",
+      "type": "PowerShell",
+      "request": "launch",
+      "script": "${workspaceFolder}/tooling/install-watch-release.ps1",
+      "cwd": "${workspaceFolder}",
+      "args": [],
+      "createTemporaryIntegratedConsole": true
     }
   ]
 }
