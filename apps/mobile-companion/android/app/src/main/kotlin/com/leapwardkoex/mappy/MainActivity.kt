@@ -5,11 +5,13 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.location.Location
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
+import android.provider.Settings
 import android.util.Log
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
@@ -25,8 +27,11 @@ import java.util.Date
 import java.util.Locale
 import java.util.TimeZone
 
+private const val BRIDGE_STATUS_EMISSION_INTERVAL_MILLIS = 250L
+
 class MainActivity : FlutterActivity() {
     private var pendingPermissionResult: MethodChannel.Result? = null
+    private var pendingPermissionReturnsAccessStatus = false
     private var pendingNotificationPermissionResult: MethodChannel.Result? = null
     private val mainHandler = Handler(Looper.getMainLooper())
     private lateinit var apiKeyStore: ApiKeyStore
@@ -60,6 +65,24 @@ class MainActivity : FlutterActivity() {
     private val nativePendingPhoneMessages = mutableListOf<Map<String, Any?>>()
     private val runtimeEventSink: (Map<String, Any?>) -> Unit = { event -> handleWatchBridgeEvent(event) }
     private var bridgeEventSink: EventChannel.EventSink? = null
+    @Volatile
+    private var bridgeListenerGeneration = 0L
+    private val bridgeStatusEmissionGate by lazy {
+        BridgeStatusEmissionGate(
+            intervalMillis = BRIDGE_STATUS_EMISSION_INTERVAL_MILLIS,
+            nowMillis = SystemClock::elapsedRealtime,
+            schedule = { runnable, delayMillis -> mainHandler.postDelayed(runnable, delayMillis) },
+            cancel = mainHandler::removeCallbacks,
+            payloadSupplier = ::bridgeStatusPayload,
+            emitter = { payload ->
+                recordSetupStateChanged(payload["setupState"] as? String)
+                recordNotificationPermissionChanged(
+                    payload["notificationPermissionState"] as? String
+                )
+                emitBridgeEvent(payload)
+            }
+        )
+    }
     private var lastEmittedSetupState: String? = null
     private var lastEmittedPermissionState: String? = null
     private var lastEmittedNotificationPermissionState: String? = null
@@ -93,12 +116,29 @@ class MainActivity : FlutterActivity() {
         ).setMethodCallHandler { call, result ->
             when (call.method) {
                 "getBridgeStatus" -> result.success(bridgeStatusPayload())
+                "getSetupChecklistVersion" ->
+                    result.success(NativeSetupChecklistPersistence.read(applicationContext))
+                "setSetupChecklistVersion" -> {
+                    val version = setupChecklistVersionArgument(call.arguments)
+                    if (version == null) {
+                        result.error(
+                            "invalid_setup_checklist_version",
+                            "Setup checklist version must be a nonnegative integer.",
+                            null
+                        )
+                    } else {
+                        result.success(
+                            NativeSetupChecklistPersistence.write(applicationContext, version)
+                        )
+                    }
+                }
                 "startWatchApp" -> {
                     watchRuntime.startWatchApp()
                     emitBridgeStatus()
                     result.success(bridgeStatusPayload())
                 }
                 "requestNotificationPermission" -> requestNotificationPermission(result)
+                "openNotificationSettings" -> result.success(openNotificationSettings())
                 "exportDiagnostics" -> {
                     emitDiagnosticEvent(
                         source = "flutter",
@@ -128,8 +168,10 @@ class MainActivity : FlutterActivity() {
         ).setStreamHandler(
             object : EventChannel.StreamHandler {
                 override fun onListen(arguments: Any?, events: EventChannel.EventSink) {
+                    bridgeListenerGeneration += 1
                     bridgeEventSink = events
-                    emitBridgeStatus()
+                    bridgeStatusEmissionGate.reset()
+                    emitBridgeStatus(force = true)
                     emitProviderStatusEvent()
                     emitLocationStatusEvent()
                     synchronized(this@MainActivity) { nativeLastShareStatus }?.let { status ->
@@ -138,7 +180,9 @@ class MainActivity : FlutterActivity() {
                 }
 
                 override fun onCancel(arguments: Any?) {
+                    bridgeListenerGeneration += 1
                     bridgeEventSink = null
+                    bridgeStatusEmissionGate.reset()
                 }
             }
         )
@@ -150,6 +194,13 @@ class MainActivity : FlutterActivity() {
             when (call.method) {
                 "getPermissionState" -> result.success(permissionState())
                 "requestLocationPermission" -> requestLocationPermission(result)
+                "getLocationAccessStatus" -> result.success(locationAccessStatus())
+                "requestForegroundLocationPermission" ->
+                    requestForegroundLocationPermission(result)
+                "openAppLocationSettings" ->
+                    result.success(WatchLocationStreamer.openAppLocationSettings(this))
+                "openLocationServicesSettings" ->
+                    result.success(WatchLocationStreamer.openLocationServicesSettings(this))
                 "getCurrentLocation" -> currentLocation(
                     result,
                     call.argument<Int>("timeoutMillis")?.toLong()
@@ -168,8 +219,9 @@ class MainActivity : FlutterActivity() {
                     if (apiKey == null) {
                         result.error("missing_api_key", "API key argument is required.", null)
                     } else {
-                        mapTilesProvider.clearProviderSessions()
-                        val status = apiKeyStore.storeApiKey(apiKey)
+                        val status = mapTilesProvider.mutateCredentialState {
+                            apiKeyStore.storeApiKey(apiKey)
+                        }
                         recordDiagnosticEntry(
                             source = "android_bridge",
                             level = "info",
@@ -183,8 +235,9 @@ class MainActivity : FlutterActivity() {
                     }
                 }
                 "clearApiKey" -> {
-                    mapTilesProvider.clearProviderSessions()
-                    val status = apiKeyStore.clearApiKey()
+                    val status = mapTilesProvider.mutateCredentialState {
+                        apiKeyStore.clearApiKey()
+                    }
                     recordDiagnosticEntry(
                         source = "android_bridge",
                         level = "info",
@@ -196,11 +249,7 @@ class MainActivity : FlutterActivity() {
                     emitProviderStatusEvent(status)
                     emitBridgeStatus()
                 }
-                "getProviderStatus" -> {
-                    val status = mapTilesProvider.providerStatus()
-                    result.success(status)
-                    emitProviderStatusEvent(status)
-                }
+                "getProviderStatus" -> result.success(mapTilesProvider.providerStatus())
                 "getMapTileSettings" -> result.success(mapTilesProvider.mapTileSettingsStatus())
                 "setMapTileSettings" -> {
                     val settingsArguments = call.arguments as? Map<*, *>
@@ -389,6 +438,7 @@ class MainActivity : FlutterActivity() {
                     }
                 }
                 "getDestinations" -> result.success(watchRuntime.dispatcher.exportDestinations())
+                "getActiveRoute" -> result.success(watchRuntime.activeRoute())
                 "startNavigation" -> {
                     val request = call.arguments as? Map<*, *>
                     if (request == null) {
@@ -446,7 +496,9 @@ class MainActivity : FlutterActivity() {
     }
 
     override fun cleanUpFlutterEngine(flutterEngine: FlutterEngine) {
+        bridgeListenerGeneration += 1
         bridgeEventSink = null
+        bridgeStatusEmissionGate.reset()
         watchRuntime.detachUi(runtimeEventSink)
         super.cleanUpFlutterEngine(flutterEngine)
     }
@@ -482,10 +534,16 @@ class MainActivity : FlutterActivity() {
         if (requestCode == LOCATION_PERMISSION_REQUEST_CODE) {
             val result = pendingPermissionResult
             pendingPermissionResult = null
+            val returnAccessStatus = pendingPermissionReturnsAccessStatus
+            pendingPermissionReturnsAccessStatus = false
+            val accessStatus = locationAccessStatus()
             val state = permissionState()
-            result?.success(state)
+            result?.success(if (returnAccessStatus) accessStatus else state)
             recordLocationPermissionChanged(state)
-            if (state == "grantedPrecise" || state == "grantedApproximate") {
+            if (
+                accessStatus["foregroundState"] == "precise" ||
+                accessStatus["foregroundState"] == "approximate"
+            ) {
                 if (isGpsStreamingRequested()) {
                     startGpsStreamingIfPossible()
                 }
@@ -495,6 +553,7 @@ class MainActivity : FlutterActivity() {
                     text = "Location permission is required for live watch GPS."
                 )
             }
+            emitLocationStatusEvent()
             emitBridgeStatus()
             return
         }
@@ -512,14 +571,48 @@ class MainActivity : FlutterActivity() {
     }
 
     private fun requestLocationPermission(result: MethodChannel.Result) {
-        if (hasFineLocation() || hasCoarseLocation()) {
-            if (!WatchLocationStreamer.hasBackgroundLocation(this)) {
-                WatchLocationStreamer.openAppLocationSettings(this)
-            }
+        val accessStatus = locationAccessStatus()
+        if (accessStatus["servicesEnabled"] != true) {
+            WatchLocationStreamer.openLocationServicesSettings(this)
             result.success(permissionState())
             return
         }
 
+        when (accessStatus["foregroundState"]) {
+            "precise", "approximate" -> {
+                if (accessStatus["backgroundRequired"] == true &&
+                    accessStatus["backgroundGranted"] != true
+                ) {
+                    WatchLocationStreamer.openAppLocationSettings(this)
+                }
+                result.success(permissionState())
+                return
+            }
+            "permanentlyDenied" -> {
+                WatchLocationStreamer.openAppLocationSettings(this)
+                result.success(permissionState())
+                return
+            }
+        }
+
+        beginForegroundLocationPermissionRequest(result, returnAccessStatus = false)
+    }
+
+    private fun requestForegroundLocationPermission(result: MethodChannel.Result) {
+        when (locationAccessStatus()["foregroundState"]) {
+            "precise", "approximate", "permanentlyDenied" -> {
+                result.success(locationAccessStatus())
+                return
+            }
+        }
+
+        beginForegroundLocationPermissionRequest(result, returnAccessStatus = true)
+    }
+
+    private fun beginForegroundLocationPermissionRequest(
+        result: MethodChannel.Result,
+        returnAccessStatus: Boolean
+    ) {
         if (pendingPermissionResult != null) {
             result.error("permission_request_in_flight", "Location permission request is already in progress.", null)
             return
@@ -531,6 +624,7 @@ class MainActivity : FlutterActivity() {
             .apply()
 
         pendingPermissionResult = result
+        pendingPermissionReturnsAccessStatus = returnAccessStatus
         requestPermissions(
             arrayOf(
                 Manifest.permission.ACCESS_FINE_LOCATION,
@@ -541,7 +635,14 @@ class MainActivity : FlutterActivity() {
     }
 
     private fun requestNotificationPermission(result: MethodChannel.Result) {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU || hasNotificationPermission()) {
+        val currentState = notificationPermissionState()
+        if (currentState == "notRequired" || currentState == "granted") {
+            result.success(bridgeStatusPayload())
+            return
+        }
+
+        if (currentState == "permanentlyDenied") {
+            openNotificationSettings()
             result.success(bridgeStatusPayload())
             return
         }
@@ -583,6 +684,12 @@ class MainActivity : FlutterActivity() {
         return WatchLocationStreamer.permissionState(this, wasRequested)
     }
 
+    private fun locationAccessStatus(): Map<String, Any?> {
+        val wasRequested = getPreferences(Context.MODE_PRIVATE)
+            .getBoolean(LOCATION_PERMISSION_REQUESTED_KEY, false)
+        return WatchLocationStreamer.locationAccessStatus(this, wasRequested)
+    }
+
     private fun notificationPermissionState(): String {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) {
             return "notRequired"
@@ -604,19 +711,33 @@ class MainActivity : FlutterActivity() {
         }
     }
 
-    private fun hasFineLocation(): Boolean =
-        WatchLocationStreamer.hasFineLocation(this)
-
-    private fun hasCoarseLocation(): Boolean =
-        WatchLocationStreamer.hasCoarseLocation(this)
-
     private fun hasNotificationPermission(): Boolean =
         Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU ||
             checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED
 
-    private fun hasEnabledLocationProvider(): Boolean {
-        return WatchLocationStreamer.hasEnabledLocationProvider(this)
+    private fun openNotificationSettings(): Boolean {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val notificationIntent = Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS)
+                .putExtra(Settings.EXTRA_APP_PACKAGE, packageName)
+            if (startSettingsActivity(notificationIntent)) {
+                return true
+            }
+        }
+        return startSettingsActivity(
+            Intent(
+                Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                Uri.fromParts("package", packageName, null)
+            )
+        )
     }
+
+    private fun startSettingsActivity(intent: Intent): Boolean =
+        try {
+            startActivity(intent)
+            true
+        } catch (_: Exception) {
+            false
+        }
 
     private fun requestGpsStreaming() {
         WatchLocationStreamer.request(applicationContext)
@@ -658,6 +779,8 @@ class MainActivity : FlutterActivity() {
         Thread {
             val response = try {
                 block()
+            } catch (_: ProviderOperationCancelledException) {
+                null
             } catch (_: Exception) {
                 mapOf(
                     "ok" to false,
@@ -665,11 +788,37 @@ class MainActivity : FlutterActivity() {
                     "detail" to "Provider task failed."
                 )
             }
+            val operationGeneration = mapTilesProvider.operationGenerationForCurrentThread()
             mainHandler.post {
-                result.success(response)
-                (response["providerStatus"] as? Map<*, *>)?.let { providerStatus ->
-                    emitProviderStatusEvent(stringKeyMap(providerStatus))
-                    emitBridgeStatus()
+                if (response == null) {
+                    result.success(
+                        mapOf(
+                            "ok" to false,
+                            "cancelled" to true,
+                            "providerStatus" to apiKeyStore.getStatus(),
+                            "detail" to "Provider task cancelled."
+                        )
+                    )
+                    return@post
+                }
+                val delivered = mapTilesProvider.runIfProviderOperationCurrent(
+                    operationGeneration
+                ) {
+                    result.success(response)
+                    (response["providerStatus"] as? Map<*, *>)?.let { providerStatus ->
+                        emitProviderStatusEvent(stringKeyMap(providerStatus))
+                        emitBridgeStatus()
+                    }
+                }
+                if (!delivered) {
+                    result.success(
+                        mapOf(
+                            "ok" to false,
+                            "cancelled" to true,
+                            "providerStatus" to apiKeyStore.getStatus(),
+                            "detail" to "Provider task cancelled."
+                        )
+                    )
                 }
             }
         }.start()
@@ -686,6 +835,8 @@ class MainActivity : FlutterActivity() {
         Thread {
             val response = try {
                 mapTilesProvider.validateProviderSetup()
+            } catch (_: ProviderOperationCancelledException) {
+                null
             } catch (_: Exception) {
                 mapOf(
                     "configured" to false,
@@ -693,37 +844,58 @@ class MainActivity : FlutterActivity() {
                     "validationDetail" to "Provider validation failed."
                 )
             }
+            val operationGeneration = mapTilesProvider.operationGenerationForCurrentThread()
             mainHandler.post {
-                val validationState = response["validationState"] as? String
-                val httpStatus = intValue(response, "validationHttpStatus")
-                recordDiagnosticEntry(
-                    source = "provider",
-                    level = if (validationState == "valid") "info" else "warn",
-                    eventName = "provider_validation_finished",
-                    message = response["validationDetail"] as? String
-                        ?: "Provider validation finished.",
-                    provider = "google_map_tiles",
-                    providerErrorClass = validationState,
-                    httpStatus = httpStatus
-                )
-                result.success(response)
-                emitProviderStatusEvent(response)
-                emitBridgeStatus()
+                if (response == null) {
+                    // Credential replacement/removal already publishes its own current
+                    // status. Complete the old call without emitting a stale result.
+                    result.success(apiKeyStore.getStatus())
+                    return@post
+                }
+                val delivered = mapTilesProvider.runIfProviderOperationCurrent(
+                    operationGeneration
+                ) {
+                    val validationState = response["validationState"] as? String
+                    val httpStatus = intValue(response, "validationHttpStatus")
+                    recordDiagnosticEntry(
+                        source = "provider",
+                        level = if (validationState == "valid") "info" else "warn",
+                        eventName = "provider_validation_finished",
+                        message = response["validationDetail"] as? String
+                            ?: "Provider validation finished.",
+                        provider = "google_map_tiles",
+                        providerErrorClass = validationState,
+                        httpStatus = httpStatus
+                    )
+                    result.success(response)
+                    emitProviderStatusEvent(response)
+                    emitBridgeStatus()
+                }
+                if (!delivered) {
+                    result.success(apiKeyStore.getStatus())
+                }
             }
         }.start()
     }
 
     private fun runWatchTask(result: MethodChannel.Result, block: () -> List<Map<String, Any?>>) {
         watchRuntime.submit(block) { outcome ->
-            val response = outcome.getOrElse {
-                listOf(
-                    errorMessage(
-                        category = ERROR_ROUTE_PROVIDER,
-                        failedCommand = 0,
-                        text = "Watch dispatcher task failed."
-                    )
-                )
-            }
+            val response = outcome.fold(
+                onSuccess = { it },
+                onFailure = { error ->
+                    if (error is ProviderOperationCancelledException) {
+                        emptyList()
+                    } else {
+                        listOf(
+                            errorMessage(
+                                category = ERROR_ROUTE_PROVIDER,
+                                failedCommand = 0,
+                                text = "Watch dispatcher task failed."
+                            )
+                        )
+                    }
+                }
+            )
             mainHandler.post { result.success(response) }
         }
     }
@@ -916,9 +1088,6 @@ class MainActivity : FlutterActivity() {
             destinationHasCoordinates = share.destination.hasCoordinates,
             travelMode = shareTravelModeName(share)
         )
-
-        clearNativeRouteCache(recordDiagnostic = true, source = "google_maps_share")
-        watchRuntime.clearActiveRoute()
 
         emitShareStatus(
             state = "resolvingEndpoint",
@@ -1369,11 +1538,22 @@ class MainActivity : FlutterActivity() {
         )
     }
 
-    private fun emitBridgeStatus() {
-        val payload = bridgeStatusPayload()
-        recordSetupStateChanged(payload["setupState"] as? String)
-        recordNotificationPermissionChanged(payload["notificationPermissionState"] as? String)
-        emitBridgeEvent(payload)
+    private fun emitBridgeStatus(force: Boolean = false) {
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            requestBridgeStatusEmission(force)
+        } else {
+            val listenerGeneration = bridgeListenerGeneration
+            mainHandler.post {
+                if (listenerGeneration == bridgeListenerGeneration) {
+                    requestBridgeStatusEmission(force)
+                }
+            }
+        }
+    }
+
+    private fun requestBridgeStatusEmission(force: Boolean) {
+        if (bridgeEventSink == null) return
+        bridgeStatusEmissionGate.request(force)
     }
 
     private fun emitProviderStatusEvent(status: Map<String, Any?>? = null) {
@@ -1394,11 +1574,13 @@ class MainActivity : FlutterActivity() {
     }
 
     private fun emitLocationStatusEvent() {
-        val status = gpsStreamingStatusPayload()
+        val accessStatus = locationAccessStatus()
+        val status = gpsStreamingStatusPayload(accessStatus)
         recordLocationPermissionChanged(status["permissionState"] as? String)
         emitBridgeEvent(
             mapOf(
                 "event" to "locationStatus",
+                "locationAccessStatus" to accessStatus,
                 "locationStream" to status
             )
         )
@@ -1651,19 +1833,7 @@ class MainActivity : FlutterActivity() {
         }
 
     private fun redactDiagnosticMessage(message: String): String =
-        redactDiagnosticCredentials(message, diagnosticRedactionSecrets())
-
-    private fun diagnosticRedactionSecrets(): List<String> =
-        try {
-            if (::apiKeyStore.isInitialized) {
-                listOfNotNull(apiKeyStore.getPlaintextKey())
-                    .filter { it.isNotBlank() }
-            } else {
-                emptyList()
-            }
-        } catch (_: Exception) {
-            emptyList()
-        }
+        redactDiagnosticCredentials(message)
 
     private fun redactDiagnosticValue(value: Any?): Any? =
         when (value) {
@@ -1909,8 +2079,11 @@ class MainActivity : FlutterActivity() {
         if (!payload.containsKey("timestampMillis")) {
             payload["timestampMillis"] = System.currentTimeMillis()
         }
+        val listenerGeneration = bridgeListenerGeneration
         mainHandler.post {
-            bridgeEventSink?.success(payload)
+            if (listenerGeneration == bridgeListenerGeneration) {
+                bridgeEventSink?.success(payload)
+            }
         }
     }
 
@@ -1925,6 +2098,7 @@ class MainActivity : FlutterActivity() {
             )
         }
         val permission = permissionState()
+        val accessStatus = locationAccessStatus()
         return linkedMapOf(
             "event" to "bridgeStatus",
             "timestampMillis" to System.currentTimeMillis(),
@@ -1938,16 +2112,19 @@ class MainActivity : FlutterActivity() {
             "inFlight" to (watchStatus["inFlight"] == true),
             "setupState" to bridgeSetupState(providerStatus, permission),
             "permissionState" to permission,
+            "locationAccessStatus" to accessStatus,
             "notificationPermissionState" to notificationPermissionState(),
             "providerStatus" to providerStatus,
-            "locationStream" to gpsStreamingStatusPayload(),
+            "locationStream" to gpsStreamingStatusPayload(accessStatus),
             "diagnosticCount" to synchronized(this) { nativeDiagnosticEvents.size },
             "watch" to watchStatus
         )
     }
 
-    private fun gpsStreamingStatusPayload(): Map<String, Any?> =
-        WatchLocationStreamer.status(this, permissionState())
+    private fun gpsStreamingStatusPayload(
+        accessStatus: Map<String, Any?> = locationAccessStatus()
+    ): Map<String, Any?> =
+        WatchLocationStreamer.status(this, permissionState(), accessStatus)
 
     private fun watchStatusPayload(): Map<String, Any?> =
         if (::watchRuntime.isInitialized) watchRuntime.status() else mapOf(
@@ -3400,8 +3577,9 @@ class MainActivity : FlutterActivity() {
 
         val isSeededDevelopmentKey = apiKeyStore.hasSeededDevelopmentKeyMarker()
         if (currentKey == null || (isSeededDevelopmentKey && currentKey != developmentKey)) {
-            mapTilesProvider.clearProviderSessions()
-            apiKeyStore.storeSeededDevelopmentApiKey(developmentKey)
+            mapTilesProvider.mutateCredentialState {
+                apiKeyStore.storeSeededDevelopmentApiKey(developmentKey)
+            }
         }
     }
 

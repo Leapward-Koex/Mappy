@@ -30,10 +30,28 @@ work as well.
 ## Google Maps Platform setup
 
 Mappy uses the Map Tiles, Places, Geocoding, and Routes APIs. In the app, open
-Setup to see the Android package name and signing SHA-1 that should be attached
-to the key's Android application restriction. Paste the key into Setup; Android
+Settings > Google Maps setup to see the Android package name and current
+signing SHA-1 that should be attached to the key's Android application
+restriction. Paste the key there and select **Save and validate**; Android
 stores it in encrypted local storage and Flutter receives only redacted status
 information afterward.
+
+The phone map uses a separate, app-restricted **Maps SDK for Android** key.
+Set `MAPPY_ANDROID_SDK_API_KEY` in the repository-root `.env.local` for local
+builds, including all existing VS Code launch configurations. Gradle resolves
+it from the process environment first, then `.env.local`, then the ignored
+`mappy.androidSdkApiKey` entry in `android/local.properties`. No Dart define
+or VS Code launch change is needed. Stop and rebuild the app after changing
+the key; hot reload does not update the native manifest. If using a process
+environment variable, restart VS Code after changing the machine environment.
+
+Every Android variant embeds this SDK key in the manifest; release packaging
+fails if it is missing. GitHub Actions reads the repository Actions variable
+`MAPPY_ANDROID_SDK_API_KEY` via `vars`, for both debug and release builds.
+Restrict the key to Maps SDK for Android and `com.leapwardkoex.mappy` with the
+appropriate debug/release signing SHA-1s (use the Play app signing certificate
+for Play-distributed builds). This SDK key does not replace the user-supplied
+key for Map Tiles, Places, Geocoding, and Routes.
 
 For local debug or profile builds, copy the repository-root `.env.example` to
 `.env.local` and set `MAPPY_DEV_GOOGLE_API_KEY`. The ignored file is read only
@@ -45,9 +63,43 @@ an empty value regardless of local configuration.
 Never commit real credentials to source, assets, Gradle files, generated
 files, or tests.
 
+## Android release signing
+
+Release packaging refuses to run without an explicitly configured, non-debug
+signing identity. Prefer these environment variables:
+
+```text
+MAPPY_RELEASE_STORE_FILE=/absolute/path/to/release-upload.jks
+MAPPY_RELEASE_STORE_PASSWORD=...
+MAPPY_RELEASE_KEY_ALIAS=...
+MAPPY_RELEASE_KEY_PASSWORD=...
+```
+
+Ignored `android/local.properties` may instead define the equivalent
+`mappy.releaseStoreFile`, `mappy.releaseStorePassword`,
+`mappy.releaseKeyAlias`, and `mappy.releaseKeyPassword` values for local-only
+release verification. Never commit the keystore or those values.
+
+GitHub prerelease builds require repository secrets named
+`MAPPY_RELEASE_KEYSTORE_BASE64`, `MAPPY_RELEASE_STORE_PASSWORD`,
+`MAPPY_RELEASE_KEY_ALIAS`, and `MAPPY_RELEASE_KEY_PASSWORD`. Pull requests build
+the debug variant; only protected, signed release artifacts are uploaded.
+
+On the first eligible launch, Navigate shows a one-time setup checklist for
+Google Maps, location, and recommended background reliability. It never opens
+Android permission dialogs automatically, can be deferred, and remains
+available later at Settings > Setup checklist. Active navigation and incoming
+Google Maps shares take priority over the checklist.
+
 ## App structure
 
-- `lib/main.dart` contains the Flutter app shell and screens.
+- `lib/main.dart` contains the three-tab app shell plus Navigate and Saved.
+- `lib/first_run_setup_checklist.dart` contains the reusable first-run and
+  manually reopened readiness checklist.
+- `lib/settings_screens.dart` contains setup, permissions, watch connection,
+  preferences, and diagnostics pages.
+- `lib/about_screen.dart` contains installed-version and source-repository
+  information.
 - `lib/provider_bridge.dart` models provider requests, results, and settings.
 - `lib/location_bridge.dart` exposes location permission and fix state.
 - `lib/bridge_channel.dart` exposes Pebble transport and diagnostic events.
@@ -80,7 +132,8 @@ cd android
 Before a release, validate a restricted key on a build signed with the intended
 release identity. The in-app provider check verifies all required APIs and
 confirms that the configured Android package and certificate restrictions are
-enforced.
+enforced. CI verifies the SDK key is embedded in the release manifest and rejects other
+Google API-key-shaped values in the APK.
 
 To update launcher and notification artwork, follow
 [`icon/README.md`](icon/README.md). The launcher resources are generated with

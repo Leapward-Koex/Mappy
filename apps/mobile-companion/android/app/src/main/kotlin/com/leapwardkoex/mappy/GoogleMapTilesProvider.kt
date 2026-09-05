@@ -10,6 +10,7 @@ import java.net.SocketTimeoutException
 import java.net.URLEncoder
 import java.util.LinkedHashMap
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.locks.ReentrantLock
 import kotlin.math.PI
 import kotlin.math.atan2
@@ -58,7 +59,7 @@ private class AndroidBitmapSourceTileRaster(
 }
 
 class GoogleMapTilesProvider(
-    private val keyStore: GoogleCredentialStore,
+    keyStore: GoogleCredentialStore,
     private val identityProvider: AndroidIdentityProvider,
     private val httpClient: GoogleHttpClient = UrlGoogleHttpClient(),
     private val binaryStringEncoder: BinaryStringEncoder = AndroidBase64StringEncoder(),
@@ -77,6 +78,28 @@ class GoogleMapTilesProvider(
         allowUnrestrictedDevelopmentKey = allowUnrestrictedDevelopmentKey
     )
 
+    private val credentialLifecycleLock = Any()
+    private val delegateKeyStore = keyStore
+    private val keyStore: GoogleCredentialStore = object : GoogleCredentialStore by delegateKeyStore {
+        override fun markValidationResult(
+            validationState: String,
+            validationDetail: String?,
+            httpStatus: Int?,
+            packageName: String,
+            certSha1: String
+        ): Map<String, Any?> =
+            synchronized(credentialLifecycleLock) {
+                ensureProviderOperationCurrent()
+                delegateKeyStore.markValidationResult(
+                    validationState,
+                    validationDetail,
+                    httpStatus,
+                    packageName,
+                    certSha1
+                )
+            }
+    }
+
     @Volatile
     private var cachedSession: TileSession? = null
     private val sessionLock = Any()
@@ -85,10 +108,24 @@ class GoogleMapTilesProvider(
     private val inFlightWatchTilesLock = ReentrantLock()
     private val inFlightWatchTilesChanged = inFlightWatchTilesLock.newCondition()
     private val inFlightWatchTiles = mutableSetOf<String>()
+    private val providerOperationGeneration = AtomicLong(0L)
+    private val threadOperationGeneration = ThreadLocal<Long>()
     @Volatile
     private var mapTileSettings = MapTileSettings()
 
-    fun clearProviderSessions() {
+    fun clearProviderSessions() = synchronized(credentialLifecycleLock) {
+        invalidateProviderOperationsAndClearSessions()
+    }
+
+    fun <T> mutateCredentialState(mutation: () -> T): T =
+        synchronized(credentialLifecycleLock) {
+            invalidateProviderOperationsAndClearSessions()
+            mutation()
+        }
+
+    private fun invalidateProviderOperationsAndClearSessions() {
+        providerOperationGeneration.incrementAndGet()
+        httpClient.cancelAll()
         synchronized(sessionLock) { cachedSession = null }
         synchronized(sourceTileCache) { sourceTileCache.clear() }
         synchronized(encodedWatchTileCache) { encodedWatchTileCache.clear() }
@@ -98,6 +135,49 @@ class GoogleMapTilesProvider(
             inFlightWatchTilesChanged.signalAll()
         } finally {
             inFlightWatchTilesLock.unlock()
+        }
+    }
+
+    private fun keyForProviderOperation(): String? =
+        synchronized(credentialLifecycleLock) {
+            val generation = providerOperationGeneration.get()
+            threadOperationGeneration.set(generation)
+            val key = keyStore.getPlaintextKey()
+            ensureProviderOperationCurrent()
+            key
+        }
+
+    private fun ensureProviderOperationCurrent() {
+        val generation = threadOperationGeneration.get()
+            ?: throw ProviderOperationCancelledException()
+        if (generation != providerOperationGeneration.get()) {
+            throw ProviderOperationCancelledException()
+        }
+    }
+
+    internal fun operationGenerationForCurrentThread(): Long? =
+        threadOperationGeneration.get()
+
+    internal fun runIfProviderOperationCurrent(
+        generation: Long?,
+        action: () -> Unit
+    ): Boolean {
+        if (generation == null) return false
+        return synchronized(credentialLifecycleLock) {
+            if (generation != providerOperationGeneration.get()) {
+                false
+            } else {
+                action()
+                true
+            }
+        }
+    }
+
+    private fun executeProviderRequest(request: GoogleHttpRequest): GoogleHttpResponse {
+        val generation = threadOperationGeneration.get()
+            ?: throw ProviderOperationCancelledException()
+        return httpClient.execute(request) {
+            generation != providerOperationGeneration.get()
         }
     }
 
@@ -149,8 +229,15 @@ class GoogleMapTilesProvider(
     }
 
     fun validateProviderSetup(): Map<String, Any?> {
-        val key = keyStore.getPlaintextKey()
+        val key = keyForProviderOperation()
         val identity = identityProvider.currentIdentity()
+        return validateProviderSetupForOperation(key, identity)
+    }
+
+    private fun validateProviderSetupForOperation(
+        key: String?,
+        identity: AndroidIdentity
+    ): Map<String, Any?> {
         if (key.isNullOrBlank()) {
             return keyStore.markValidationResult(
                 ApiKeyStore.STATE_NOT_CONFIGURED,
@@ -192,7 +279,7 @@ class GoogleMapTilesProvider(
     }
 
     fun previewTile(latitude: Double, longitude: Double, zoom: Int): Map<String, Any?> {
-        val key = keyStore.getPlaintextKey()
+        val key = keyForProviderOperation()
         val identity = identityProvider.currentIdentity()
         if (key.isNullOrBlank()) {
             return providerFailure(
@@ -263,7 +350,7 @@ class GoogleMapTilesProvider(
     }
 
     fun watchTile(worldX: Int, worldY: Int, zoom: Int, themeMode: Int): Map<String, Any?> {
-        val key = keyStore.getPlaintextKey()
+        val key = keyForProviderOperation()
         val identity = identityProvider.currentIdentity()
         if (key.isNullOrBlank()) {
             return watchTileFailure(
@@ -479,8 +566,11 @@ class GoogleMapTilesProvider(
                     zoom = safeZoom
                 )
             }
-            synchronized(encodedWatchTileCache) {
-                encodedWatchTileCache[watchCacheKey] = rle
+            synchronized(credentialLifecycleLock) {
+                ensureProviderOperationCurrent()
+                synchronized(encodedWatchTileCache) {
+                    encodedWatchTileCache[watchCacheKey] = rle
+                }
             }
             return watchTileSuccess(
                 cropWorldX,
@@ -546,7 +636,7 @@ class GoogleMapTilesProvider(
     }
 
     fun geocodeDestination(addressText: String, language: String, region: String): Map<String, Any?> {
-        val key = keyStore.getPlaintextKey()
+        val key = keyForProviderOperation()
         val identity = identityProvider.currentIdentity()
         val address = addressText.trim()
         if (key.isNullOrBlank()) {
@@ -565,7 +655,7 @@ class GoogleMapTilesProvider(
                 errorCategory = ERROR_DESTINATION_NOT_CONFIGURED
             )
         }
-        validationFailureIfProviderNotReady()?.let { return it }
+        validationFailureIfProviderNotReady(key, identity)?.let { return it }
 
         val response = geocodeAddress(key, identity, address, language, region)
         if (!response.success || response.geocode == null) {
@@ -592,7 +682,7 @@ class GoogleMapTilesProvider(
         language: String,
         region: String
     ): Map<String, Any?> {
-        val key = keyStore.getPlaintextKey()
+        val key = keyForProviderOperation()
         val identity = identityProvider.currentIdentity()
         val query = input.trim()
         if (key.isNullOrBlank()) {
@@ -611,7 +701,9 @@ class GoogleMapTilesProvider(
                 errorCategory = ERROR_DESTINATION_NOT_CONFIGURED
             ) + mapOf("suggestions" to emptyList<Map<String, Any?>>())
         }
-        validationFailureIfProviderNotReady()?.let { return it + mapOf("suggestions" to emptyList<Map<String, Any?>>()) }
+        validationFailureIfProviderNotReady(key, identity)?.let {
+            return it + mapOf("suggestions" to emptyList<Map<String, Any?>>())
+        }
 
         val response = autocompletePlaces(
             key = key,
@@ -643,7 +735,7 @@ class GoogleMapTilesProvider(
         language: String,
         region: String
     ): Map<String, Any?> {
-        val key = keyStore.getPlaintextKey()
+        val key = keyForProviderOperation()
         val identity = identityProvider.currentIdentity()
         val id = placeId.trim()
         if (key.isNullOrBlank()) {
@@ -662,7 +754,7 @@ class GoogleMapTilesProvider(
                 errorCategory = ERROR_DESTINATION_NOT_CONFIGURED
             )
         }
-        validationFailureIfProviderNotReady()?.let { return it }
+        validationFailureIfProviderNotReady(key, identity)?.let { return it }
 
         val response = placeDetails(
             key = key,
@@ -700,7 +792,7 @@ class GoogleMapTilesProvider(
         language: String,
         region: String
     ): Map<String, Any?> {
-        val key = keyStore.getPlaintextKey()
+        val key = keyForProviderOperation()
         val identity = identityProvider.currentIdentity()
         if (key.isNullOrBlank()) {
             return providerFailure(
@@ -721,7 +813,7 @@ class GoogleMapTilesProvider(
                 errorCategory = ERROR_DESTINATION_NOT_CONFIGURED
             )
         }
-        validationFailureIfProviderNotReady()?.let { return it }
+        validationFailureIfProviderNotReady(key, identity)?.let { return it }
 
         val destination = when {
             hasCoordinateDestination -> GeocodeResult(
@@ -778,42 +870,53 @@ class GoogleMapTilesProvider(
     private fun validateMapTiles(
         key: String,
         identity: AndroidIdentity
-    ): Map<String, Any?>? = synchronized(sessionLock) {
-        val correct = createSession(key, identity.packageName, identity.certSha1)
-        if (!correct.success) {
-            return keyStore.markValidationResult(
-                mapHttpStatusToState(correct.httpStatus),
-                correct.safeDetail,
-                correct.httpStatus,
-                identity.packageName,
-                identity.certSha1
-            )
-        }
-        cachedSession = correct.session
-        if (allowUnrestrictedDevelopmentKey()) {
-            return null
-        }
+    ): Map<String, Any?>? {
+        var publishFailure: (() -> Map<String, Any?>)? = null
+        synchronized(sessionLock) {
+            val correct = createSession(key, identity.packageName, identity.certSha1)
+            if (!correct.success) {
+                publishFailure = {
+                    keyStore.markValidationResult(
+                        mapHttpStatusToState(correct.httpStatus),
+                        correct.safeDetail,
+                        correct.httpStatus,
+                        identity.packageName,
+                        identity.certSha1
+                    )
+                }
+                return@synchronized
+            }
+            cachedSession = correct.session
+            if (allowUnrestrictedDevelopmentKey()) {
+                return null
+            }
 
-        val wrongPackage = createSession(key, "${identity.packageName}.wrong", identity.certSha1)
-        if (wrongPackage.success) {
-            return keyStore.markValidationResult(
-                ApiKeyStore.STATE_UNSUPPORTED_RESTRICTED_KEY_BEHAVIOR,
-                "Map Tiles accepted an intentionally wrong Android package header.",
-                wrongPackage.httpStatus,
-                identity.packageName,
-                identity.certSha1
-            )
+            val wrongPackage = createSession(key, "${identity.packageName}.wrong", identity.certSha1)
+            if (wrongPackage.success) {
+                publishFailure = {
+                    keyStore.markValidationResult(
+                        ApiKeyStore.STATE_UNSUPPORTED_RESTRICTED_KEY_BEHAVIOR,
+                        "Map Tiles accepted an intentionally wrong Android package header.",
+                        wrongPackage.httpStatus,
+                        identity.packageName,
+                        identity.certSha1
+                    )
+                }
+                return@synchronized
+            }
+            if (!isRestrictionRejection(wrongPackage)) {
+                publishFailure = {
+                    keyStore.markValidationResult(
+                        ApiKeyStore.STATE_UNSUPPORTED_RESTRICTED_KEY_BEHAVIOR,
+                        "Map Tiles wrong-package validation did not produce an auth or permission rejection.",
+                        wrongPackage.httpStatus,
+                        identity.packageName,
+                        identity.certSha1
+                    )
+                }
+            }
         }
-        if (!isRestrictionRejection(wrongPackage)) {
-            return keyStore.markValidationResult(
-                ApiKeyStore.STATE_UNSUPPORTED_RESTRICTED_KEY_BEHAVIOR,
-                "Map Tiles wrong-package validation did not produce an auth or permission rejection.",
-                wrongPackage.httpStatus,
-                identity.packageName,
-                identity.certSha1
-            )
-        }
-        return null
+        return publishFailure?.invoke()
     }
 
     private fun validateGeocoding(key: String, identity: AndroidIdentity): Map<String, Any?>? {
@@ -1020,13 +1123,20 @@ class GoogleMapTilesProvider(
         return null
     }
 
-    private fun validationFailureIfProviderNotReady(): Map<String, Any?>? {
+    private fun validationFailureIfProviderNotReady(
+        key: String,
+        identity: AndroidIdentity
+    ): Map<String, Any?>? {
+        ensureProviderOperationCurrent()
         val status = keyStore.getStatus()
         if (status["validationState"] == ApiKeyStore.STATE_VALID) {
             return null
         }
 
-        val validation = validateProviderSetup()
+        // Keep readiness validation inside the caller's immutable credential context.
+        // Calling the public entry point here would replace the thread generation and
+        // could make the caller's already-captured key appear current after rotation.
+        val validation = validateProviderSetupForOperation(key, identity)
         if (validation["validationState"] == ApiKeyStore.STATE_VALID) {
             return null
         }
@@ -1046,30 +1156,31 @@ class GoogleMapTilesProvider(
     ): Map<String, Any?>? {
         val settingsKey = mapTileSettings.cacheKey
         if (cachedSession?.settingsKey == settingsKey) return null
-        synchronized(sessionLock) {
+        val response = synchronized(sessionLock) {
             if (cachedSession?.settingsKey == settingsKey) return null
-            val response = createSession(key, identity.packageName, identity.certSha1)
-            if (response.success && response.session != null) {
-                cachedSession = response.session
+            val candidate = createSession(key, identity.packageName, identity.certSha1)
+            if (candidate.success && candidate.session != null) {
+                cachedSession = candidate.session
                 return null
             }
             cachedSession = null
-            val state = mapHttpStatusToState(response.httpStatus)
-            val providerStatus = keyStore.markValidationResult(
-                state,
-                response.safeDetail,
-                response.httpStatus,
-                identity.packageName,
-                identity.certSha1
-            )
-            return mapOf(
-                "ok" to false,
-                "providerStatus" to providerStatus,
-                "detail" to response.safeDetail,
-                "errorCategory" to providerStateToCategory(state),
-                "httpStatus" to response.httpStatus
-            ).filterValues { it != null }
+            candidate
         }
+        val state = mapHttpStatusToState(response.httpStatus)
+        val providerStatus = keyStore.markValidationResult(
+            state,
+            response.safeDetail,
+            response.httpStatus,
+            identity.packageName,
+            identity.certSha1
+        )
+        return mapOf(
+            "ok" to false,
+            "providerStatus" to providerStatus,
+            "detail" to response.safeDetail,
+            "errorCategory" to providerStateToCategory(state),
+            "httpStatus" to response.httpStatus
+        ).filterValues { it != null }
     }
 
     private fun createSession(key: String, packageName: String, certSha1: String): ProviderResponse {
@@ -1094,7 +1205,7 @@ class GoogleMapTilesProvider(
             .toByteArray(Charsets.UTF_8)
 
         return try {
-            val response = httpClient.execute(
+            val response = executeProviderRequest(
                 GoogleHttpRequest(
                     url = "$MAP_TILES_BASE_URL/createSession?key=${encoded(key)}",
                     method = "POST",
@@ -1130,6 +1241,8 @@ class GoogleMapTilesProvider(
                     safeDetail = safeErrorDetail(response.bodyText, key)
                 )
             }
+        } catch (cancelled: ProviderOperationCancelledException) {
+            throw cancelled
         } catch (_: SocketTimeoutException) {
             ProviderResponse(success = false, httpStatus = null, safeDetail = "Network timeout.")
         } catch (_: Exception) {
@@ -1144,7 +1257,7 @@ class GoogleMapTilesProvider(
         coordinate: TileCoordinate
     ): ProviderResponse {
         return try {
-            val response = httpClient.execute(
+            val response = executeProviderRequest(
                 GoogleHttpRequest(
                     url = "$MAP_TILES_BASE_URL/2dtiles/${coordinate.zoom}/${coordinate.tileX}/${coordinate.tileY}" +
                         "?session=${encoded(sessionToken)}&key=${encoded(key)}",
@@ -1166,6 +1279,8 @@ class GoogleMapTilesProvider(
                     safeDetail = safeErrorDetail(response.bodyText, key, sessionToken)
                 )
             }
+        } catch (cancelled: ProviderOperationCancelledException) {
+            throw cancelled
         } catch (_: SocketTimeoutException) {
             ProviderResponse(success = false, httpStatus = null, safeDetail = "Network timeout.")
         } catch (_: Exception) {
@@ -1237,8 +1352,11 @@ class GoogleMapTilesProvider(
         val response = fetchTile(key, identity, sessionToken, coordinate)
         val bytes = response.bytes
         if (response.success && bytes != null) {
-            synchronized(sourceTileCache) {
-                sourceTileCache[cacheKey] = bytes
+            synchronized(credentialLifecycleLock) {
+                ensureProviderOperationCurrent()
+                synchronized(sourceTileCache) {
+                    sourceTileCache[cacheKey] = bytes
+                }
             }
         }
         return response
@@ -1473,7 +1591,7 @@ class GoogleMapTilesProvider(
             }
         }.joinToString("&")
         return try {
-            val response = httpClient.execute(
+            val response = executeProviderRequest(
                 GoogleHttpRequest(
                     url = "$GEOCODING_BASE_URL/geocode/json?$query",
                     headers = androidHeaders(identity.packageName, identity.certSha1)
@@ -1528,6 +1646,8 @@ class GoogleMapTilesProvider(
                     placeId = first.optString("place_id").takeIf { it.isNotBlank() }
                 )
             )
+        } catch (cancelled: ProviderOperationCancelledException) {
+            throw cancelled
         } catch (_: SocketTimeoutException) {
             ProviderResponse(success = false, httpStatus = null, safeDetail = "Network timeout.")
         } catch (_: Exception) {
@@ -1568,7 +1688,7 @@ class GoogleMapTilesProvider(
         val body = bodyJson.toString().toByteArray(Charsets.UTF_8)
 
         return try {
-            val response = httpClient.execute(
+            val response = executeProviderRequest(
                 GoogleHttpRequest(
                     url = PLACES_AUTOCOMPLETE_URL,
                     method = "POST",
@@ -1631,6 +1751,8 @@ class GoogleMapTilesProvider(
                 safeDetail = "Autocomplete succeeded.",
                 suggestions = suggestions.take(MAX_PLACE_SUGGESTIONS)
             )
+        } catch (cancelled: ProviderOperationCancelledException) {
+            throw cancelled
         } catch (_: SocketTimeoutException) {
             ProviderResponse(success = false, httpStatus = null, safeDetail = "Network timeout.")
         } catch (_: Exception) {
@@ -1667,7 +1789,7 @@ class GoogleMapTilesProvider(
             }
         }
         return try {
-            val response = httpClient.execute(
+            val response = executeProviderRequest(
                 GoogleHttpRequest(
                     url = url,
                     headers = androidHeaders(identity.packageName, identity.certSha1) +
@@ -1710,6 +1832,8 @@ class GoogleMapTilesProvider(
                     label = label.ifBlank { formattedAddress.ifBlank { placeId } }
                 )
             )
+        } catch (cancelled: ProviderOperationCancelledException) {
+            throw cancelled
         } catch (_: SocketTimeoutException) {
             ProviderResponse(success = false, httpStatus = null, safeDetail = "Network timeout.")
         } catch (_: Exception) {
@@ -1737,7 +1861,7 @@ class GoogleMapTilesProvider(
             .toByteArray(Charsets.UTF_8)
 
         return try {
-            val response = httpClient.execute(
+            val response = executeProviderRequest(
                 GoogleHttpRequest(
                     url = ROUTES_URL,
                     method = "POST",
@@ -1781,6 +1905,8 @@ class GoogleMapTilesProvider(
                 safeDetail = "Route computed.",
                 route = route
             )
+        } catch (cancelled: ProviderOperationCancelledException) {
+            throw cancelled
         } catch (_: SocketTimeoutException) {
             ProviderResponse(success = false, httpStatus = null, safeDetail = "Network timeout.")
         } catch (_: Exception) {

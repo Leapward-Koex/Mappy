@@ -7,31 +7,27 @@ import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart' as gmaps;
-import 'package:introduction_screen/introduction_screen.dart';
-import 'package:shared_preferences/shared_preferences.dart';
-import 'package:showcaseview/showcaseview.dart';
 
+import 'about_screen.dart';
 import 'battery_optimization_bridge.dart';
 import 'bridge_channel.dart';
+import 'first_run_setup_checklist.dart';
 import 'location_bridge.dart';
 import 'provider_bridge.dart';
+import 'settings_screens.dart';
 import 'watch_phone_worker.dart';
 import 'watch_protocol.dart';
 
-const _startupLocationTimeout = Duration(milliseconds: 1200);
-const _welcomeSeenPreferenceKey = 'mappy_welcome_seen_v1';
-const _fallbackMapTarget = gmaps.LatLng(51.5074, -0.1278);
-final _googleApiKeyPattern = RegExp(r'^AIza[0-9A-Za-z_-]{16,}$');
+export 'settings_screens.dart';
 
-String? googleApiKeyValidationError(String input) {
-  final value = input.trim();
-  if (value.isEmpty) {
-    return 'Enter a Google API key before validating.';
+const _startupLocationTimeout = Duration(milliseconds: 1200);
+const _fallbackMapTarget = gmaps.LatLng(51.5074, -0.1278);
+Future<T> _withFallback<T>(Future<T> future, T fallback) async {
+  try {
+    return await future;
+  } catch (_) {
+    return fallback;
   }
-  if (!_googleApiKeyPattern.hasMatch(value)) {
-    return 'Enter a valid Google API key starting with AIza, without spaces or surrounding text.';
-  }
-  return null;
 }
 
 void main() {
@@ -84,23 +80,13 @@ class MappyApp extends StatelessWidget {
   }
 }
 
-enum CompanionTab {
-  navigate,
-  status,
-  setup,
-  savedLocations,
-  settings,
-  diagnostics,
-}
+enum CompanionTab { navigate, savedLocations, settings }
 
 List<CompanionTab> companionTabs() {
   return [
     CompanionTab.navigate,
-    CompanionTab.status,
-    CompanionTab.setup,
     CompanionTab.savedLocations,
     CompanionTab.settings,
-    CompanionTab.diagnostics,
   ];
 }
 
@@ -126,64 +112,53 @@ class CompanionHome extends StatefulWidget {
   State<CompanionHome> createState() => _CompanionHomeState();
 }
 
-class _CompanionHomeState extends State<CompanionHome> {
+class _CompanionHomeState extends State<CompanionHome>
+    with WidgetsBindingObserver {
   CompanionTab _selectedTab = CompanionTab.navigate;
-  LocationPermissionState _permissionState = LocationPermissionState.unknown;
+  LocationAccessStatus _locationAccessStatus =
+      const LocationAccessStatus.unavailable();
   ProviderStatus _providerStatus = const ProviderStatus.notConfigured();
   BridgeStatus _bridgeStatus = const BridgeStatus.unavailable();
   RouteResult? _routeResult;
   ShareRoutingStatus? _shareStatus;
-  WatchRouteEndpoint? _activeRouteDestination;
-  TravelMode? _activeRouteTravelMode;
+  WatchActiveRoute? _activeRoute;
+  int _activeRouteSyncEpoch = 0;
+  bool _initialActiveRouteSyncComplete = false;
   LocationSnapshot? _location;
+  int _locationSyncEpoch = 0;
   MapTileSettings _mapTileSettings = MapTileSettings.defaults;
   WatchDisplaySettings _displaySettings = WatchDisplaySettings.defaults;
   List<WatchDestinationConfig> _savedLocations = const [];
-  String? _mapTileSettingsDetail;
-  String? _displaySettingsDetail;
   String? _savedLocationsDetail;
-  bool _isRefreshingLocation = false;
-  bool _isValidatingProvider = false;
   bool _isComputingRoute = false;
-  bool _isSavingMapTileSettings = false;
-  bool _isSavingDisplaySettings = false;
   bool _isLoadingSavedLocations = true;
   bool _isSavingSavedLocation = false;
   bool _isClearingDiagnostics = false;
   bool _isClearingTileCache = false;
   bool _isClearingRouteCache = false;
   bool _isClearingProviderValidationCache = false;
-  bool _isStartingWatchApp = false;
-  bool _isRequestingNotificationPermission = false;
-  bool _isRequestingBatteryOptimization = false;
-  bool _welcomeStateLoaded = false;
-  bool _showWelcomeFlow = false;
-  bool _welcomeDebugReplay = false;
+  bool _bridgeReadinessLoaded = false;
+  bool _locationReadinessLoaded = false;
+  bool _batteryReadinessLoaded = false;
+  int _setupReadinessSyncEpoch = 0;
+  int _providerStatusEventRevision = 0;
+  int _locationAccessEventRevision = 0;
+  int _bridgeStatusEventRevision = 0;
+  int? _setupChecklistVersion;
+  bool _showFirstRunSetupChecklist = false;
+  bool _setupChecklistDeferredForSession = false;
+  bool _setupChecklistPersistenceScheduled = false;
   String? _watchSessionDetail;
   BatteryOptimizationState _batteryOptimizationState =
       BatteryOptimizationState.unknown;
   final List<String> _diagnosticEvents = [];
-  final GlobalKey _navigateShowcaseKey = GlobalKey();
   late final WatchMessageDispatcher _navigationDispatcher;
   StreamSubscription<BridgeEvent>? _bridgeSubscription;
 
   @override
   void initState() {
     super.initState();
-    ShowcaseView.register(
-      enableAutoScroll: true,
-      blurValue: 1,
-      overlayOpacity: 0.72,
-      globalTooltipActionConfig: const TooltipActionConfig(
-        position: TooltipActionPosition.inside,
-        alignment: MainAxisAlignment.spaceBetween,
-        gapBetweenContentAndAction: 12,
-      ),
-      globalTooltipActions: const [
-        TooltipActionButton(type: TooltipDefaultActionType.skip),
-        TooltipActionButton(type: TooltipDefaultActionType.next),
-      ],
-    );
+    WidgetsBinding.instance.addObserver(this);
     _navigationDispatcher =
         widget.watchDispatcher ??
         NativeWatchMessageDispatcher(
@@ -193,147 +168,219 @@ class _CompanionHomeState extends State<CompanionHome> {
       _handleBridgeEvent,
       onError: (_) {},
     );
-    unawaited(_loadBridgeStatus());
-    unawaited(_loadBatteryOptimizationState());
+    unawaited(_loadSetupChecklistVersion());
     unawaited(_loadMapTileSettings());
     unawaited(_loadDisplaySettings());
     unawaited(_loadSavedLocations());
-    unawaited(_loadWelcomeState());
-    _refreshLocation(timeout: _startupLocationTimeout);
+    unawaited(_refreshActiveRoute());
+    unawaited(_refreshLocation(timeout: _startupLocationTimeout));
   }
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     unawaited(_bridgeSubscription?.cancel());
-    ShowcaseView.get().unregister();
     super.dispose();
   }
 
-  Future<void> _loadWelcomeState() async {
-    final preferences = await SharedPreferences.getInstance();
-    if (!mounted) {
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state != AppLifecycleState.resumed) {
       return;
     }
+    unawaited(_refreshLocation(timeout: _startupLocationTimeout));
+    unawaited(_refreshActiveRoute());
+  }
+
+  Future<void> _refreshActiveRoute() async {
+    final epoch = ++_activeRouteSyncEpoch;
+    late final WatchActiveRoute? route;
+    try {
+      route = await _navigationDispatcher.getActiveRoute();
+    } catch (error) {
+      if (!mounted || epoch != _activeRouteSyncEpoch) return;
+      setState(() {
+        _initialActiveRouteSyncComplete = true;
+        _diagnosticEvents.insert(0, 'Active route refresh failed: $error');
+      });
+      _maybeShowFirstRunSetupChecklist();
+      return;
+    }
+    if (!mounted || epoch != _activeRouteSyncEpoch) return;
+    _setActiveRoute(route, marksInitialSyncComplete: true);
+    _maybeShowFirstRunSetupChecklist();
+  }
+
+  void _setActiveRoute(
+    WatchActiveRoute? route, {
+    bool marksInitialSyncComplete = false,
+  }) {
+    final previous = _activeRoute;
+    final changed =
+        previous?.requestId != route?.requestId ||
+        previous?.updatedAtMillis != route?.updatedAtMillis;
     setState(() {
-      _showWelcomeFlow =
-          _shareStatus == null &&
-          !(preferences.getBool(_welcomeSeenPreferenceKey) ?? false);
-      _welcomeStateLoaded = true;
+      if (marksInitialSyncComplete) {
+        _initialActiveRouteSyncComplete = true;
+      }
+      _activeRoute = route;
+      if (route != null) {
+        _setupChecklistDeferredForSession = true;
+        _showFirstRunSetupChecklist = false;
+        _shareStatus = null;
+      }
+      if (changed || route == null) _routeResult = null;
     });
   }
 
-  Future<void> _finishWelcomeFlow() async {
-    if (!_welcomeDebugReplay) {
-      final preferences = await SharedPreferences.getInstance();
-      await preferences.setBool(_welcomeSeenPreferenceKey, true);
+  Future<PermissionsSnapshot> _refreshSetupReadiness() async {
+    final epoch = ++_setupReadinessSyncEpoch;
+    final providerEventRevision = _providerStatusEventRevision;
+    final locationEventRevision = _locationAccessEventRevision;
+    final bridgeEventRevision = _bridgeStatusEventRevision;
+    final providerFuture = _withFallback(
+      widget.providerRepository.getProviderStatus(),
+      _providerStatus,
+    );
+    final locationFuture = _withFallback(
+      widget.locationRepository.getLocationAccessStatus(),
+      _locationAccessStatus,
+    );
+    final bridgeFuture = _withFallback(
+      widget.bridgeRepository.getBridgeStatus(),
+      _bridgeStatus,
+    );
+    final batteryFuture = _withFallback(
+      widget.batteryOptimizationRepository.getBatteryOptimizationState(),
+      _batteryOptimizationState,
+    );
+
+    final provider = await providerFuture;
+    final location = await locationFuture;
+    final bridge = await bridgeFuture;
+    final battery = await batteryFuture;
+    if (!mounted || epoch != _setupReadinessSyncEpoch) {
+      return _permissionsSnapshot;
     }
-    if (!mounted) {
-      return;
-    }
+
+    final effectiveProvider =
+        providerEventRevision == _providerStatusEventRevision
+        ? provider
+        : _providerStatus;
+    final effectiveLocation =
+        locationEventRevision == _locationAccessEventRevision
+        ? location
+        : _locationAccessStatus;
+    final effectiveBridge =
+        (bridgeEventRevision == _bridgeStatusEventRevision
+                ? bridge
+                : _bridgeStatus)
+            .copyWith(
+              providerStatus: effectiveProvider,
+              locationAccessStatus: effectiveLocation,
+            );
+    final snapshot = PermissionsSnapshot(
+      location: effectiveLocation,
+      notification: effectiveBridge.notificationPermissionState,
+      battery: battery,
+    );
     setState(() {
-      _showWelcomeFlow = false;
-      _welcomeDebugReplay = false;
-      _selectedTab = CompanionTab.navigate;
+      _providerStatus = effectiveProvider;
+      _locationAccessStatus = effectiveLocation;
+      _bridgeStatus = effectiveBridge;
+      _batteryOptimizationState = battery;
+      _bridgeReadinessLoaded = true;
+      _locationReadinessLoaded = true;
+      _batteryReadinessLoaded = true;
     });
-    WidgetsBinding.instance.addPostFrameCallback((_) => _startShowcaseTour());
+    _maybeShowFirstRunSetupChecklist();
+    return snapshot;
   }
 
-  void _replayWelcomeFlow() {
-    setState(() {
-      _welcomeDebugReplay = true;
-      _showWelcomeFlow = true;
-    });
-  }
-
-  void _startShowcaseTour() {
-    if (!mounted) {
-      return;
-    }
-    ShowcaseView.get().startShowCase([_navigateShowcaseKey]);
-  }
-
-  Future<void> _loadBridgeStatus() async {
+  Future<BridgeStatus> _loadBridgeStatus() async {
     final status = await widget.bridgeRepository.getBridgeStatus();
-    if (!mounted) {
-      return;
+    if (mounted) {
+      await _refreshSetupReadiness();
+      return _bridgeStatus;
     }
-    setState(() {
-      _bridgeStatus = status;
-    });
+    return status;
   }
 
-  Future<void> _startWatchApp() async {
+  Future<BridgeStatus> _startWatchApp() async {
     setState(() {
-      _isStartingWatchApp = true;
       _watchSessionDetail = null;
     });
     final status = await widget.bridgeRepository.startWatchApp();
     if (!mounted) {
-      return;
+      return status;
     }
     setState(() {
-      _bridgeStatus = status;
-      _isStartingWatchApp = false;
       _watchSessionDetail = status.registered
           ? 'Opening the Mappy watch app.'
           : 'Pebble/Rebble is not ready on this phone.';
     });
+    unawaited(_refreshSetupReadiness());
+    return status;
   }
 
-  Future<void> _requestNotificationPermission() async {
+  Future<BridgeStatus> _requestNotificationPermission() async {
     setState(() {
-      _isRequestingNotificationPermission = true;
       _watchSessionDetail = null;
     });
     final status = await widget.bridgeRepository
         .requestNotificationPermission();
     if (!mounted) {
-      return;
+      return status;
     }
     setState(() {
-      _bridgeStatus = status;
-      _isRequestingNotificationPermission = false;
       _watchSessionDetail =
           status.notificationPermissionState.allowsWatchNotification
           ? 'Watch-session notifications are ready.'
           : 'Allow notifications in Android settings so the watch session can stay visible.';
     });
+    return status;
   }
 
-  Future<void> _loadBatteryOptimizationState() async {
-    final state = await widget.batteryOptimizationRepository
-        .getBatteryOptimizationState();
-    if (!mounted) {
-      return;
-    }
-    setState(() {
-      _batteryOptimizationState = state;
-    });
-  }
-
-  Future<void> _requestDisableBatteryOptimization() async {
-    setState(() {
-      _isRequestingBatteryOptimization = true;
-    });
-    final state = await widget.batteryOptimizationRepository
-        .requestDisableBatteryOptimization();
-    if (!mounted) {
-      return;
-    }
-    setState(() {
-      _batteryOptimizationState = state;
-      _isRequestingBatteryOptimization = false;
-    });
-  }
+  Future<BatteryOptimizationState> _requestDisableBatteryOptimization() =>
+      widget.batteryOptimizationRepository.requestDisableBatteryOptimization();
 
   void _handleBridgeEvent(BridgeEvent event) {
-    if (!mounted) {
-      return;
-    }
+    if (!mounted) return;
     if (event.type == 'displaySettingsChanged') {
       unawaited(_loadDisplaySettings());
     }
     final status = event.status;
+    final providerStatus = event.providerStatus;
+    final locationStream = event.locationStream;
+    final locationAccess = event.locationAccessStatus;
+    final shareStatus = event.shareStatus;
+    final diagnostic = _diagnosticLine(event);
+    const watchSessionDetailEvents = {
+      'navigationQueued',
+      'watchLaunchRequested',
+      'navigationApplied',
+      'navigationDeliveryTimeout',
+      'watchLaunchFailed',
+      'protocolMismatch',
+    };
+    final updatesWatchSessionDetail = watchSessionDetailEvents.contains(
+      event.type,
+    );
+    if (status != null || locationStream != null) {
+      _bridgeStatusEventRevision += 1;
+    }
+    if (providerStatus != null) _providerStatusEventRevision += 1;
+    if (locationAccess != null) _locationAccessEventRevision += 1;
+    final hasVisibleUpdate =
+        updatesWatchSessionDetail ||
+        status != null ||
+        providerStatus != null ||
+        locationStream != null ||
+        locationAccess != null ||
+        event.type == 'activeRouteChanged' ||
+        shareStatus != null ||
+        diagnostic != null;
+    if (!hasVisibleUpdate) return;
     setState(() {
       switch (event.type) {
         case 'navigationQueued':
@@ -351,23 +398,51 @@ class _CompanionHomeState extends State<CompanionHome> {
       }
       if (status != null) {
         _bridgeStatus = status;
+        _locationAccessStatus = status.locationAccessStatus;
+        _bridgeReadinessLoaded = true;
       }
-      final providerStatus = event.providerStatus;
       if (providerStatus != null) {
         _providerStatus = providerStatus;
+        _bridgeStatus = _bridgeStatus.copyWith(providerStatus: providerStatus);
       }
-      final locationStream = event.locationStream;
       if (locationStream != null) {
         _bridgeStatus = _bridgeStatus.copyWith(locationStream: locationStream);
-        _permissionState = locationStream.permissionState;
       }
-      final shareStatus = event.shareStatus;
+      if (locationAccess != null) {
+        _locationAccessStatus = locationAccess;
+        _bridgeStatus = _bridgeStatus.copyWith(
+          locationAccessStatus: locationAccess,
+        );
+        _locationReadinessLoaded = true;
+      }
+      if (event.type == 'activeRouteChanged') {
+        if (event.activeRouteMalformed) {
+          _diagnosticEvents.insert(0, 'Ignored malformed active route event.');
+        } else {
+          _initialActiveRouteSyncComplete = true;
+          _activeRouteSyncEpoch++;
+          final next = event.activeRoute;
+          final changed =
+              _activeRoute?.requestId != next?.requestId ||
+              _activeRoute?.updatedAtMillis != next?.updatedAtMillis;
+          _activeRoute = next;
+          if (next != null) {
+            _setupChecklistDeferredForSession = true;
+            _showFirstRunSetupChecklist = false;
+          }
+          if (changed || next == null) _routeResult = null;
+          if (next != null) _shareStatus = null;
+        }
+      }
       if (shareStatus != null) {
-        _shareStatus = shareStatus;
         _selectedTab = CompanionTab.navigate;
-        _showWelcomeFlow = false;
+        if (_activeRoute == null) {
+          _shareStatus = shareStatus;
+          if (!shareStatus.isTerminal) {
+            _showFirstRunSetupChecklist = false;
+          }
+        }
       }
-      final diagnostic = _diagnosticLine(event);
       if (diagnostic != null) {
         _diagnosticEvents.insert(0, diagnostic);
         if (_diagnosticEvents.length > 25) {
@@ -375,6 +450,7 @@ class _CompanionHomeState extends State<CompanionHome> {
         }
       }
     });
+    _maybeShowFirstRunSetupChecklist();
   }
 
   String? _diagnosticLine(BridgeEvent event) {
@@ -544,12 +620,6 @@ class _CompanionHomeState extends State<CompanionHome> {
     }
     setState(() {
       _mapTileSettings = result.settings;
-      _mapTileSettingsDetail = result.detail;
-      if (result.status.configured ||
-          result.status.validationState !=
-              ProviderValidationState.notConfigured) {
-        _providerStatus = result.status;
-      }
     });
   }
 
@@ -575,96 +645,60 @@ class _CompanionHomeState extends State<CompanionHome> {
   }
 
   Future<void> _refreshLocation({Duration? timeout}) async {
-    setState(() {
-      _isRefreshingLocation = true;
-    });
+    await _refreshSetupReadiness();
+    await _refreshGpsFix(timeout: timeout);
+  }
 
-    final permissionState = await widget.locationRepository
-        .getPermissionState();
-    final providerStatus = await widget.providerRepository.getProviderStatus();
-    final location = permissionState.allowsLocation
+  Future<void> _refreshGpsFix({Duration? timeout}) async {
+    final epoch = ++_locationSyncEpoch;
+    final locationAccess = _locationAccessStatus;
+    final location =
+        locationAccess.servicesEnabled && locationAccess.foregroundGranted
         ? await widget.locationRepository.getCurrentLocation(timeout: timeout)
         : null;
 
-    if (!mounted) {
+    if (!mounted || epoch != _locationSyncEpoch) {
       return;
     }
 
     setState(() {
-      _permissionState = permissionState;
-      _providerStatus = providerStatus;
       _location = location;
-      _isRefreshingLocation = false;
     });
   }
 
-  Future<void> _requestLocationPermission() async {
-    setState(() {
-      _isRefreshingLocation = true;
-    });
-
-    final permissionState = await widget.locationRepository
-        .requestLocationPermission();
-    final providerStatus = await widget.providerRepository.getProviderStatus();
-    final location = permissionState.allowsLocation
-        ? await widget.locationRepository.getCurrentLocation()
-        : null;
-
-    if (!mounted) {
-      return;
-    }
-
-    setState(() {
-      _permissionState = permissionState;
-      _providerStatus = providerStatus;
-      _location = location;
-      _isRefreshingLocation = false;
-    });
+  Future<LocationAccessStatus> _requestLocationPermission() async {
+    return widget.locationRepository.requestForegroundLocationPermission();
   }
 
-  Future<void> _storeUserApiKey(String apiKey) async {
-    setState(() {
-      _isValidatingProvider = true;
-    });
+  Future<bool> _openAppLocationSettings() =>
+      widget.locationRepository.openAppLocationSettings();
 
-    var providerStatus = await widget.providerRepository.storeApiKey(apiKey);
-    providerStatus = await widget.providerRepository.validateProviderSetup();
+  Future<bool> _openLocationServicesSettings() =>
+      widget.locationRepository.openLocationServicesSettings();
 
-    if (!mounted) {
-      return;
-    }
+  Future<bool> _openNotificationSettings() =>
+      widget.bridgeRepository.openNotificationSettings();
 
-    setState(() {
-      _providerStatus = providerStatus;
-      _isValidatingProvider = false;
-    });
-    await _refreshLocation();
+  Future<PermissionsSnapshot> _refreshPermissionsSnapshot() async {
+    return _refreshSetupReadiness();
   }
 
-  Future<void> _validateProviderSetup() async {
-    setState(() {
-      _isValidatingProvider = true;
-    });
+  Future<ProviderStatus> _storeUserApiKey(String apiKey) =>
+      widget.providerRepository.storeApiKey(apiKey);
 
+  Future<ProviderStatus> _validateProviderSetup() async {
     final providerStatus = await widget.providerRepository
         .validateProviderSetup();
 
-    if (!mounted) {
-      return;
-    }
-
-    setState(() {
-      _providerStatus = providerStatus;
-      _isValidatingProvider = false;
-    });
-    await _refreshLocation();
+    if (mounted) await _refreshSetupReadiness();
+    return providerStatus;
   }
 
-  Future<void> _applyMapTileSettings(MapTileSettings settings) async {
+  Future<MapTileSettings> _applyMapTileSettings(
+    MapTileSettings settings,
+  ) async {
     setState(() {
-      _isSavingMapTileSettings = true;
       _mapTileSettings = settings;
-      _mapTileSettingsDetail = null;
     });
 
     final result = await widget.providerRepository.setMapTileSettings(settings);
@@ -673,22 +707,18 @@ class _CompanionHomeState extends State<CompanionHome> {
       await _navigationDispatcher.sendPhoneMessage(watchMessage);
     }
     if (!mounted) {
-      return;
+      return result.settings;
     }
 
     setState(() {
       _mapTileSettings = result.settings;
-      _providerStatus = result.status;
-      _mapTileSettingsDetail = result.detail;
-      _isSavingMapTileSettings = false;
     });
+    return result.settings;
   }
 
   Future<void> _clearMapTileCache() async {
     setState(() {
-      _isSavingMapTileSettings = true;
       _isClearingTileCache = true;
-      _mapTileSettingsDetail = null;
     });
 
     final result = await widget.providerRepository.clearMapTileCache();
@@ -702,9 +732,6 @@ class _CompanionHomeState extends State<CompanionHome> {
 
     setState(() {
       _mapTileSettings = result.settings;
-      _providerStatus = result.status;
-      _mapTileSettingsDetail = result.detail;
-      _isSavingMapTileSettings = false;
       _isClearingTileCache = false;
     });
   }
@@ -713,8 +740,9 @@ class _CompanionHomeState extends State<CompanionHome> {
     setState(() {
       _isClearingRouteCache = true;
     });
+    late final WatchNavigationDispatchResult dispatchResult;
     try {
-      await _navigationDispatcher.clearActiveRoute();
+      dispatchResult = await _navigationDispatcher.clearActiveRoute();
     } catch (_) {
       if (!mounted) {
         return;
@@ -727,10 +755,14 @@ class _CompanionHomeState extends State<CompanionHome> {
     if (!mounted) {
       return;
     }
+    if (dispatchResult.deliveryState ==
+        WatchNavigationDeliveryState.deliveryFailed) {
+      setState(() => _isClearingRouteCache = false);
+      return;
+    }
     setState(() {
       _routeResult = null;
-      _activeRouteDestination = null;
-      _activeRouteTravelMode = null;
+      _activeRoute = null;
       _isClearingRouteCache = false;
     });
   }
@@ -739,35 +771,30 @@ class _CompanionHomeState extends State<CompanionHome> {
     setState(() {
       _isClearingProviderValidationCache = true;
     });
-    final status = await widget.providerRepository
-        .clearProviderValidationCache();
-    if (!mounted) {
-      return;
-    }
-    setState(() {
-      _providerStatus = status;
-      _isClearingProviderValidationCache = false;
-    });
+    await widget.providerRepository.clearProviderValidationCache();
+    if (!mounted) return;
+    await _refreshSetupReadiness();
+    if (!mounted) return;
+    setState(() => _isClearingProviderValidationCache = false);
   }
 
-  Future<void> _applyDisplaySettings(WatchDisplaySettings settings) async {
+  Future<WatchDisplaySettings> _applyDisplaySettings(
+    WatchDisplaySettings settings,
+  ) async {
     setState(() {
-      _isSavingDisplaySettings = true;
       _displaySettings = settings;
-      _displaySettingsDetail = null;
     });
 
     await _navigationDispatcher.setDisplaySettings(settings);
 
     if (!mounted) {
-      return;
+      return settings;
     }
 
     setState(() {
       _displaySettings = settings;
-      _displaySettingsDetail = 'Watch display settings updated.';
-      _isSavingDisplaySettings = false;
     });
+    return settings;
   }
 
   Future<String> _navigateNowRoute({
@@ -818,16 +845,14 @@ class _CompanionHomeState extends State<CompanionHome> {
       travelMode: travelMode,
       destination: destination,
     );
+    if (routeResult.ok) await _refreshActiveRoute();
+    if (!mounted) return 'Route request finished.';
     setState(() {
       _providerStatus = routeResult.status;
-      _routeResult = routeResult;
-      if (routeResult.ok) {
-        _activeRouteDestination = destination;
-        _activeRouteTravelMode = travelMode;
-      } else if (routeResult.errorCategory == 7) {
-        _activeRouteDestination = null;
-        _activeRouteTravelMode = null;
+      if (routeResult.ok || routeResult.errorCategory == 7) {
+        _routeResult = routeResult;
       }
+      if (routeResult.errorCategory == 7) _activeRoute = null;
       _isComputingRoute = false;
       _watchSessionDetail = dispatchResult.detail;
     });
@@ -835,7 +860,9 @@ class _CompanionHomeState extends State<CompanionHome> {
       return routeResult.detail ?? 'Route failed.';
     }
     return switch (dispatchResult.deliveryState) {
-      WatchNavigationDeliveryState.applied => _navigationSentMessage(destination.label),
+      WatchNavigationDeliveryState.applied => _navigationSentMessage(
+        destination.label,
+      ),
       WatchNavigationDeliveryState.launchFailed ||
       WatchNavigationDeliveryState.timedOut ||
       WatchNavigationDeliveryState.queued =>
@@ -848,11 +875,12 @@ class _CompanionHomeState extends State<CompanionHome> {
   }
 
   Future<String> _rerouteActiveRoute() async {
-    final destination = _activeRouteDestination;
-    final travelMode = _activeRouteTravelMode;
-    if (destination == null || travelMode == null) {
+    final activeRoute = _activeRoute;
+    if (activeRoute == null) {
       return 'No active route to reroute.';
     }
+    final destination = activeRoute.destination;
+    final travelMode = _travelModeForWatch(activeRoute.travelMode);
 
     setState(() {
       _isComputingRoute = true;
@@ -884,14 +912,15 @@ class _CompanionHomeState extends State<CompanionHome> {
       travelMode: travelMode,
       destination: destination,
     );
+    if (routeResult.ok) await _refreshActiveRoute();
+    if (!mounted) return 'Reroute request finished.';
     setState(() {
       _providerStatus = routeResult.status;
       if (routeResult.ok || routeResult.errorCategory == 7) {
-      _routeResult = routeResult;
+        _routeResult = routeResult;
       }
       if (routeResult.errorCategory == 7) {
-        _activeRouteDestination = null;
-        _activeRouteTravelMode = null;
+        _activeRoute = null;
       }
       _isComputingRoute = false;
       _watchSessionDetail = dispatchResult.detail;
@@ -922,10 +951,17 @@ class _CompanionHomeState extends State<CompanionHome> {
     if (!mounted) {
       return 'Route clear finished.';
     }
+    if (dispatchResult.deliveryState ==
+        WatchNavigationDeliveryState.deliveryFailed) {
+      setState(() {
+        _isComputingRoute = false;
+        _watchSessionDetail = dispatchResult.detail;
+      });
+      return dispatchResult.detail ?? 'End navigation failed.';
+    }
     setState(() {
       _routeResult = null;
-      _activeRouteDestination = null;
-      _activeRouteTravelMode = null;
+      _activeRoute = null;
       _isComputingRoute = false;
       _watchSessionDetail = dispatchResult.detail;
     });
@@ -933,11 +969,12 @@ class _CompanionHomeState extends State<CompanionHome> {
   }
 
   Future<String> _saveSavedLocation(WatchDestinationConfig config) async {
-    return _applySavedLocationUpdate(config);
+    final result = await _applySavedLocationUpdate(config);
+    return result.message;
   }
 
-  Future<String> _clearSavedLocation(int slotIndex) async {
-    return _applySavedLocationUpdate(
+  Future<String?> _clearSavedLocation(int slotIndex) async {
+    final result = await _applySavedLocationUpdate(
       WatchDestinationConfig(
         slotIndex: slotIndex,
         enabled: false,
@@ -949,9 +986,10 @@ class _CompanionHomeState extends State<CompanionHome> {
         defaultTravelMode: WatchTravelMode.drive,
       ),
     );
+    return result.success ? null : result.message;
   }
 
-  Future<String> _applySavedLocationUpdate(
+  Future<_SavedLocationUpdateResult> _applySavedLocationUpdate(
     WatchDestinationConfig config,
   ) async {
     setState(() {
@@ -964,18 +1002,25 @@ class _CompanionHomeState extends State<CompanionHome> {
       responses = await _navigationDispatcher.replaceDestination(config);
     } catch (error) {
       if (!mounted) {
-        return 'Saved location update failed.';
+        return const _SavedLocationUpdateResult.failure(
+          'Saved location update failed.',
+        );
       }
       setState(() {
         _savedLocationsDetail = 'Saved location update failed.';
         _isSavingSavedLocation = false;
       });
-      return 'Saved location update failed.';
+      return const _SavedLocationUpdateResult.failure(
+        'Saved location update failed.',
+      );
     }
 
     final errorText = _errorTextFromWatchResponses(responses);
     if (!mounted) {
-      return errorText ?? 'Saved location updated.';
+      return _SavedLocationUpdateResult(
+        success: errorText == null,
+        message: errorText ?? 'Saved location updated.',
+      );
     }
 
     if (errorText != null) {
@@ -983,7 +1028,7 @@ class _CompanionHomeState extends State<CompanionHome> {
         _savedLocationsDetail = errorText;
         _isSavingSavedLocation = false;
       });
-      return errorText;
+      return _SavedLocationUpdateResult.failure(errorText);
     }
 
     final previousLabel = _savedLocations
@@ -1003,7 +1048,7 @@ class _CompanionHomeState extends State<CompanionHome> {
           : '${previousLabel ?? savedLocationSlotTitle(config.slotIndex)} cleared.';
       _isSavingSavedLocation = false;
     });
-    return _savedLocationsDetail!;
+    return _SavedLocationUpdateResult.success(_savedLocationsDetail!);
   }
 
   List<WatchDestinationConfig> _sortedSavedLocations(
@@ -1138,152 +1183,346 @@ class _CompanionHomeState extends State<CompanionHome> {
         : 'Walk and bike routes may miss safe pedestrian or bicycling path detail.';
   }
 
-  Future<void> _clearApiKey() async {
+  Future<ProviderStatus> _clearApiKey() async {
     final providerStatus = await widget.providerRepository.clearApiKey();
-    if (!mounted) {
+    if (!mounted) return providerStatus;
+    await _refreshSetupReadiness();
+    if (!mounted) return providerStatus;
+    setState(() => _routeResult = null);
+    return providerStatus;
+  }
+
+  bool get _readinessLoaded =>
+      _bridgeReadinessLoaded &&
+      _locationReadinessLoaded &&
+      _batteryReadinessLoaded;
+
+  SetupChecklistSnapshot get _setupChecklistSnapshot => SetupChecklistSnapshot(
+    providerStatus: _providerStatus,
+    permissions: _permissionsSnapshot,
+  );
+
+  Future<void> _loadSetupChecklistVersion() async {
+    final version = await _withFallback(
+      widget.bridgeRepository.getSetupChecklistVersion(),
+      0,
+    );
+    if (!mounted) return;
+    setState(() => _setupChecklistVersion = math.max(0, version));
+    _maybeShowFirstRunSetupChecklist();
+  }
+
+  void _maybeShowFirstRunSetupChecklist() {
+    if (!mounted ||
+        _showFirstRunSetupChecklist ||
+        _setupChecklistDeferredForSession ||
+        _setupChecklistVersion == null ||
+        _setupChecklistVersion! >= setupChecklistCurrentVersion ||
+        !_readinessLoaded ||
+        !_initialActiveRouteSyncComplete ||
+        _activeRoute != null ||
+        _shareStatus != null) {
       return;
     }
-
     setState(() {
-      _providerStatus = providerStatus;
-      _routeResult = null;
+      _showFirstRunSetupChecklist = true;
     });
+    if (_setupChecklistPersistenceScheduled) return;
+    _setupChecklistPersistenceScheduled = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _setupChecklistPersistenceScheduled = false;
+      if (!mounted ||
+          !_showFirstRunSetupChecklist ||
+          _activeRoute != null ||
+          _shareStatus != null) {
+        return;
+      }
+      unawaited(_recordSetupChecklistShown());
+    });
+  }
+
+  Future<void> _recordSetupChecklistShown() async {
+    final stored = await _withFallback(
+      widget.bridgeRepository.setSetupChecklistVersion(
+        setupChecklistCurrentVersion,
+      ),
+      false,
+    );
+    if (!mounted) return;
+    setState(() {
+      if (stored) {
+        _setupChecklistVersion = setupChecklistCurrentVersion;
+      } else {
+        _diagnosticEvents.insert(
+          0,
+          'Setup checklist state could not be saved.',
+        );
+      }
+    });
+  }
+
+  void _closeFirstRunSetupChecklist() {
+    setState(() {
+      _showFirstRunSetupChecklist = false;
+      _setupChecklistDeferredForSession = true;
+    });
+  }
+
+  bool get _providerNeedsAttention => !_providerReady(_providerStatus);
+
+  bool get _permissionsNeedAttention =>
+      !_locationAccessStatus.isReady ||
+      !_bridgeStatus.notificationPermissionState.allowsWatchNotification ||
+      _batteryOptimizationState != BatteryOptimizationState.disabled;
+
+  String get _setupChecklistSummary {
+    if (!_readinessLoaded) return 'Checking…';
+    final snapshot = _setupChecklistSnapshot;
+    if (!snapshot.requiredReady) return 'Required setup incomplete';
+    if (!snapshot.reliabilityReady) return 'Recommendations available';
+    return 'Ready';
+  }
+
+  PermissionsSnapshot get _permissionsSnapshot => PermissionsSnapshot(
+    location: _locationAccessStatus,
+    notification: _bridgeStatus.notificationPermissionState,
+    battery: _batteryOptimizationState,
+  );
+
+  void _pushPage(Widget page) {
+    Navigator.of(
+      context,
+    ).push<void>(MaterialPageRoute<void>(builder: (_) => page));
+  }
+
+  Future<ProviderStatus> _openGoogleSetup() async {
+    await Navigator.of(context).push<void>(
+      MaterialPageRoute<void>(
+        builder: (_) => GoogleMapsSetupScreen(
+          initialStatus: _providerStatus,
+          onStoreApiKey: _storeUserApiKey,
+          onValidateProviderSetup: _validateProviderSetup,
+          onRemoveKey: _clearApiKey,
+        ),
+      ),
+    );
+    if (mounted) await _refreshSetupReadiness();
+    return _providerStatus;
+  }
+
+  Future<PermissionsSnapshot> _openPermissions({
+    PermissionsFocus? focus,
+  }) async {
+    await Navigator.of(context).push<void>(
+      MaterialPageRoute<void>(
+        builder: (_) => PermissionsScreen(
+          initialSnapshot: _permissionsSnapshot,
+          focus: focus,
+          onRefresh: _refreshPermissionsSnapshot,
+          onRequestForegroundLocation: _requestLocationPermission,
+          onOpenAppLocationSettings: _openAppLocationSettings,
+          onOpenLocationServicesSettings: _openLocationServicesSettings,
+          onRequestNotifications: _requestNotificationPermission,
+          onOpenNotificationSettings: _openNotificationSettings,
+          onRequestBatteryExemption: _requestDisableBatteryOptimization,
+        ),
+      ),
+    );
+    final snapshot = await _refreshSetupReadiness();
+    if (mounted) {
+      unawaited(_refreshGpsFix(timeout: _startupLocationTimeout));
+    }
+    return snapshot;
+  }
+
+  void _openWatchConnection() => _pushPage(
+    WatchConnectionScreen(
+      initialStatus: _bridgeStatus,
+      initialDetail: _watchSessionDetail,
+      onRefresh: _loadBridgeStatus,
+      onOpenWatch: _startWatchApp,
+    ),
+  );
+
+  void _openNavigationPreferences() => _pushPage(
+    NavigationPreferencesScreen(
+      initialSettings: _displaySettings,
+      onChanged: _applyDisplaySettings,
+    ),
+  );
+
+  void _openAppearancePreferences() => _pushPage(
+    AppearancePreferencesScreen(
+      initialSettings: _displaySettings,
+      onChanged: _applyDisplaySettings,
+    ),
+  );
+
+  void _openWatchMapPreferences() => _pushPage(
+    WatchMapPreferencesScreen(
+      initialDisplaySettings: _displaySettings,
+      initialMapSettings: _mapTileSettings,
+      onDisplayChanged: _applyDisplaySettings,
+      onMapChanged: _applyMapTileSettings,
+    ),
+  );
+
+  void _openDiagnostics() => _pushPage(
+    DiagnosticsScreen(
+      events: _diagnosticEvents,
+      isClearingDiagnostics: _isClearingDiagnostics,
+      onExportDiagnostics: _exportDiagnostics,
+      onClearDiagnostics: _clearDiagnostics,
+      isClearingTileCache: _isClearingTileCache,
+      onClearTileCache: _clearMapTileCache,
+      isClearingRouteCache: _isClearingRouteCache,
+      onClearRouteCache: _clearRouteCacheFromDiagnostics,
+      isClearingProviderValidationCache: _isClearingProviderValidationCache,
+      onClearProviderValidationCache: _clearProviderValidationCache,
+    ),
+  );
+
+  void _openSetupChecklist() => _pushPage(
+    _ManualSetupChecklistPage(
+      initialSnapshot: _setupChecklistSnapshot,
+      onRefresh: () async {
+        await _refreshSetupReadiness();
+        return _setupChecklistSnapshot;
+      },
+      onOpenGoogleSetup: () async {
+        await _openGoogleSetup();
+      },
+      onOpenPermissions: (focus) async {
+        await _openPermissions(focus: focus);
+      },
+    ),
+  );
+
+  void _openAbout() => _pushPage(const AboutScreen());
+
+  void _dismissShareStatus() {
+    setState(() => _shareStatus = null);
+    _maybeShowFirstRunSetupChecklist();
   }
 
   @override
   Widget build(BuildContext context) {
-    if (!_welcomeStateLoaded) {
-      return const Scaffold(body: Center(child: CircularProgressIndicator()));
-    }
-    if (_showWelcomeFlow) {
-      return WelcomeFlowScreen(
-        permissionState: _permissionState,
-        notificationPermissionState: _bridgeStatus.notificationPermissionState,
-        batteryOptimizationState: _batteryOptimizationState,
-        isRequestingLocation: _isRefreshingLocation,
-        isRequestingNotificationPermission: _isRequestingNotificationPermission,
-        isRequestingBatteryOptimization: _isRequestingBatteryOptimization,
-        onRequestLocation: _requestLocationPermission,
-        onRequestNotificationPermission: _requestNotificationPermission,
-        onRequestBatteryOptimization: _requestDisableBatteryOptimization,
-        onDone: _finishWelcomeFlow,
-      );
-    }
-
     final tabs = companionTabs();
-    if (!tabs.contains(_selectedTab)) {
-      _selectedTab = tabs.first;
-    }
+    final settingsNeedsAttention =
+        _readinessLoaded &&
+        (_providerNeedsAttention || _permissionsNeedAttention);
+    final setupChecklistChecking =
+        _activeRoute == null &&
+        _shareStatus == null &&
+        (_setupChecklistVersion == null ||
+            !_readinessLoaded ||
+            !_initialActiveRouteSyncComplete);
     final title = switch (_selectedTab) {
       CompanionTab.navigate => 'Navigate',
-      CompanionTab.status => 'Status',
-      CompanionTab.setup => 'Setup',
       CompanionTab.savedLocations => 'Saved Locations',
       CompanionTab.settings => 'Settings',
-      CompanionTab.diagnostics => 'Diagnostics',
     };
 
     return Scaffold(
-      appBar: AppBar(
-        title: Text(title),
-        actions: [
-          IconButton(
-            tooltip: 'Refresh',
-            onPressed: _isRefreshingLocation ? null : _refreshLocation,
-            icon: const Icon(Icons.refresh),
-          ),
-          IconButton(
-            tooltip: 'View Welcome',
-            onPressed: _replayWelcomeFlow,
-            icon: const Icon(Icons.help_outline),
-          ),
-        ],
-      ),
+      appBar: AppBar(title: Text(title)),
       body: SafeArea(
-        child: switch (_selectedTab) {
-          CompanionTab.navigate => NavigateScreen(
-            providerStatus: _providerStatus,
-            location: _location,
-            routeResult: _routeResult,
-            shareStatus: _shareStatus,
-            activeDestinationLabel: _activeRouteDestination?.label,
-            isComputingRoute: _isComputingRoute,
-            providerRepository: widget.providerRepository,
-            enableEmbeddedGoogleMap: widget.enableEmbeddedGoogleMap,
-            defaultTravelMode: _travelModeForWatch(_displaySettings.travelMode),
-            onNavigateNow: _navigateNowRoute,
-            onRerouteActiveRoute: _rerouteActiveRoute,
-            onClearActiveRoute: _clearActiveRoute,
-            navigateShowcaseKey: _navigateShowcaseKey,
-          ),
-          CompanionTab.status => StatusScreen(
-            permissionState: _permissionState,
-            providerStatus: _providerStatus,
-            bridgeStatus: _bridgeStatus,
-            location: _location,
-            isRefreshingLocation: _isRefreshingLocation,
-            isStartingWatchApp: _isStartingWatchApp,
-            isRequestingNotificationPermission:
-                _isRequestingNotificationPermission,
-            watchSessionDetail: _watchSessionDetail,
-            onRequestLocation: _requestLocationPermission,
-            onRefreshLocation: _refreshLocation,
-            onValidateProvider: _validateProviderSetup,
-            onStartWatchApp: _startWatchApp,
-            onRequestNotificationPermission: _requestNotificationPermission,
-            onOpenSetup: () {
-              setState(() {
-                _selectedTab = CompanionTab.setup;
-              });
-            },
-          ),
-          CompanionTab.setup => SetupScreen(
-            providerStatus: _providerStatus,
-            bridgeStatus: _bridgeStatus,
-            permissionState: _permissionState,
-            location: _location,
-            isValidatingProvider: _isValidatingProvider,
-            onStoreApiKey: _storeUserApiKey,
-            onValidateProvider: _validateProviderSetup,
-            onClearApiKey: _clearApiKey,
-          ),
-          CompanionTab.savedLocations => SavedLocationsScreen(
-            providerRepository: widget.providerRepository,
-            providerStatus: _providerStatus,
-            location: _location,
-            destinations: _savedLocations,
-            defaultTravelMode: _displaySettings.travelMode,
-            isLoading: _isLoadingSavedLocations,
-            isSaving: _isSavingSavedLocation,
-            detail: _savedLocationsDetail,
-            onSave: _saveSavedLocation,
-            onClear: _clearSavedLocation,
-          ),
-          CompanionTab.settings => SettingsScreen(
-            settings: _mapTileSettings,
-            displaySettings: _displaySettings,
-            isSaving: _isSavingMapTileSettings,
-            isSavingDisplaySettings: _isSavingDisplaySettings,
-            detail: _mapTileSettingsDetail,
-            displaySettingsDetail: _displaySettingsDetail,
-            onChanged: _applyMapTileSettings,
-            onDisplaySettingsChanged: _applyDisplaySettings,
-            onClearCache: _clearMapTileCache,
-          ),
-          CompanionTab.diagnostics => DiagnosticsScreen(
-            events: _diagnosticEvents,
-            isClearingDiagnostics: _isClearingDiagnostics,
-            onExportDiagnostics: _exportDiagnostics,
-            onClearDiagnostics: _clearDiagnostics,
-            isClearingTileCache: _isClearingTileCache,
-            onClearTileCache: _clearMapTileCache,
-            isClearingRouteCache: _isClearingRouteCache,
-            onClearRouteCache: _clearRouteCacheFromDiagnostics,
-            isClearingProviderValidationCache:
-                _isClearingProviderValidationCache,
-            onClearProviderValidationCache: _clearProviderValidationCache,
-          ),
-        },
+        child: IndexedStack(
+          index: tabs.indexOf(_selectedTab),
+          children: [
+            TickerMode(
+              enabled: _selectedTab == CompanionTab.navigate,
+              child: NavigateScreen(
+                key: const PageStorageKey('navigate-tab'),
+                providerStatus: _providerStatus,
+                location: _location,
+                routeResult: _routeResult,
+                shareStatus: _shareStatus,
+                activeRoute: _activeRoute,
+                setupChecklistChecking: setupChecklistChecking,
+                showSetupChecklist: _showFirstRunSetupChecklist,
+                setupChecklistSnapshot: _setupChecklistSnapshot,
+                savedLocations: _savedLocations,
+                locationReady: _locationAccessStatus.isReady,
+                backgroundReadinessWarning:
+                    !_bridgeStatus
+                        .notificationPermissionState
+                        .allowsWatchNotification ||
+                    _batteryOptimizationState !=
+                        BatteryOptimizationState.disabled,
+                isComputingRoute: _isComputingRoute,
+                providerRepository: widget.providerRepository,
+                enableEmbeddedGoogleMap: widget.enableEmbeddedGoogleMap,
+                defaultTravelMode: _travelModeForWatch(
+                  _displaySettings.travelMode,
+                ),
+                onNavigateNow: _navigateNowRoute,
+                onRerouteActiveRoute: _rerouteActiveRoute,
+                onClearActiveRoute: _clearActiveRoute,
+                onOpenSetup: () {
+                  unawaited(_openGoogleSetup());
+                },
+                onOpenPermissions: () {
+                  unawaited(_openPermissions());
+                },
+                onDismissShareStatus: _dismissShareStatus,
+                onOpenChecklistGoogleSetup: () {
+                  unawaited(_openGoogleSetup());
+                },
+                onOpenChecklistPermissions: (focus) {
+                  unawaited(_openPermissions(focus: focus));
+                },
+                onFinishSetupChecklist: _closeFirstRunSetupChecklist,
+              ),
+            ),
+            TickerMode(
+              enabled: _selectedTab == CompanionTab.savedLocations,
+              child: SavedLocationsScreen(
+                key: const PageStorageKey('saved-tab'),
+                providerRepository: widget.providerRepository,
+                providerStatus: _providerStatus,
+                location: _location,
+                destinations: _savedLocations,
+                defaultTravelMode: _displaySettings.travelMode,
+                isLoading: _isLoadingSavedLocations,
+                isSaving: _isSavingSavedLocation,
+                detail: _savedLocationsDetail,
+                onSave: _saveSavedLocation,
+                onClear: _clearSavedLocation,
+                onOpenSetup: _openGoogleSetup,
+              ),
+            ),
+            TickerMode(
+              enabled: _selectedTab == CompanionTab.settings,
+              child: SettingsHubScreen(
+                key: const PageStorageKey('settings-tab'),
+                providerStatus: _providerStatus,
+                setupChecklistSummary: _setupChecklistSummary,
+                setupChecklistNeedsAttention:
+                    _readinessLoaded && _setupChecklistSnapshot.needsAttention,
+                permissionsSummary: _permissionsNeedAttention
+                    ? 'Needs attention'
+                    : 'Ready',
+                watchSummary: _bridgeStatus.watchDetailLabel,
+                readinessLoaded: _readinessLoaded,
+                providerNeedsAttention: _providerNeedsAttention,
+                permissionsNeedAttention: _permissionsNeedAttention,
+                onOpenSetupChecklist: _openSetupChecklist,
+                onOpenGoogleSetup: () {
+                  unawaited(_openGoogleSetup());
+                },
+                onOpenPermissions: () {
+                  unawaited(_openPermissions());
+                },
+                onOpenWatchConnection: _openWatchConnection,
+                onOpenNavigationPreferences: _openNavigationPreferences,
+                onOpenAppearancePreferences: _openAppearancePreferences,
+                onOpenWatchMapPreferences: _openWatchMapPreferences,
+                onOpenDiagnostics: _openDiagnostics,
+                onOpenAbout: _openAbout,
+              ),
+            ),
+          ],
+        ),
       ),
       bottomNavigationBar: NavigationBar(
         selectedIndex: tabs.indexOf(_selectedTab),
@@ -1300,30 +1539,35 @@ class _CompanionHomeState extends State<CompanionHome> {
                 selectedIcon: Icon(Icons.navigation),
                 label: 'Navigate',
               ),
-              CompanionTab.status => const NavigationDestination(
-                icon: Icon(Icons.check_circle_outline),
-                selectedIcon: Icon(Icons.check_circle),
-                label: 'Status',
-              ),
-              CompanionTab.setup => const NavigationDestination(
-                icon: Icon(Icons.key_outlined),
-                selectedIcon: Icon(Icons.key),
-                label: 'Setup',
-              ),
               CompanionTab.savedLocations => const NavigationDestination(
                 icon: Icon(Icons.bookmark_border),
                 selectedIcon: Icon(Icons.bookmark),
                 label: 'Saved',
               ),
-              CompanionTab.settings => const NavigationDestination(
-                icon: Icon(Icons.tune_outlined),
-                selectedIcon: Icon(Icons.tune),
+              CompanionTab.settings => NavigationDestination(
+                icon: Semantics(
+                  label: settingsNeedsAttention
+                      ? 'Settings, setup needs attention'
+                      : 'Settings',
+                  child: Badge(
+                    isLabelVisible: settingsNeedsAttention,
+                    smallSize: 9,
+                    backgroundColor: const Color(0xFFE0A000),
+                    child: const Icon(Icons.tune_outlined),
+                  ),
+                ),
+                selectedIcon: Semantics(
+                  label: settingsNeedsAttention
+                      ? 'Settings, setup needs attention'
+                      : 'Settings',
+                  child: Badge(
+                    isLabelVisible: settingsNeedsAttention,
+                    smallSize: 9,
+                    backgroundColor: const Color(0xFFE0A000),
+                    child: const Icon(Icons.tune),
+                  ),
+                ),
                 label: 'Settings',
-              ),
-              CompanionTab.diagnostics => const NavigationDestination(
-                icon: Icon(Icons.receipt_long_outlined),
-                selectedIcon: Icon(Icons.receipt_long),
-                label: 'Diagnostics',
               ),
             },
         ],
@@ -1332,368 +1576,109 @@ class _CompanionHomeState extends State<CompanionHome> {
   }
 }
 
-class WelcomeFlowScreen extends StatelessWidget {
-  const WelcomeFlowScreen({
-    required this.permissionState,
-    required this.notificationPermissionState,
-    required this.batteryOptimizationState,
-    required this.isRequestingLocation,
-    required this.isRequestingNotificationPermission,
-    required this.isRequestingBatteryOptimization,
-    required this.onRequestLocation,
-    required this.onRequestNotificationPermission,
-    required this.onRequestBatteryOptimization,
-    required this.onDone,
-    super.key,
+class _ManualSetupChecklistPage extends StatefulWidget {
+  const _ManualSetupChecklistPage({
+    required this.initialSnapshot,
+    required this.onRefresh,
+    required this.onOpenGoogleSetup,
+    required this.onOpenPermissions,
   });
 
-  final LocationPermissionState permissionState;
-  final NotificationPermissionState notificationPermissionState;
-  final BatteryOptimizationState batteryOptimizationState;
-  final bool isRequestingLocation;
-  final bool isRequestingNotificationPermission;
-  final bool isRequestingBatteryOptimization;
-  final VoidCallback onRequestLocation;
-  final VoidCallback onRequestNotificationPermission;
-  final VoidCallback onRequestBatteryOptimization;
-  final VoidCallback onDone;
+  final SetupChecklistSnapshot initialSnapshot;
+  final Future<SetupChecklistSnapshot> Function() onRefresh;
+  final Future<void> Function() onOpenGoogleSetup;
+  final Future<void> Function(PermissionsFocus focus) onOpenPermissions;
 
   @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    final pageDecoration = PageDecoration(
-      titleTextStyle: theme.textTheme.headlineSmall!.copyWith(
-        fontWeight: FontWeight.w700,
-      ),
-      bodyTextStyle: theme.textTheme.bodyLarge!.copyWith(
-        color: theme.colorScheme.onSurfaceVariant,
-      ),
-      imageFlex: 2,
-      bodyFlex: 3,
-      footerFlex: 2,
-      safeArea: 92,
-      pageColor: theme.colorScheme.surface,
-      contentMargin: const EdgeInsets.symmetric(horizontal: 24),
-      footerPadding: const EdgeInsets.fromLTRB(24, 16, 24, 0),
-    );
-
-    return IntroductionScreen(
-      pages: [
-        PageViewModel(
-          title: 'Navigate from the phone',
-          body:
-              'Search for a place, choose current GPS or a specific origin, and send the route straight to the Pebble watch.',
-          image: const _WelcomeIcon(icon: Icons.navigation_outlined),
-          decoration: pageDecoration,
-        ),
-        PageViewModel(
-          title: 'Allow all-the-time location',
-          body:
-              'Mappy sends live geolocation to the Pebble watch while the phone app is backgrounded. Android needs location set to Allow all the time so an active route does not go stale.',
-          image: const _WelcomeIcon(icon: Icons.location_searching_outlined),
-          footer: _WelcomePermissionFooter(
-            icon: Icons.location_on_outlined,
-            status: _welcomeLocationStatus(permissionState),
-            buttonLabel: _welcomeLocationActionLabel(permissionState),
-            isComplete: permissionState.allowsBackgroundLocation,
-            isBusy: isRequestingLocation,
-            onPressed:
-                permissionState.allowsBackgroundLocation ||
-                    permissionState == LocationPermissionState.unavailable
-                ? null
-                : onRequestLocation,
-          ),
-          decoration: pageDecoration,
-        ),
-        PageViewModel(
-          title: 'Allow notifications',
-          body:
-              'Android requires a visible notification for the foreground service that keeps Pebble routing alive. Mappy uses it for the active watch session.',
-          image: const _WelcomeIcon(icon: Icons.notifications_active_outlined),
-          footer: _WelcomePermissionFooter(
-            icon: Icons.notifications_outlined,
-            status: _welcomeNotificationStatus(notificationPermissionState),
-            buttonLabel: _welcomeNotificationActionLabel(
-              notificationPermissionState,
-            ),
-            isComplete: notificationPermissionState.allowsWatchNotification,
-            isBusy: isRequestingNotificationPermission,
-            onPressed: notificationPermissionState.canRequest
-                ? onRequestNotificationPermission
-                : null,
-          ),
-          decoration: pageDecoration,
-        ),
-        PageViewModel(
-          title: 'Disable battery optimizations',
-          body:
-              'Some Android builds stop background location and Pebble delivery when battery optimization is enabled. Exempt Mappy so active routes keep updating.',
-          image: const _WelcomeIcon(icon: Icons.battery_saver_outlined),
-          footer: _WelcomePermissionFooter(
-            icon: Icons.battery_charging_full_outlined,
-            status: _welcomeBatteryOptimizationStatus(batteryOptimizationState),
-            buttonLabel: _welcomeBatteryOptimizationActionLabel(
-              batteryOptimizationState,
-            ),
-            isComplete: batteryOptimizationState.isReady,
-            isBusy: isRequestingBatteryOptimization,
-            onPressed: batteryOptimizationState.canRequest
-                ? onRequestBatteryOptimization
-                : null,
-          ),
-          decoration: pageDecoration,
-        ),
-        PageViewModel(
-          title: 'Bring your Google key',
-          body:
-              'Setup shows the Android package and signing SHA-1. Use them with Map Tiles, Places, Geocoding, and Routes APIs.',
-          image: const _WelcomeIcon(icon: Icons.key_outlined),
-          decoration: pageDecoration,
-        ),
-        PageViewModel(
-          title: 'Use Status when blocked',
-          body:
-              'Status shows the exact missing piece: key, provider validation, always location, notifications, battery settings, watch bridge, or foreground service.',
-          image: const _WelcomeIcon(icon: Icons.check_circle_outline),
-          decoration: pageDecoration,
-        ),
-      ],
-      onDone: onDone,
-      onSkip: onDone,
-      showSkipButton: true,
-      safeAreaList: const [true, true, true, true],
-      controlsPadding: const EdgeInsets.fromLTRB(16, 8, 16, 16),
-      bodyPadding: const EdgeInsets.only(bottom: 8),
-      skip: const Text('Skip'),
-      next: const Icon(Icons.arrow_forward),
-      done: const Text('Start', style: TextStyle(fontWeight: FontWeight.w700)),
-      dotsDecorator: DotsDecorator(
-        activeColor: theme.colorScheme.primary,
-        activeSize: const Size(22, 10),
-        activeShape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(8),
-        ),
-      ),
-    );
-  }
+  State<_ManualSetupChecklistPage> createState() =>
+      _ManualSetupChecklistPageState();
 }
 
-class _WelcomePermissionFooter extends StatelessWidget {
-  const _WelcomePermissionFooter({
-    required this.icon,
-    required this.status,
-    required this.buttonLabel,
-    required this.isComplete,
-    required this.isBusy,
-    required this.onPressed,
-  });
-
-  final IconData icon;
-  final String status;
-  final String buttonLabel;
-  final bool isComplete;
-  final bool isBusy;
-  final VoidCallback? onPressed;
+class _ManualSetupChecklistPageState extends State<_ManualSetupChecklistPage>
+    with WidgetsBindingObserver {
+  late SetupChecklistSnapshot _snapshot;
+  bool _refreshing = false;
 
   @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    final backgroundColor = isComplete
-        ? theme.colorScheme.primaryContainer
-        : theme.colorScheme.surfaceContainerHighest;
-    final foregroundColor = isComplete
-        ? theme.colorScheme.onPrimaryContainer
-        : theme.colorScheme.onSurfaceVariant;
-    return Column(
-      mainAxisSize: MainAxisSize.min,
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        DecoratedBox(
-          decoration: BoxDecoration(
-            color: backgroundColor,
-            borderRadius: BorderRadius.circular(8),
-          ),
-          child: Padding(
-            padding: const EdgeInsets.all(12),
-            child: Row(
-              children: [
-                Icon(
-                  isComplete ? Icons.check_circle_outline : icon,
-                  color: foregroundColor,
-                ),
-                const SizedBox(width: 10),
-                Expanded(
-                  child: Text(
-                    status,
-                    style: theme.textTheme.bodyMedium?.copyWith(
-                      color: foregroundColor,
-                    ),
-                  ),
-                ),
-              ],
-            ),
-          ),
-        ),
-        const SizedBox(height: 12),
-        FilledButton.icon(
-          onPressed: isBusy ? null : onPressed,
-          icon: isBusy
-              ? const SizedBox.square(
-                  dimension: 18,
-                  child: CircularProgressIndicator(strokeWidth: 2),
-                )
-              : Icon(isComplete ? Icons.check : icon),
-          label: Text(isBusy ? 'Opening Settings' : buttonLabel),
-        ),
-      ],
-    );
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addObserver(this);
+    _snapshot = widget.initialSnapshot;
+    unawaited(_refresh());
   }
-}
-
-String _welcomeLocationStatus(LocationPermissionState state) {
-  if (state.allowsBackgroundLocation) {
-    return 'Always location is ready.';
-  }
-  if (state.allowsLocation) {
-    return 'Foreground location is on. Switch Mappy to Allow all the time in Android settings.';
-  }
-  switch (state) {
-    case LocationPermissionState.serviceDisabled:
-      return 'Turn on Android location services, then allow location for Mappy.';
-    case LocationPermissionState.permanentlyDenied:
-      return 'Android settings must be used before Mappy can request location again.';
-    case LocationPermissionState.unavailable:
-      return 'Location is unavailable on this device.';
-    case LocationPermissionState.unknown:
-      return 'Mappy has not checked Android location permission yet.';
-    case LocationPermissionState.requestAvailable:
-    case LocationPermissionState.denied:
-      return 'Android location permission is not granted yet.';
-    case LocationPermissionState.grantedPrecise:
-    case LocationPermissionState.grantedApproximate:
-    case LocationPermissionState.grantedAlwaysPrecise:
-    case LocationPermissionState.grantedAlwaysApproximate:
-      return 'Always location is ready.';
-  }
-}
-
-String _welcomeLocationActionLabel(LocationPermissionState state) {
-  if (state.allowsBackgroundLocation) {
-    return 'Always Location Ready';
-  }
-  if (state.allowsLocation) {
-    return 'Open Always Location';
-  }
-  switch (state) {
-    case LocationPermissionState.serviceDisabled:
-      return 'Check Location';
-    case LocationPermissionState.permanentlyDenied:
-      return 'Open Location Settings';
-    case LocationPermissionState.unavailable:
-      return 'Location Unavailable';
-    case LocationPermissionState.unknown:
-    case LocationPermissionState.requestAvailable:
-    case LocationPermissionState.denied:
-    case LocationPermissionState.grantedPrecise:
-    case LocationPermissionState.grantedApproximate:
-    case LocationPermissionState.grantedAlwaysPrecise:
-    case LocationPermissionState.grantedAlwaysApproximate:
-      return 'Allow Location';
-  }
-}
-
-String _welcomeNotificationStatus(NotificationPermissionState state) {
-  if (state.allowsWatchNotification) {
-    return state == NotificationPermissionState.notRequired
-        ? 'This Android version does not require notification permission.'
-        : 'Watch-session notifications are ready.';
-  }
-  switch (state) {
-    case NotificationPermissionState.permanentlyDenied:
-      return 'Android settings must be used before Mappy can show watch-session notifications.';
-    case NotificationPermissionState.unavailable:
-      return 'Notification permission status is unavailable on this device.';
-    case NotificationPermissionState.unknown:
-      return 'Mappy has not checked notification permission yet.';
-    case NotificationPermissionState.requestAvailable:
-    case NotificationPermissionState.denied:
-      return 'Android notification permission is not granted yet.';
-    case NotificationPermissionState.granted:
-    case NotificationPermissionState.notRequired:
-      return 'Watch-session notifications are ready.';
-  }
-}
-
-String _welcomeNotificationActionLabel(NotificationPermissionState state) {
-  if (state.allowsWatchNotification) {
-    return state == NotificationPermissionState.notRequired
-        ? 'Notifications Not Required'
-        : 'Notifications Ready';
-  }
-  switch (state) {
-    case NotificationPermissionState.permanentlyDenied:
-      return 'Open Notification Settings';
-    case NotificationPermissionState.unavailable:
-      return 'Notifications Unavailable';
-    case NotificationPermissionState.unknown:
-    case NotificationPermissionState.requestAvailable:
-    case NotificationPermissionState.denied:
-    case NotificationPermissionState.granted:
-    case NotificationPermissionState.notRequired:
-      return 'Allow Notifications';
-  }
-}
-
-String _welcomeBatteryOptimizationStatus(BatteryOptimizationState state) {
-  switch (state) {
-    case BatteryOptimizationState.disabled:
-      return 'Battery optimizations are disabled for Mappy.';
-    case BatteryOptimizationState.enabled:
-      return 'Android may pause Mappy in the background unless optimizations are disabled.';
-    case BatteryOptimizationState.unavailable:
-      return 'Battery optimization settings are unavailable on this device.';
-    case BatteryOptimizationState.unknown:
-      return 'Mappy has not checked battery optimization yet.';
-  }
-}
-
-String _welcomeBatteryOptimizationActionLabel(BatteryOptimizationState state) {
-  switch (state) {
-    case BatteryOptimizationState.disabled:
-      return 'Battery Ready';
-    case BatteryOptimizationState.enabled:
-      return 'Disable Optimization';
-    case BatteryOptimizationState.unavailable:
-      return 'Battery Unavailable';
-    case BatteryOptimizationState.unknown:
-      return 'Check Battery Setting';
-  }
-}
-
-class _WelcomeIcon extends StatelessWidget {
-  const _WelcomeIcon({required this.icon});
-
-  final IconData icon;
 
   @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    return Center(
-      child: Container(
-        width: 112,
-        height: 112,
-        decoration: BoxDecoration(
-          color: theme.colorScheme.primaryContainer,
-          shape: BoxShape.circle,
-        ),
-        child: Icon(
-          icon,
-          size: 52,
-          color: theme.colorScheme.onPrimaryContainer,
-        ),
-      ),
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) unawaited(_refresh());
+  }
+
+  Future<void> _refresh() async {
+    if (_refreshing) return;
+    setState(() => _refreshing = true);
+    try {
+      final snapshot = await widget.onRefresh();
+      if (!mounted) return;
+      setState(() => _snapshot = snapshot);
+    } catch (_) {
+      if (mounted) _showChecklistFailure();
+    } finally {
+      if (mounted) setState(() => _refreshing = false);
+    }
+  }
+
+  Future<void> _run(Future<void> Function() action) async {
+    if (_refreshing) return;
+    setState(() => _refreshing = true);
+    try {
+      await action();
+      final snapshot = await widget.onRefresh();
+      if (!mounted) return;
+      setState(() => _snapshot = snapshot);
+    } catch (_) {
+      if (mounted) _showChecklistFailure();
+    } finally {
+      if (mounted) setState(() => _refreshing = false);
+    }
+  }
+
+  void _showChecklistFailure() {
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(content: Text('Setup status could not be refreshed.')),
     );
   }
+
+  @override
+  Widget build(BuildContext context) => Stack(
+    children: [
+      FirstRunSetupChecklist(
+        snapshot: _snapshot,
+        manual: true,
+        onOpenGoogleSetup: () {
+          unawaited(_run(widget.onOpenGoogleSetup));
+        },
+        onOpenPermissions: (focus) {
+          unawaited(_run(() => widget.onOpenPermissions(focus)));
+        },
+        onContinue: () => Navigator.pop(context),
+        onDismiss: () => Navigator.pop(context),
+      ),
+      if (_refreshing)
+        const Positioned(
+          top: 12,
+          right: 16,
+          child: SizedBox.square(
+            dimension: 18,
+            child: CircularProgressIndicator(strokeWidth: 2),
+          ),
+        ),
+    ],
+  );
 }
 
 class NavigateScreen extends StatelessWidget {
@@ -1702,7 +1687,13 @@ class NavigateScreen extends StatelessWidget {
     required this.location,
     required this.routeResult,
     required this.shareStatus,
-    required this.activeDestinationLabel,
+    required this.activeRoute,
+    required this.setupChecklistChecking,
+    required this.showSetupChecklist,
+    required this.setupChecklistSnapshot,
+    required this.savedLocations,
+    required this.locationReady,
+    required this.backgroundReadinessWarning,
     required this.isComputingRoute,
     required this.providerRepository,
     required this.enableEmbeddedGoogleMap,
@@ -1710,7 +1701,12 @@ class NavigateScreen extends StatelessWidget {
     required this.onNavigateNow,
     required this.onRerouteActiveRoute,
     required this.onClearActiveRoute,
-    required this.navigateShowcaseKey,
+    required this.onOpenSetup,
+    required this.onOpenPermissions,
+    required this.onDismissShareStatus,
+    required this.onOpenChecklistGoogleSetup,
+    required this.onOpenChecklistPermissions,
+    required this.onFinishSetupChecklist,
     super.key,
   });
 
@@ -1718,7 +1714,13 @@ class NavigateScreen extends StatelessWidget {
   final LocationSnapshot? location;
   final RouteResult? routeResult;
   final ShareRoutingStatus? shareStatus;
-  final String? activeDestinationLabel;
+  final WatchActiveRoute? activeRoute;
+  final bool setupChecklistChecking;
+  final bool showSetupChecklist;
+  final SetupChecklistSnapshot setupChecklistSnapshot;
+  final List<WatchDestinationConfig> savedLocations;
+  final bool locationReady;
+  final bool backgroundReadinessWarning;
   final bool isComputingRoute;
   final ProviderRepository providerRepository;
   final bool enableEmbeddedGoogleMap;
@@ -1732,565 +1734,333 @@ class NavigateScreen extends StatelessWidget {
   onNavigateNow;
   final Future<String> Function() onRerouteActiveRoute;
   final Future<String> Function() onClearActiveRoute;
-  final GlobalKey navigateShowcaseKey;
+  final VoidCallback onOpenSetup;
+  final VoidCallback onOpenPermissions;
+  final VoidCallback onDismissShareStatus;
+  final VoidCallback onOpenChecklistGoogleSetup;
+  final ValueChanged<PermissionsFocus> onOpenChecklistPermissions;
+  final VoidCallback onFinishSetupChecklist;
 
   @override
   Widget build(BuildContext context) {
+    final providerReady = _providerReady(providerStatus);
+    final share = activeRoute == null ? shareStatus : null;
+    final shareFailed =
+        share != null && share.isTerminal && !share.isActiveRoute;
+    final showShareProgress =
+        share != null && !shareFailed && !share.isActiveRoute;
+    final showShareFailure = share != null && shareFailed;
+    if (activeRoute == null && share == null && setupChecklistChecking) {
+      return const Center(child: _CompactCheckingSetup());
+    }
+    if (activeRoute == null && share == null && showSetupChecklist) {
+      return FirstRunSetupChecklist(
+        snapshot: setupChecklistSnapshot,
+        onOpenGoogleSetup: onOpenChecklistGoogleSetup,
+        onOpenPermissions: onOpenChecklistPermissions,
+        onContinue: onFinishSetupChecklist,
+        onDismiss: onFinishSetupChecklist,
+      );
+    }
     return ListView(
       padding: const EdgeInsets.fromLTRB(16, 8, 16, 24),
       children: [
-        if (shareStatus != null) ...[
-          ShareRoutingPanel(status: shareStatus!),
-          const SizedBox(height: 16),
+        if (showShareProgress) ...[
+          _CompactNotice(
+            icon: Icons.ios_share_outlined,
+            title: share.title,
+            detail: share.subtitle,
+            busy: true,
+          ),
+          const SizedBox(height: 12),
         ],
-        Showcase(
-          key: navigateShowcaseKey,
-          title: 'Navigate',
-          description:
-              'Search a destination, choose an origin, and send an active route to the watch.',
-          targetPadding: const EdgeInsets.all(6),
-          tooltipPadding: const EdgeInsets.all(14),
-          toolTipMargin: 28,
-          child: RouteProbePanel(
+        if (showShareFailure) ...[
+          _CompactNotice(
+            icon: share.state == 'queuedUnconfirmed'
+                ? Icons.watch_later_outlined
+                : Icons.error_outline,
+            title: share.title,
+            detail: share.subtitle,
+            onDismiss: onDismissShareStatus,
+          ),
+          const SizedBox(height: 12),
+        ],
+        if (activeRoute != null)
+          _ActiveRouteSummaryCard(
+            activeRoute: activeRoute!,
+            routeResult: routeResult,
+            busy: isComputingRoute,
+            canReroute:
+                providerReady &&
+                (activeRoute!.originPolicy ==
+                        WatchRouteOriginPolicy.explicitPlace ||
+                    locationReady),
+            onReroute: onRerouteActiveRoute,
+            onEndNavigation: onClearActiveRoute,
+          )
+        else if (!providerReady)
+          _RequiredSetupCard(onOpenSetup: onOpenSetup)
+        else ...[
+          if (!locationReady) ...[
+            _CompactNotice(
+              icon: Icons.location_off_outlined,
+              title: 'Location setup required',
+              detail:
+                  'Turn on location and allow Mappy to use it in the background before starting navigation.',
+              actionLabel: 'Permissions',
+              onAction: onOpenPermissions,
+            ),
+            const SizedBox(height: 12),
+          ] else if (backgroundReadinessWarning) ...[
+            _CompactNotice(
+              icon: Icons.warning_amber_outlined,
+              title: 'Background reliability needs attention',
+              detail:
+                  'Notifications or unrestricted battery usage still need setup.',
+              actionLabel: 'Permissions',
+              onAction: onOpenPermissions,
+            ),
+            const SizedBox(height: 12),
+          ],
+          RouteProbePanel(
             location: location,
             providerRepository: providerRepository,
             providerStatus: providerStatus,
             routeResult: routeResult,
-            activeDestinationLabel: activeDestinationLabel,
             isComputingRoute: isComputingRoute,
             enableEmbeddedGoogleMap: enableEmbeddedGoogleMap,
             defaultTravelMode: defaultTravelMode,
+            canStartNavigation: locationReady,
+            savedLocations: savedLocations,
             onNavigateNow: onNavigateNow,
-            onRerouteActiveRoute: onRerouteActiveRoute,
-            onClearActiveRoute: onClearActiveRoute,
           ),
-        ),
+          const SizedBox(height: 16),
+        ],
       ],
     );
   }
 }
 
-class ShareRoutingPanel extends StatelessWidget {
-  const ShareRoutingPanel({required this.status, super.key});
+class _CompactCheckingSetup extends StatelessWidget {
+  const _CompactCheckingSetup();
 
-  final ShareRoutingStatus status;
+  @override
+  Widget build(BuildContext context) => Semantics(
+    label: 'Checking setup',
+    liveRegion: true,
+    child: const Padding(
+      padding: EdgeInsets.all(24),
+      child: Row(
+        children: [
+          SizedBox.square(
+            dimension: 20,
+            child: CircularProgressIndicator(strokeWidth: 2.5),
+          ),
+          SizedBox(width: 12),
+          Expanded(child: Text('Checking setup…')),
+        ],
+      ),
+    ),
+  );
+}
+
+class _RequiredSetupCard extends StatelessWidget {
+  const _RequiredSetupCard({required this.onOpenSetup});
+
+  final VoidCallback onOpenSetup;
+
+  @override
+  Widget build(BuildContext context) => Card(
+    margin: EdgeInsets.zero,
+    child: Padding(
+      padding: const EdgeInsets.all(20),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Icon(
+            Icons.key_off_outlined,
+            size: 32,
+            color: Theme.of(context).colorScheme.primary,
+          ),
+          const SizedBox(height: 12),
+          Text(
+            'Set up Google Maps to navigate',
+            style: Theme.of(context).textTheme.titleLarge,
+          ),
+          const SizedBox(height: 8),
+          const Text(
+            'Mappy needs your validated Google API key, Android package, and signing SHA-1 before place search or routing can be used.',
+          ),
+          const SizedBox(height: 16),
+          FilledButton.icon(
+            key: const ValueKey('open-google-setup'),
+            onPressed: onOpenSetup,
+            icon: const Icon(Icons.key_outlined),
+            label: const Text('Set up Google Maps'),
+          ),
+        ],
+      ),
+    ),
+  );
+}
+
+class _CompactNotice extends StatelessWidget {
+  const _CompactNotice({
+    required this.icon,
+    required this.title,
+    required this.detail,
+    this.actionLabel,
+    this.onAction,
+    this.onDismiss,
+    this.busy = false,
+  });
+
+  final IconData icon;
+  final String title;
+  final String detail;
+  final String? actionLabel;
+  final VoidCallback? onAction;
+  final VoidCallback? onDismiss;
+  final bool busy;
+
+  @override
+  Widget build(BuildContext context) => Card(
+    margin: EdgeInsets.zero,
+    child: ListTile(
+      leading: busy
+          ? const SizedBox.square(
+              dimension: 22,
+              child: CircularProgressIndicator(strokeWidth: 2.5),
+            )
+          : Icon(icon),
+      title: Text(title),
+      subtitle: Text(detail),
+      trailing: onDismiss != null
+          ? IconButton(
+              tooltip: 'Dismiss',
+              onPressed: onDismiss,
+              icon: const Icon(Icons.close),
+            )
+          : actionLabel == null
+          ? null
+          : TextButton(onPressed: onAction, child: Text(actionLabel!)),
+    ),
+  );
+}
+
+class _ActiveRouteSummaryCard extends StatefulWidget {
+  const _ActiveRouteSummaryCard({
+    required this.activeRoute,
+    required this.routeResult,
+    required this.busy,
+    required this.canReroute,
+    required this.onReroute,
+    required this.onEndNavigation,
+  });
+
+  final WatchActiveRoute activeRoute;
+  final RouteResult? routeResult;
+  final bool busy;
+  final bool canReroute;
+  final Future<String> Function() onReroute;
+  final Future<String> Function() onEndNavigation;
+
+  @override
+  State<_ActiveRouteSummaryCard> createState() =>
+      _ActiveRouteSummaryCardState();
+}
+
+class _ActiveRouteSummaryCardState extends State<_ActiveRouteSummaryCard> {
+  String? _message;
+
+  Future<void> _run(Future<String> Function() action) async {
+    final message = await action();
+    if (mounted) setState(() => _message = message);
+  }
 
   @override
   Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    final tone = switch (status.state) {
-      'activeRoute' => StatusTone.ok,
-      'unsupported' || 'noRoute' || 'error' => StatusTone.warning,
-      _ => StatusTone.neutral,
-    };
-    final icon = switch (status.state) {
-      'activeRoute' => Icons.ios_share,
-      'unsupported' || 'noRoute' || 'error' => Icons.report_problem_outlined,
-      'resolvingShortLink' => Icons.link,
-      _ => Icons.route_outlined,
-    };
-    final summary = status.routeSummary;
-    final destinationLabel = status.destinationLabel;
-    final originLabel = status.originLabel;
-
-    return DecoratedBox(
-      decoration: BoxDecoration(
-        color: theme.colorScheme.surface,
-        border: Border.all(color: theme.colorScheme.outlineVariant),
-        borderRadius: BorderRadius.circular(8),
-      ),
+    final route = widget.activeRoute;
+    final result = widget.routeResult;
+    return Card(
+      margin: EdgeInsets.zero,
       child: Padding(
-        padding: const EdgeInsets.all(14),
+        padding: const EdgeInsets.all(16),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Row(
-              crossAxisAlignment: CrossAxisAlignment.center,
               children: [
-                Icon(icon, color: theme.colorScheme.primary),
+                Icon(
+                  Icons.navigation,
+                  color: Theme.of(context).colorScheme.primary,
+                ),
                 const SizedBox(width: 10),
                 Expanded(
-                  child: Text(status.title, style: theme.textTheme.titleMedium),
-                ),
-                if (!status.isTerminal)
-                  const SizedBox.square(
-                    dimension: 20,
-                    child: CircularProgressIndicator(strokeWidth: 2.5),
+                  child: Text(
+                    'Active navigation',
+                    style: Theme.of(context).textTheme.titleMedium,
                   ),
+                ),
               ],
             ),
+            const SizedBox(height: 14),
+            Text(
+              route.destination.label,
+              style: Theme.of(context).textTheme.titleLarge,
+            ),
+            const SizedBox(height: 4),
+            Text(
+              route.destination.address,
+              style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                color: Theme.of(context).colorScheme.onSurfaceVariant,
+              ),
+            ),
+            if (result?.ok == true) ...[
+              const SizedBox(height: 10),
+              Text(result!.summaryLabel),
+            ],
             const SizedBox(height: 10),
-            Text(status.subtitle, style: theme.textTheme.bodyMedium),
-            const SizedBox(height: 10),
+            StatusPill(
+              icon: Icons.alt_route_outlined,
+              label: route.travelMode.label,
+              tone: StatusTone.ok,
+            ),
+            const SizedBox(height: 16),
             Wrap(
               spacing: 8,
               runSpacing: 8,
               children: [
-                if (status.shareType != null)
-                  StatusPill(
-                    icon: Icons.map_outlined,
-                    label: _shareStatusLabel(status.shareType!),
-                    tone: tone,
-                  ),
-                if (status.travelMode != null)
-                  StatusPill(
-                    icon: Icons.alt_route_outlined,
-                    label: _shareStatusLabel(status.travelMode!),
-                    tone: StatusTone.neutral,
-                  ),
-                if (status.safeHost != null)
-                  StatusPill(
-                    icon: Icons.verified_outlined,
-                    label: status.safeHost!,
-                    tone: StatusTone.neutral,
-                  ),
-                if ((status.redirectHopCount ?? 0) > 0)
-                  StatusPill(
-                    icon: Icons.link,
-                    label: '${status.redirectHopCount} redirect',
-                    tone: StatusTone.neutral,
-                  ),
-                if (status.explicitOrigin)
-                  const StatusPill(
-                    icon: Icons.trip_origin,
-                    label: 'Shared origin',
-                    tone: StatusTone.neutral,
-                  ),
-                if (status.destinationHasCoordinates)
-                  const StatusPill(
-                    icon: Icons.pin_drop_outlined,
-                    label: 'Coordinates',
-                    tone: StatusTone.neutral,
-                  ),
+                OutlinedButton.icon(
+                  key: const ValueKey('reroute-active'),
+                  onPressed: widget.busy || !widget.canReroute
+                      ? null
+                      : () => _run(widget.onReroute),
+                  icon: const Icon(Icons.refresh),
+                  label: const Text('Reroute'),
+                ),
+                FilledButton.tonalIcon(
+                  key: const ValueKey('end-navigation'),
+                  onPressed: widget.busy
+                      ? null
+                      : () => _run(widget.onEndNavigation),
+                  icon: const Icon(Icons.stop_circle_outlined),
+                  label: const Text('End navigation'),
+                ),
               ],
             ),
-            if (originLabel != null || destinationLabel != null) ...[
-              const SizedBox(height: 12),
-              if (originLabel != null)
-                Text('From: $originLabel', style: theme.textTheme.bodySmall),
-              if (destinationLabel != null)
-                Text('To: $destinationLabel', style: theme.textTheme.bodySmall),
-            ],
-            if (summary != null) ...[
+            if (!widget.canReroute) ...[
               const SizedBox(height: 8),
-              Text(summary, style: theme.textTheme.bodySmall),
+              const Text('Fix setup or location access before rerouting.'),
             ],
-            const SizedBox(height: 8),
-            Text(
-              'Mappy recomputes Google Maps shares, so route alternatives may differ.',
-              style: theme.textTheme.bodySmall?.copyWith(
-                color: theme.colorScheme.onSurfaceVariant,
-              ),
-            ),
-            if (status.routeWarning != null) ...[
+            if (_message != null) ...[
               const SizedBox(height: 8),
-              Text(status.routeWarning!, style: theme.textTheme.bodySmall),
+              Text(_message!),
             ],
           ],
         ),
       ),
     );
-  }
-}
-
-String _shareStatusLabel(String value) {
-  return switch (value) {
-    'drive' => 'Drive',
-    'walk' => 'Walk',
-    'bike' => 'Bike',
-    'route' => 'Route',
-    'location' => 'Location',
-    _ => value,
-  };
-}
-
-class StatusScreen extends StatelessWidget {
-  const StatusScreen({
-    required this.permissionState,
-    required this.providerStatus,
-    required this.bridgeStatus,
-    required this.location,
-    required this.isRefreshingLocation,
-    required this.isStartingWatchApp,
-    required this.isRequestingNotificationPermission,
-    required this.watchSessionDetail,
-    required this.onRequestLocation,
-    required this.onRefreshLocation,
-    required this.onValidateProvider,
-    required this.onStartWatchApp,
-    required this.onRequestNotificationPermission,
-    required this.onOpenSetup,
-    super.key,
-  });
-
-  final LocationPermissionState permissionState;
-  final ProviderStatus providerStatus;
-  final BridgeStatus bridgeStatus;
-  final LocationSnapshot? location;
-  final bool isRefreshingLocation;
-  final bool isStartingWatchApp;
-  final bool isRequestingNotificationPermission;
-  final String? watchSessionDetail;
-  final VoidCallback onRequestLocation;
-  final VoidCallback onRefreshLocation;
-  final VoidCallback onValidateProvider;
-  final VoidCallback onStartWatchApp;
-  final VoidCallback onRequestNotificationPermission;
-  final VoidCallback onOpenSetup;
-
-  @override
-  Widget build(BuildContext context) {
-    final locationLabel = location == null
-        ? permissionState.label
-        : '${location!.coordinateLabel} (${location!.freshnessLabel})';
-    return ListView(
-      padding: const EdgeInsets.fromLTRB(16, 8, 16, 24),
-      children: [
-        ReadinessPanel(
-          permissionState: permissionState,
-          providerStatus: providerStatus,
-          bridgeStatus: bridgeStatus,
-          location: location,
-          isRefreshingLocation: isRefreshingLocation,
-          isStartingWatchApp: isStartingWatchApp,
-          isRequestingNotificationPermission:
-              isRequestingNotificationPermission,
-          watchSessionDetail: watchSessionDetail,
-          onRequestLocation: onRequestLocation,
-          onRefreshLocation: onRefreshLocation,
-          onValidateProvider: onValidateProvider,
-          onStartWatchApp: onStartWatchApp,
-          onRequestNotificationPermission: onRequestNotificationPermission,
-          onOpenSetup: onOpenSetup,
-        ),
-        const SizedBox(height: 16),
-        _StatusPanel(
-          title: 'Readiness Details',
-          rows: [
-            StatusRow(
-              icon: Icons.watch_outlined,
-              label: 'Watch bridge',
-              value: bridgeStatus.watchDetailLabel,
-            ),
-            StatusRow(
-              icon: Icons.notifications_active_outlined,
-              label: 'Watch-session notification',
-              value: bridgeStatus.notificationPermissionState.label,
-            ),
-            StatusRow(
-              icon: Icons.run_circle_outlined,
-              label: 'Foreground service',
-              value: bridgeStatus.foregroundServiceLabel,
-            ),
-            StatusRow(
-              icon: Icons.gps_fixed,
-              label: 'Live GPS',
-              value: bridgeStatus.locationStreamLabel,
-            ),
-            StatusRow(
-              icon: Icons.my_location,
-              label: 'Location',
-              value: locationLabel,
-            ),
-            StatusRow(
-              icon: Icons.cloud_outlined,
-              label: 'Provider',
-              value: _providerStatusDetail(providerStatus),
-            ),
-          ],
-        ),
-      ],
-    );
-  }
-}
-
-class ReadinessPanel extends StatelessWidget {
-  const ReadinessPanel({
-    required this.permissionState,
-    required this.providerStatus,
-    required this.bridgeStatus,
-    required this.location,
-    required this.isRefreshingLocation,
-    required this.isStartingWatchApp,
-    required this.isRequestingNotificationPermission,
-    required this.watchSessionDetail,
-    required this.onRequestLocation,
-    required this.onRefreshLocation,
-    required this.onValidateProvider,
-    required this.onStartWatchApp,
-    required this.onRequestNotificationPermission,
-    required this.onOpenSetup,
-    this.showcaseKey,
-    this.watchActionShowcaseKey,
-    super.key,
-  });
-
-  final LocationPermissionState permissionState;
-  final ProviderStatus providerStatus;
-  final BridgeStatus bridgeStatus;
-  final LocationSnapshot? location;
-  final bool isRefreshingLocation;
-  final bool isStartingWatchApp;
-  final bool isRequestingNotificationPermission;
-  final String? watchSessionDetail;
-  final VoidCallback onRequestLocation;
-  final VoidCallback onRefreshLocation;
-  final VoidCallback onValidateProvider;
-  final VoidCallback onStartWatchApp;
-  final VoidCallback onRequestNotificationPermission;
-  final VoidCallback onOpenSetup;
-  final GlobalKey? showcaseKey;
-  final GlobalKey? watchActionShowcaseKey;
-
-  @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    final content = DecoratedBox(
-      decoration: BoxDecoration(
-        color: theme.colorScheme.surface,
-        border: Border.all(color: theme.colorScheme.outlineVariant),
-        borderRadius: BorderRadius.circular(8),
-      ),
-      child: Padding(
-        padding: const EdgeInsets.all(14),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text('Ready to Navigate', style: theme.textTheme.titleMedium),
-            const SizedBox(height: 12),
-            Wrap(spacing: 8, runSpacing: 8, children: _statusPills()),
-            const SizedBox(height: 12),
-            Wrap(spacing: 8, runSpacing: 8, children: _actionButtons(context)),
-            if (_fixMessage != null) ...[
-              const SizedBox(height: 12),
-              Text(
-                _fixMessage!,
-                style: theme.textTheme.bodySmall?.copyWith(
-                  color: theme.colorScheme.onSurfaceVariant,
-                ),
-              ),
-            ],
-            if (watchSessionDetail != null) ...[
-              const SizedBox(height: 8),
-              Text(watchSessionDetail!, style: theme.textTheme.bodySmall),
-            ],
-          ],
-        ),
-      ),
-    );
-
-    final key = showcaseKey;
-    if (key == null) {
-      return content;
-    }
-    return Showcase(
-      key: key,
-      title: 'Readiness',
-      description:
-          'This area shows what needs attention before the phone can guide the watch.',
-      targetPadding: const EdgeInsets.all(6),
-      tooltipPadding: const EdgeInsets.all(14),
-      toolTipMargin: 28,
-      child: content,
-    );
-  }
-
-  List<Widget> _statusPills() {
-    final hasLocation = location != null;
-    final watchAvailable =
-        bridgeStatus.watchReady || bridgeStatus.watchConnected;
-    final notificationReady =
-        bridgeStatus.notificationPermissionState.allowsWatchNotification;
-    return [
-      StatusPill(
-        icon: Icons.watch_outlined,
-        label: bridgeStatus.watchLabel,
-        tone: watchAvailable ? StatusTone.ok : StatusTone.neutral,
-      ),
-      StatusPill(
-        icon: bridgeStatus.foregroundServiceActive
-            ? Icons.run_circle_outlined
-            : Icons.motion_photos_pause_outlined,
-        label: bridgeStatus.foregroundServiceActive
-            ? 'Session active'
-            : 'Session waiting',
-        tone: bridgeStatus.foregroundServiceActive
-            ? StatusTone.ok
-            : StatusTone.neutral,
-      ),
-      StatusPill(
-        icon: notificationReady
-            ? Icons.notifications_active_outlined
-            : Icons.notifications_off_outlined,
-        label: notificationReady ? 'Notifications ready' : 'Notifications',
-        tone: notificationReady ? StatusTone.ok : StatusTone.warning,
-      ),
-      StatusPill(
-        icon: providerStatus.configured
-            ? Icons.key_outlined
-            : Icons.key_off_outlined,
-        label: providerStatus.configured ? 'Key stored' : 'Missing key',
-        tone: _providerReady(providerStatus)
-            ? StatusTone.ok
-            : StatusTone.warning,
-      ),
-      StatusPill(
-        icon: _providerReady(providerStatus)
-            ? Icons.cloud_done_outlined
-            : Icons.cloud_off_outlined,
-        label: providerStatus.providerLabel,
-        tone: _providerReady(providerStatus)
-            ? StatusTone.ok
-            : StatusTone.warning,
-      ),
-      StatusPill(
-        icon: hasLocation ? Icons.gps_fixed : Icons.gps_off,
-        label: hasLocation ? location!.freshnessLabel : permissionState.label,
-        tone: hasLocation ? StatusTone.ok : StatusTone.warning,
-      ),
-    ];
-  }
-
-  List<Widget> _actionButtons(BuildContext context) {
-    final locationAction = _locationAction();
-    final providerAction = _providerAction();
-    final notificationAction = _notificationAction();
-    final watchButton = OutlinedButton.icon(
-      key: const ValueKey('status-open-watch'),
-      onPressed: isStartingWatchApp ? null : onStartWatchApp,
-      icon: isStartingWatchApp
-          ? const SizedBox.square(
-              dimension: 18,
-              child: CircularProgressIndicator(strokeWidth: 2),
-            )
-          : const Icon(Icons.watch_outlined),
-      label: Text(isStartingWatchApp ? 'Opening Watch' : 'Open Watch'),
-    );
-    final watchKey = watchActionShowcaseKey;
-    return [
-      FilledButton.icon(
-        onPressed: isRefreshingLocation ? null : locationAction.onPressed,
-        icon: Icon(locationAction.icon),
-        label: Text(
-          isRefreshingLocation ? 'Checking Location' : locationAction.label,
-        ),
-      ),
-      OutlinedButton.icon(
-        onPressed: providerAction.onPressed,
-        icon: Icon(providerAction.icon),
-        label: Text(providerAction.label),
-      ),
-      if (notificationAction != null)
-        OutlinedButton.icon(
-          onPressed: isRequestingNotificationPermission
-              ? null
-              : notificationAction.onPressed,
-          icon: Icon(notificationAction.icon),
-          label: Text(
-            isRequestingNotificationPermission
-                ? 'Requesting'
-                : notificationAction.label,
-          ),
-        ),
-      if (watchKey == null)
-        watchButton
-      else
-        Showcase(
-          key: watchKey,
-          title: 'Open Watch',
-          description:
-              'Use this if the Pebble app is not active or the session needs to be restarted.',
-          targetPadding: const EdgeInsets.all(6),
-          tooltipPadding: const EdgeInsets.all(14),
-          toolTipMargin: 28,
-          child: watchButton,
-        ),
-    ];
-  }
-
-  _LocationAction _locationAction() {
-    return switch (permissionState) {
-      LocationPermissionState.serviceDisabled => _LocationAction(
-        icon: Icons.location_disabled_outlined,
-        label: 'Refresh Location',
-        onPressed: onRefreshLocation,
-      ),
-      _
-          when permissionState.allowsLocation &&
-              !permissionState.allowsBackgroundLocation =>
-        _LocationAction(
-          icon: Icons.location_searching_outlined,
-          label: 'Allow Always',
-          onPressed: onRequestLocation,
-        ),
-      _ when permissionState.allowsLocation => _LocationAction(
-        icon: Icons.my_location,
-        label: 'Recenter',
-        onPressed: onRefreshLocation,
-      ),
-      _ => _LocationAction(
-        icon: Icons.location_on_outlined,
-        label: 'Grant Location',
-        onPressed: onRequestLocation,
-      ),
-    };
-  }
-
-  _LocationAction _providerAction() {
-    if (!providerStatus.configured) {
-      return _LocationAction(
-        icon: Icons.key_outlined,
-        label: 'API Key',
-        onPressed: onOpenSetup,
-      );
-    }
-    if (!_providerReady(providerStatus)) {
-      return _LocationAction(
-        icon: Icons.build_outlined,
-        label: 'Fix Key',
-        onPressed: onOpenSetup,
-      );
-    }
-    return _LocationAction(
-      icon: Icons.cloud_sync_outlined,
-      label: 'Validate',
-      onPressed: onValidateProvider,
-    );
-  }
-
-  _LocationAction? _notificationAction() {
-    final state = bridgeStatus.notificationPermissionState;
-    if (!state.canRequest) {
-      return null;
-    }
-    return _LocationAction(
-      icon: Icons.notifications_outlined,
-      label: 'Allow Notifications',
-      onPressed: onRequestNotificationPermission,
-    );
-  }
-
-  String? get _fixMessage {
-    if (!_providerReady(providerStatus)) {
-      return _providerFixMessage(providerStatus);
-    }
-    if (!permissionState.allowsLocation) {
-      return _locationFixMessage(permissionState);
-    }
-    if (!permissionState.allowsBackgroundLocation) {
-      return 'Allow all-the-time location in Android settings so the watch can keep receiving GPS when the phone app is backgrounded.';
-    }
-    final notificationState = bridgeStatus.notificationPermissionState;
-    if (!notificationState.allowsWatchNotification) {
-      return _notificationFixMessage(notificationState);
-    }
-    if (!bridgeStatus.registered) {
-      return 'Install and connect Pebble/Rebble, then open Mappy on the watch.';
-    }
-    if (!bridgeStatus.watchReady && !bridgeStatus.watchConnected) {
-      return 'Open Mappy on the watch to start the bridge session.';
-    }
-    return null;
   }
 }
 
@@ -2303,13 +2073,12 @@ class RouteProbePanel extends StatefulWidget {
     required this.providerRepository,
     required this.providerStatus,
     required this.routeResult,
-    required this.activeDestinationLabel,
     required this.isComputingRoute,
     required this.enableEmbeddedGoogleMap,
     required this.defaultTravelMode,
+    required this.canStartNavigation,
+    required this.savedLocations,
     required this.onNavigateNow,
-    required this.onRerouteActiveRoute,
-    required this.onClearActiveRoute,
     super.key,
   });
 
@@ -2317,10 +2086,11 @@ class RouteProbePanel extends StatefulWidget {
   final ProviderRepository providerRepository;
   final ProviderStatus providerStatus;
   final RouteResult? routeResult;
-  final String? activeDestinationLabel;
   final bool isComputingRoute;
   final bool enableEmbeddedGoogleMap;
   final TravelMode defaultTravelMode;
+  final bool canStartNavigation;
+  final List<WatchDestinationConfig> savedLocations;
   final Future<String> Function({
     required WatchRouteOriginPolicy originPolicy,
     WatchRouteEndpoint? origin,
@@ -2328,8 +2098,6 @@ class RouteProbePanel extends StatefulWidget {
     required TravelMode travelMode,
   })
   onNavigateNow;
-  final Future<String> Function() onRerouteActiveRoute;
-  final Future<String> Function() onClearActiveRoute;
 
   @override
   State<RouteProbePanel> createState() => _RouteProbePanelState();
@@ -2648,6 +2416,12 @@ class _RouteProbePanelState extends State<RouteProbePanel> {
   }
 
   Future<void> _navigateNow() async {
+    if (!widget.canStartNavigation) {
+      setState(() {
+        _localMessage = 'Finish location setup before starting navigation.';
+      });
+      return;
+    }
     setState(() {
       _resolving = true;
       _localMessage = null;
@@ -2687,36 +2461,6 @@ class _RouteProbePanelState extends State<RouteProbePanel> {
       _resolving = false;
       _localMessage = message == sentMessage ? null : message;
       _sentDestinationLabel = message == sentMessage ? destination.label : null;
-    });
-  }
-
-  Future<void> _rerouteActiveRoute() async {
-    setState(() {
-      _localMessage = null;
-      _sentDestinationLabel = null;
-    });
-    final message = await widget.onRerouteActiveRoute();
-    if (!mounted) {
-      return;
-    }
-    setState(() {
-      _localMessage = message;
-      _sentDestinationLabel = null;
-    });
-  }
-
-  Future<void> _clearActiveRoute() async {
-    setState(() {
-      _localMessage = null;
-      _sentDestinationLabel = null;
-    });
-    final message = await widget.onClearActiveRoute();
-    if (!mounted) {
-      return;
-    }
-    setState(() {
-      _localMessage = message;
-      _sentDestinationLabel = null;
     });
   }
 
@@ -2850,13 +2594,135 @@ class _RouteProbePanelState extends State<RouteProbePanel> {
     return _fallbackMapTarget;
   }
 
+  Future<void> _chooseOriginPolicy() async {
+    final selected = await showModalBottomSheet<WatchRouteOriginPolicy>(
+      context: context,
+      showDragHandle: true,
+      builder: (context) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            ListTile(
+              leading: const Icon(Icons.my_location),
+              title: const Text('Current location'),
+              trailing: _originPolicy == WatchRouteOriginPolicy.currentLocation
+                  ? const Icon(Icons.check)
+                  : null,
+              onTap: () => Navigator.pop(
+                context,
+                WatchRouteOriginPolicy.currentLocation,
+              ),
+            ),
+            ListTile(
+              leading: const Icon(Icons.place_outlined),
+              title: const Text('Choose a place'),
+              trailing: _originPolicy == WatchRouteOriginPolicy.explicitPlace
+                  ? const Icon(Icons.check)
+                  : null,
+              onTap: () =>
+                  Navigator.pop(context, WatchRouteOriginPolicy.explicitPlace),
+            ),
+          ],
+        ),
+      ),
+    );
+    if (selected != null && mounted) {
+      setState(() {
+        _originPolicy = selected;
+        _localMessage = null;
+      });
+    }
+  }
+
+  Future<void> _chooseTravelMode() async {
+    final selected = await showModalBottomSheet<TravelMode>(
+      context: context,
+      showDragHandle: true,
+      builder: (context) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            for (final mode in TravelMode.values)
+              ListTile(
+                leading: Icon(switch (mode) {
+                  TravelMode.drive => Icons.directions_car_outlined,
+                  TravelMode.walk => Icons.directions_walk,
+                  TravelMode.bike => Icons.directions_bike,
+                }),
+                title: Text(mode.label),
+                trailing: mode == _travelMode ? const Icon(Icons.check) : null,
+                onTap: () => Navigator.pop(context, mode),
+              ),
+          ],
+        ),
+      ),
+    );
+    if (selected != null && mounted) setState(() => _travelMode = selected);
+  }
+
+  Future<void> _chooseSavedDestination() async {
+    final destinations = widget.savedLocations
+        .where((destination) => destination.enabled)
+        .toList(growable: false);
+    if (destinations.isEmpty) {
+      setState(() => _localMessage = 'No saved locations yet.');
+      return;
+    }
+    final selected = await showModalBottomSheet<WatchDestinationConfig>(
+      context: context,
+      showDragHandle: true,
+      builder: (context) => SafeArea(
+        child: ListView(
+          shrinkWrap: true,
+          children: [
+            for (final destination in destinations)
+              ListTile(
+                leading: Icon(savedLocationSlotIcon(destination.slotIndex)),
+                title: Text(destination.label),
+                subtitle: Text(destination.address),
+                onTap: () => Navigator.pop(context, destination),
+              ),
+          ],
+        ),
+      ),
+    );
+    if (selected == null || !mounted) return;
+    final endpoint = WatchRouteEndpoint(
+      label: selected.label,
+      address: selected.address,
+      latitude: selected.latitude,
+      longitude: selected.longitude,
+      placeId: selected.placeId,
+    );
+    _updatingText = true;
+    _destination.controller.text = selected.address;
+    _destination.controller.selection = TextSelection.collapsed(
+      offset: _destination.controller.text.length,
+    );
+    _updatingText = false;
+    setState(() {
+      _destination.resolvedEndpoint = endpoint;
+      _destination.selectedSuggestion = null;
+      _destination.suggestions = const [];
+      _destination.detail = null;
+      _localMessage = null;
+      _travelMode = _travelModeForSaved(selected.defaultTravelMode);
+    });
+    unawaited(_moveDestinationMapTo(endpoint));
+  }
+
+  TravelMode _travelModeForSaved(WatchTravelMode mode) => switch (mode) {
+    WatchTravelMode.drive => TravelMode.drive,
+    WatchTravelMode.walk => TravelMode.walk,
+    WatchTravelMode.bike => TravelMode.bike,
+  };
+
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final busy = _resolving || widget.isComputingRoute;
     final providerReady = _providerReady(widget.providerStatus);
-    final canNavigate = providerReady && !busy;
-    final hasActiveRoute = widget.routeResult?.ok == true;
+    final canNavigate = providerReady && widget.canStartNavigation && !busy;
     final warning = _travelMode == TravelMode.drive
         ? widget.routeResult?.routeWarning
         : 'Walk and bike routes may miss safe pedestrian or bicycling path detail.';
@@ -2864,6 +2730,24 @@ class _RouteProbePanelState extends State<RouteProbePanel> {
     if (_destinationMapController == null) {
       _destinationMapCenter = mapTarget;
     }
+    final originButton = OutlinedButton.icon(
+      onPressed: busy ? null : _chooseOriginPolicy,
+      icon: Icon(
+        _originPolicy == WatchRouteOriginPolicy.currentLocation
+            ? Icons.my_location
+            : Icons.place_outlined,
+      ),
+      label: Text(
+        _originPolicy == WatchRouteOriginPolicy.currentLocation
+            ? 'From current'
+            : 'From place',
+      ),
+    );
+    final travelModeButton = OutlinedButton.icon(
+      onPressed: busy ? null : _chooseTravelMode,
+      icon: const Icon(Icons.alt_route_outlined),
+      label: Text(_travelMode.label),
+    );
 
     return DecoratedBox(
       decoration: BoxDecoration(
@@ -2879,10 +2763,7 @@ class _RouteProbePanelState extends State<RouteProbePanel> {
             Row(
               children: [
                 Expanded(
-                  child: Text(
-                    'Navigate Now',
-                    style: theme.textTheme.titleMedium,
-                  ),
+                  child: Text('New route', style: theme.textTheme.titleMedium),
                 ),
                 if (busy)
                   const SizedBox.square(
@@ -2892,92 +2773,63 @@ class _RouteProbePanelState extends State<RouteProbePanel> {
               ],
             ),
             const SizedBox(height: 12),
-            SegmentedButton<WatchRouteOriginPolicy>(
-              segments: const [
-                ButtonSegment(
-                  value: WatchRouteOriginPolicy.currentLocation,
-                  icon: Icon(Icons.my_location),
-                  label: Text('Current'),
-                ),
-                ButtonSegment(
-                  value: WatchRouteOriginPolicy.explicitPlace,
-                  icon: Icon(Icons.place_outlined),
-                  label: Text('Place'),
-                ),
-              ],
-              selected: {_originPolicy},
-              onSelectionChanged: busy
-                  ? null
-                  : (selection) {
-                      setState(() {
-                        _originPolicy = selection.first;
-                        _localMessage = null;
-                      });
-                    },
+            _placeField(
+              context,
+              _destination,
+              labelText: 'Destination',
+              showSavedButton: true,
+            ),
+            const SizedBox(height: 10),
+            LayoutBuilder(
+              builder: (context, constraints) {
+                final useColumn =
+                    constraints.maxWidth < 360 ||
+                    MediaQuery.textScalerOf(context).scale(14) > 18;
+                if (useColumn) {
+                  return Column(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      originButton,
+                      const SizedBox(height: 8),
+                      travelModeButton,
+                    ],
+                  );
+                }
+                return Row(
+                  children: [
+                    Expanded(child: originButton),
+                    const SizedBox(width: 8),
+                    Expanded(child: travelModeButton),
+                  ],
+                );
+              },
             ),
             if (_originPolicy == WatchRouteOriginPolicy.explicitPlace) ...[
-              const SizedBox(height: 12),
-              _placeField(context, _origin, labelText: 'From'),
+              const SizedBox(height: 10),
+              _placeField(context, _origin, labelText: 'Origin'),
             ],
-            const SizedBox(height: 12),
-            _placeField(context, _destination, labelText: 'Navigate to'),
-            const SizedBox(height: 10),
-            _DestinationMapPanel(
-              key: const ValueKey('status-navigate-destination-map'),
-              enableGoogleMap: widget.enableEmbeddedGoogleMap,
-              initialTarget: mapTarget,
-              destination: _destination.resolvedEndpoint,
-              location: widget.location,
-              routeResult: widget.routeResult,
-              onMapCreated: _onDestinationMapCreated,
-              onCameraMove: _onDestinationMapCameraMove,
-              onTap: _selectDestinationFromMap,
-              onUseCenter: _selectDestinationMapCenter,
-            ),
-            const SizedBox(height: 12),
-            SegmentedButton<TravelMode>(
-              segments: const [
-                ButtonSegment<TravelMode>(
-                  value: TravelMode.drive,
-                  icon: Icon(Icons.directions_car_outlined),
-                  label: Text('Drive'),
-                ),
-                ButtonSegment<TravelMode>(
-                  value: TravelMode.walk,
-                  icon: Icon(Icons.directions_walk),
-                  label: Text('Walk'),
-                ),
-                ButtonSegment<TravelMode>(
-                  value: TravelMode.bike,
-                  icon: Icon(Icons.directions_bike),
-                  label: Text('Bike'),
-                ),
-              ],
-              selected: {_travelMode},
-              onSelectionChanged: busy
-                  ? null
-                  : (selection) {
-                      setState(() {
-                        _travelMode = selection.first;
-                      });
-                    },
-            ),
+            if (_destination.resolvedEndpoint != null) ...[
+              const SizedBox(height: 10),
+              _DestinationMapPanel(
+                key: const ValueKey('status-navigate-destination-map'),
+                enableGoogleMap: widget.enableEmbeddedGoogleMap,
+                initialTarget: mapTarget,
+                destination: _destination.resolvedEndpoint,
+                location: widget.location,
+                routeResult: widget.routeResult,
+                onMapCreated: _onDestinationMapCreated,
+                onCameraMove: _onDestinationMapCameraMove,
+                onTap: _selectDestinationFromMap,
+                onUseCenter: _selectDestinationMapCenter,
+              ),
+            ],
             if (warning != null) ...[
               const SizedBox(height: 10),
               Text(warning, style: theme.textTheme.bodySmall),
             ],
             const SizedBox(height: 12),
-            if (!providerReady) ...[
-              Text(
-                _providerFixMessage(widget.providerStatus),
-                style: theme.textTheme.bodySmall?.copyWith(
-                  color: theme.colorScheme.onSurfaceVariant,
-                ),
-              ),
-              const SizedBox(height: 12),
-            ],
-            Align(
-              alignment: Alignment.centerLeft,
+            SizedBox(
+              width: double.infinity,
               child: FilledButton.icon(
                 key: const ValueKey('status-navigate-now'),
                 onPressed: canNavigate ? _navigateNow : null,
@@ -2988,37 +2840,9 @@ class _RouteProbePanelState extends State<RouteProbePanel> {
                         child: CircularProgressIndicator(strokeWidth: 2),
                       )
                     : const Icon(Icons.navigation_outlined),
-                label: Text(busy ? 'Navigating' : 'Navigate Now'),
+                label: Text(busy ? 'Starting navigation' : 'Start navigation'),
               ),
             ),
-            if (widget.routeResult != null) ...[
-              const SizedBox(height: 12),
-              _ActiveRoutePanel(
-                routeResult: widget.routeResult!,
-                destinationLabel: widget.activeDestinationLabel,
-              ),
-            ],
-            if (hasActiveRoute) ...[
-              const SizedBox(height: 10),
-              Wrap(
-                spacing: 8,
-                runSpacing: 8,
-                children: [
-                  OutlinedButton.icon(
-                    key: const ValueKey('status-reroute-active'),
-                    onPressed: busy ? null : _rerouteActiveRoute,
-                    icon: const Icon(Icons.refresh),
-                    label: const Text('Reroute'),
-                  ),
-                  OutlinedButton.icon(
-                    key: const ValueKey('status-clear-route'),
-                    onPressed: busy ? null : _clearActiveRoute,
-                    icon: const Icon(Icons.clear),
-                    label: const Text('Clear Route'),
-                  ),
-                ],
-              ),
-            ],
             if (_localMessage != null) ...[
               const SizedBox(height: 10),
               Text(_localMessage!, style: theme.textTheme.bodySmall),
@@ -3058,6 +2882,7 @@ class _RouteProbePanelState extends State<RouteProbePanel> {
     BuildContext context,
     _NavigatePlaceDraft draft, {
     required String labelText,
+    bool showSavedButton = false,
   }) {
     final theme = Theme.of(context);
     final busy = _resolving || widget.isComputingRoute;
@@ -3081,13 +2906,21 @@ class _RouteProbePanelState extends State<RouteProbePanel> {
                       child: CircularProgressIndicator(strokeWidth: 2),
                     ),
                   )
+                : showSavedButton
+                ? IconButton(
+                    tooltip: 'Choose saved location',
+                    onPressed: busy ? null : _chooseSavedDestination,
+                    icon: const Icon(Icons.bookmarks_outlined),
+                  )
                 : null,
           ),
           textInputAction: draft.role == PlaceSearchRole.destination
               ? TextInputAction.go
               : TextInputAction.next,
           onSubmitted: draft.role == PlaceSearchRole.destination
-              ? (_) => _navigateNow()
+              ? (_) {
+                  if (widget.canStartNavigation && !busy) _navigateNow();
+                }
               : null,
         ),
         if (draft.suggestions.isNotEmpty) ...[
@@ -3501,88 +3334,6 @@ class _StaticMapPainter extends CustomPainter {
   }
 }
 
-class _ActiveRoutePanel extends StatelessWidget {
-  const _ActiveRoutePanel({
-    required this.routeResult,
-    required this.destinationLabel,
-  });
-
-  final RouteResult routeResult;
-  final String? destinationLabel;
-
-  @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    final firstStep = routeResult.steps.isEmpty
-        ? null
-        : routeResult.steps.first;
-    final title = routeResult.ok ? 'Active Route' : 'Route Problem';
-    final destination = _firstNonBlankValue([
-      destinationLabel,
-      routeResult.formattedAddress,
-      'Destination',
-    ]);
-    final detail = routeResult.ok
-        ? routeResult.summaryLabel
-        : _routeFixMessage(routeResult);
-
-    return DecoratedBox(
-      decoration: BoxDecoration(
-        color: routeResult.ok
-            ? theme.colorScheme.primaryContainer.withValues(alpha: 0.32)
-            : theme.colorScheme.errorContainer.withValues(alpha: 0.32),
-        border: Border.all(
-          color: routeResult.ok
-              ? theme.colorScheme.primary.withValues(alpha: 0.28)
-              : theme.colorScheme.error.withValues(alpha: 0.28),
-        ),
-        borderRadius: BorderRadius.circular(8),
-      ),
-      child: Padding(
-        padding: const EdgeInsets.all(12),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Row(
-              children: [
-                Icon(
-                  routeResult.ok
-                      ? Icons.alt_route_outlined
-                      : Icons.error_outline,
-                  size: 20,
-                  color: routeResult.ok
-                      ? theme.colorScheme.primary
-                      : theme.colorScheme.error,
-                ),
-                const SizedBox(width: 10),
-                Text(title, style: theme.textTheme.titleSmall),
-              ],
-            ),
-            const SizedBox(height: 8),
-            Text(destination, style: theme.textTheme.bodyMedium),
-            const SizedBox(height: 2),
-            Text(
-              detail,
-              style: theme.textTheme.bodySmall?.copyWith(
-                color: theme.colorScheme.onSurfaceVariant,
-              ),
-            ),
-            if (firstStep != null && firstStep.instruction.isNotEmpty) ...[
-              const SizedBox(height: 8),
-              Text(
-                firstStep.instruction,
-                style: theme.textTheme.bodySmall?.copyWith(
-                  fontWeight: FontWeight.w600,
-                ),
-              ),
-            ],
-          ],
-        ),
-      ),
-    );
-  }
-}
-
 class _NavigatePlaceDraft {
   _NavigatePlaceDraft({
     required this.keyPrefix,
@@ -3628,99 +3379,6 @@ bool _providerReady(ProviderStatus status) =>
     status.configured &&
     status.validationState == ProviderValidationState.valid;
 
-String _providerStatusDetail(ProviderStatus status) {
-  final detail = status.validationDetail;
-  if (detail == null || detail.trim().isEmpty) {
-    return status.providerLabel;
-  }
-  return '${status.providerLabel}: ${detail.trim()}';
-}
-
-String _providerFixMessage(ProviderStatus status) {
-  switch (status.validationState) {
-    case ProviderValidationState.valid:
-      return 'Provider setup is ready.';
-    case ProviderValidationState.notConfigured:
-      return 'Add a Google API key in Setup before navigation can use Google services.';
-    case ProviderValidationState.notValidated:
-    case ProviderValidationState.validating:
-      return 'Validate the Google API key in Setup before starting navigation.';
-    case ProviderValidationState.invalidKey:
-      return 'Check that the value is a Google API key starting with AIza, not a URL, bearer token, or configuration document.';
-    case ProviderValidationState.apiDisabled:
-      return 'Enable Map Tiles, Places, Geocoding, and Routes APIs for this key in Google Cloud.';
-    case ProviderValidationState.quotaOrBillingIssue:
-      return 'Check Google Cloud billing, quota, and project limits for this key.';
-    case ProviderValidationState.providerPermissionDenied:
-      return 'Check the Android package and signing SHA-1 restrictions shown in Setup.';
-    case ProviderValidationState.networkUnavailable:
-      return 'Check the phone network connection, then validate the provider again.';
-    case ProviderValidationState.unsupportedRestrictedKeyBehavior:
-      return 'Restricted-key validation did not behave predictably. Keep Android restrictions enabled and fix the package/SHA-1 setup before release.';
-    case ProviderValidationState.unknown:
-      return status.validationDetail ??
-          'Provider setup failed. Validate the key again from Setup.';
-  }
-}
-
-String _locationFixMessage(LocationPermissionState state) {
-  switch (state) {
-    case LocationPermissionState.requestAvailable:
-    case LocationPermissionState.denied:
-      return 'Grant foreground location so the watch can receive live GPS.';
-    case LocationPermissionState.permanentlyDenied:
-      return 'Enable foreground location for Mappy in Android settings.';
-    case LocationPermissionState.serviceDisabled:
-      return 'Turn on Android location services, then refresh location.';
-    case LocationPermissionState.unavailable:
-      return 'This device is not reporting location availability.';
-    case LocationPermissionState.unknown:
-      return 'Refresh location to check whether live GPS is available.';
-    case LocationPermissionState.grantedPrecise:
-    case LocationPermissionState.grantedApproximate:
-      return 'Allow all-the-time location in Android settings so Mappy can keep the active watch session updated.';
-    case LocationPermissionState.grantedAlwaysPrecise:
-    case LocationPermissionState.grantedAlwaysApproximate:
-      return 'Location is ready.';
-  }
-}
-
-String _notificationFixMessage(NotificationPermissionState state) {
-  switch (state) {
-    case NotificationPermissionState.requestAvailable:
-    case NotificationPermissionState.denied:
-      return 'Allow notifications so Android can show the watch-session foreground service.';
-    case NotificationPermissionState.permanentlyDenied:
-      return 'Enable notifications for Mappy in Android settings so the watch session remains visible.';
-    case NotificationPermissionState.unavailable:
-      return 'Android notification permission status is unavailable.';
-    case NotificationPermissionState.unknown:
-      return 'Refresh status to check watch-session notification readiness.';
-    case NotificationPermissionState.granted:
-    case NotificationPermissionState.notRequired:
-      return 'Notifications are ready.';
-  }
-}
-
-String _routeFixMessage(RouteResult routeResult) {
-  final detail = routeResult.detail;
-  if (detail != null && detail.trim().isNotEmpty) {
-    return detail.trim();
-  }
-  switch (routeResult.errorCategory) {
-    case 1:
-      return 'Add and validate a Google API key before routing.';
-    case 3:
-      return 'Refresh location or choose a specific origin before routing.';
-    case 6:
-      return 'Fix the Google provider setup, then try navigation again.';
-    case 7:
-      return 'No route was found for that origin, destination, and travel mode.';
-    default:
-      return 'Navigation did not return a route.';
-  }
-}
-
 String savedLocationSlotTitle(int slotIndex) {
   return switch (slotIndex) {
     0 => 'Home',
@@ -3751,27 +3409,6 @@ String _watchDestinationLabel(String value, int slotIndex) {
   return utf8.decode(truncateUtf8Bytes(raw, maxDestinationLabelBytes));
 }
 
-String _savedLocationTimestampLabel(int? timestampMillis) {
-  if (timestampMillis == null || timestampMillis <= 0) {
-    return 'Not recorded';
-  }
-  final time = DateTime.fromMillisecondsSinceEpoch(timestampMillis).toLocal();
-  String twoDigits(int value) => value.toString().padLeft(2, '0');
-  return '${time.year}-${twoDigits(time.month)}-${twoDigits(time.day)} '
-      '${twoDigits(time.hour)}:${twoDigits(time.minute)}';
-}
-
-String _savedLocationGeocodeStatusLabel(String status) {
-  return switch (status.trim().toLowerCase()) {
-    'resolved' => 'Resolved',
-    'geocoded' => 'Geocoded',
-    'place_resolved' => 'Place resolved',
-    'failed' => 'Failed',
-    'pending' => 'Pending',
-    _ => status.trim().isEmpty ? 'Resolved' : status.trim(),
-  };
-}
-
 class _WatchDestinationLabelFormatter extends TextInputFormatter {
   const _WatchDestinationLabelFormatter();
 
@@ -3793,6 +3430,22 @@ class _WatchDestinationLabelFormatter extends TextInputFormatter {
   }
 }
 
+class _SavedLocationUpdateResult {
+  const _SavedLocationUpdateResult({
+    required this.success,
+    required this.message,
+  });
+
+  const _SavedLocationUpdateResult.success(String message)
+    : this(success: true, message: message);
+
+  const _SavedLocationUpdateResult.failure(String message)
+    : this(success: false, message: message);
+
+  final bool success;
+  final String message;
+}
+
 class SavedLocationsScreen extends StatefulWidget {
   const SavedLocationsScreen({
     required this.providerRepository,
@@ -3804,7 +3457,10 @@ class SavedLocationsScreen extends StatefulWidget {
     required this.isSaving,
     required this.onSave,
     required this.onClear,
+    required this.onOpenSetup,
     this.detail,
+    this.initialSlot,
+    this.editorOnly = false,
     super.key,
   });
 
@@ -3816,8 +3472,13 @@ class SavedLocationsScreen extends StatefulWidget {
   final bool isLoading;
   final bool isSaving;
   final String? detail;
+  final int? initialSlot;
+  final bool editorOnly;
   final Future<String> Function(WatchDestinationConfig config) onSave;
-  final Future<String> Function(int slotIndex) onClear;
+
+  /// Returns an error message when the native update fails, otherwise null.
+  final Future<String?> Function(int slotIndex) onClear;
+  final Future<ProviderStatus> Function() onOpenSetup;
 
   @override
   State<SavedLocationsScreen> createState() => _SavedLocationsScreenState();
@@ -3828,6 +3489,7 @@ class _SavedLocationsScreenState extends State<SavedLocationsScreen> {
   final TextEditingController _nameController = TextEditingController();
   late final _NavigatePlaceDraft _destination;
   late int _selectedSlot;
+  late ProviderStatus _providerStatus;
   WatchTravelMode _travelMode = WatchTravelMode.drive;
   String? _localMessage;
   String? _loadedSignature;
@@ -3844,6 +3506,7 @@ class _SavedLocationsScreenState extends State<SavedLocationsScreen> {
       random: _random,
     );
     _destination.controller.addListener(_onDestinationTextChanged);
+    _providerStatus = widget.providerStatus;
     _selectedSlot = _initialSelectedSlot();
     _loadSelectedSlot();
   }
@@ -3851,6 +3514,7 @@ class _SavedLocationsScreenState extends State<SavedLocationsScreen> {
   @override
   void didUpdateWidget(covariant SavedLocationsScreen oldWidget) {
     super.didUpdateWidget(oldWidget);
+    _providerStatus = widget.providerStatus;
     final existing = _destinationForSlot(_selectedSlot);
     final signature = _slotSignature(existing);
     final defaultChangedForEmptySlot =
@@ -3872,6 +3536,12 @@ class _SavedLocationsScreenState extends State<SavedLocationsScreen> {
     super.dispose();
   }
 
+  Future<void> _openSetup() async {
+    final status = await widget.onOpenSetup();
+    if (!mounted) return;
+    setState(() => _providerStatus = status);
+  }
+
   List<WatchDestinationConfig> _enabledDestinations() {
     return widget.destinations
         .where(
@@ -3883,6 +3553,10 @@ class _SavedLocationsScreenState extends State<SavedLocationsScreen> {
   }
 
   int _initialSelectedSlot() {
+    final requested = widget.initialSlot;
+    if (requested != null && isSavedLocationId(requested)) {
+      return requested;
+    }
     final existing = _enabledDestinations();
     if (existing.isNotEmpty) {
       return existing.first.slotIndex;
@@ -3950,29 +3624,78 @@ class _SavedLocationsScreenState extends State<SavedLocationsScreen> {
       ..selectedSuggestion = null
       ..sessionToken = _newSessionToken(_random)
       ..attribution = null
-      ..detail = existing == null
-          ? null
-          : '${existing.latitude.toStringAsFixed(5)}, '
-                '${existing.longitude.toStringAsFixed(5)}';
+      ..detail = null;
     _localMessage = null;
   }
 
-  void _selectSlot(int slotIndex) {
-    setState(() {
-      _selectedSlot = slotIndex;
-      _loadSelectedSlot();
-    });
-  }
-
-  void _selectNewLocation() {
-    final nextSlot = _nextAvailableSlot();
-    if (nextSlot == null) {
-      setState(() {
-        _localMessage = 'Saved location limit reached.';
-      });
-      return;
-    }
-    _selectSlot(nextSlot);
+  Future<void> _openEditor(int slotIndex) async {
+    final existing = _destinationForSlot(slotIndex);
+    await Navigator.of(context).push<void>(
+      MaterialPageRoute(
+        builder: (routeContext) => Scaffold(
+          appBar: AppBar(
+            title: Text(existing?.label ?? 'Add saved location'),
+            actions: [
+              if (existing != null)
+                PopupMenuButton<String>(
+                  tooltip: 'More actions',
+                  onSelected: (value) async {
+                    if (value != 'delete') return;
+                    final confirmed = await showDialog<bool>(
+                      context: routeContext,
+                      builder: (dialogContext) => AlertDialog(
+                        title: const Text('Delete saved location?'),
+                        content: Text(
+                          '${existing.label} will be removed from the phone and watch.',
+                        ),
+                        actions: [
+                          TextButton(
+                            onPressed: () =>
+                                Navigator.pop(dialogContext, false),
+                            child: const Text('Cancel'),
+                          ),
+                          FilledButton(
+                            onPressed: () => Navigator.pop(dialogContext, true),
+                            child: const Text('Delete'),
+                          ),
+                        ],
+                      ),
+                    );
+                    if (confirmed != true || !routeContext.mounted) return;
+                    final error = await widget.onClear(slotIndex);
+                    if (!routeContext.mounted) return;
+                    if (error == null) {
+                      Navigator.pop(routeContext);
+                    } else {
+                      ScaffoldMessenger.of(
+                        routeContext,
+                      ).showSnackBar(SnackBar(content: Text(error)));
+                    }
+                  },
+                  itemBuilder: (_) => const [
+                    PopupMenuItem(value: 'delete', child: Text('Delete')),
+                  ],
+                ),
+            ],
+          ),
+          body: SavedLocationsScreen(
+            providerRepository: widget.providerRepository,
+            providerStatus: widget.providerStatus,
+            location: widget.location,
+            destinations: widget.destinations,
+            defaultTravelMode: widget.defaultTravelMode,
+            isLoading: false,
+            isSaving: widget.isSaving,
+            detail: widget.detail,
+            initialSlot: slotIndex,
+            editorOnly: true,
+            onSave: widget.onSave,
+            onClear: widget.onClear,
+            onOpenSetup: widget.onOpenSetup,
+          ),
+        ),
+      ),
+    );
   }
 
   void _onDestinationTextChanged() {
@@ -4124,8 +3847,7 @@ class _SavedLocationsScreenState extends State<SavedLocationsScreen> {
       _destination.selectedSuggestion = null;
       _destination.sessionToken = _newSessionToken(_random);
       _destination.attribution = null;
-      _destination.detail =
-          '${latitude.toStringAsFixed(5)}, ${longitude.toStringAsFixed(5)}';
+      _destination.detail = null;
     });
     return WatchRouteEndpoint(
       label: label,
@@ -4177,43 +3899,15 @@ class _SavedLocationsScreenState extends State<SavedLocationsScreen> {
     });
   }
 
-  Future<void> _clearSelectedSlot() async {
-    setState(() {
-      _resolving = true;
-      _localMessage = null;
-    });
-    final message = await widget.onClear(_selectedSlot);
-    if (!mounted) {
-      return;
-    }
-    setState(() {
-      _resolving = false;
-      _localMessage = message;
-      _loadedSignature = _slotSignature(null);
-      _updatingText = true;
-      _nameController.text = savedLocationSlotTitle(_selectedSlot);
-      _destination.controller.text = '';
-      _updatingText = false;
-      _destination
-        ..debounce?.cancel()
-        ..suggestions = const []
-        ..selectedSuggestion = null
-        ..sessionToken = _newSessionToken(_random)
-        ..attribution = null
-        ..detail = null;
-    });
-  }
-
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final busy = _resolving || widget.isSaving || widget.isLoading;
     final savedDestinations = _enabledDestinations();
     final currentDestination = _destinationForSlot(_selectedSlot);
-    final canClear = currentDestination != null && !busy;
     final canAdd = !busy && _nextAvailableSlot() != null;
     final canSave =
-        widget.providerStatus.configured &&
+        _providerReady(_providerStatus) &&
         !busy &&
         (currentDestination != null ||
             savedDestinations.length < maxDestinationRecords);
@@ -4221,189 +3915,172 @@ class _SavedLocationsScreenState extends State<SavedLocationsScreen> {
     return ListView(
       padding: const EdgeInsets.fromLTRB(16, 8, 16, 24),
       children: [
-        Material(
-          color: theme.colorScheme.surface,
-          shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(8),
-            side: BorderSide(color: theme.colorScheme.outlineVariant),
+        if (!widget.editorOnly) ...[
+          Material(
+            color: theme.colorScheme.surface,
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(8),
+              side: BorderSide(color: theme.colorScheme.outlineVariant),
+            ),
+            clipBehavior: Clip.antiAlias,
+            child: Padding(
+              padding: const EdgeInsets.symmetric(vertical: 8),
+              child: Column(
+                children: [
+                  if (widget.isLoading)
+                    const Padding(
+                      padding: EdgeInsets.all(16),
+                      child: Center(child: CircularProgressIndicator()),
+                    ),
+                  if (savedDestinations.isEmpty)
+                    const ListTile(
+                      key: ValueKey('saved-location-empty'),
+                      leading: Icon(Icons.bookmark_border),
+                      title: Text('No saved locations'),
+                      subtitle: Text('Add a location to show it on the watch.'),
+                    ),
+                  for (final destination in savedDestinations)
+                    _SavedLocationSlotTile(
+                      slotIndex: destination.slotIndex,
+                      selected: false,
+                      destination: destination,
+                      enabled: !busy,
+                      onTap: () => _openEditor(destination.slotIndex),
+                    ),
+                  ListTile(
+                    key: const ValueKey('saved-location-add'),
+                    enabled: canAdd,
+                    leading: const Icon(Icons.add_location_alt_outlined),
+                    title: const Text('Add Location'),
+                    subtitle: const Text('Create another watch shortcut.'),
+                    onTap: canAdd
+                        ? () => _openEditor(_nextAvailableSlot()!)
+                        : null,
+                  ),
+                ],
+              ),
+            ),
           ),
-          clipBehavior: Clip.antiAlias,
-          child: Padding(
-            padding: const EdgeInsets.symmetric(vertical: 8),
-            child: Column(
-              children: [
-                Padding(
-                  padding: const EdgeInsets.fromLTRB(16, 8, 16, 6),
-                  child: Row(
+          const SizedBox(height: 16),
+        ],
+        if (widget.editorOnly) ...[
+          DecoratedBox(
+            decoration: BoxDecoration(
+              color: theme.colorScheme.surface,
+              border: Border.all(color: theme.colorScheme.outlineVariant),
+              borderRadius: BorderRadius.circular(8),
+            ),
+            child: Padding(
+              padding: const EdgeInsets.all(14),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  Row(
                     children: [
                       Icon(
-                        Icons.bookmarks_outlined,
+                        savedLocationSlotIcon(_selectedSlot),
+                        size: 20,
                         color: theme.colorScheme.primary,
                       ),
                       const SizedBox(width: 10),
                       Expanded(
                         child: Text(
-                          'Saved Locations',
+                          currentDestination?.label ?? 'New Saved Location',
                           style: theme.textTheme.titleMedium,
                         ),
                       ),
-                      if (widget.isLoading)
+                      if (busy)
                         const SizedBox.square(
                           dimension: 18,
                           child: CircularProgressIndicator(strokeWidth: 2),
                         ),
                     ],
                   ),
-                ),
-                if (savedDestinations.isEmpty)
-                  const ListTile(
-                    key: ValueKey('saved-location-empty'),
-                    leading: Icon(Icons.bookmark_border),
-                    title: Text('No saved locations'),
-                    subtitle: Text('Add a location to show it on the watch.'),
-                  ),
-                for (final destination in savedDestinations)
-                  _SavedLocationSlotTile(
-                    slotIndex: destination.slotIndex,
-                    selected: destination.slotIndex == _selectedSlot,
-                    destination: destination,
-                    enabled: !busy,
-                    onTap: () => _selectSlot(destination.slotIndex),
-                  ),
-                ListTile(
-                  key: const ValueKey('saved-location-add'),
-                  enabled: canAdd,
-                  leading: const Icon(Icons.add_location_alt_outlined),
-                  title: const Text('Add Location'),
-                  subtitle: const Text('Create another watch shortcut.'),
-                  selected: currentDestination == null,
-                  selectedTileColor: theme.colorScheme.secondaryContainer
-                      .withValues(alpha: 0.28),
-                  onTap: canAdd ? _selectNewLocation : null,
-                  trailing: StatusPill(
-                    icon: canAdd ? Icons.add_circle_outline : Icons.block,
-                    label: canAdd ? 'New' : 'Full',
-                    tone: canAdd ? StatusTone.neutral : StatusTone.warning,
-                  ),
-                ),
-              ],
-            ),
-          ),
-        ),
-        const SizedBox(height: 16),
-        DecoratedBox(
-          decoration: BoxDecoration(
-            color: theme.colorScheme.surface,
-            border: Border.all(color: theme.colorScheme.outlineVariant),
-            borderRadius: BorderRadius.circular(8),
-          ),
-          child: Padding(
-            padding: const EdgeInsets.all(14),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: [
-                Row(
-                  children: [
-                    Icon(
-                      savedLocationSlotIcon(_selectedSlot),
-                      size: 20,
-                      color: theme.colorScheme.primary,
+                  const SizedBox(height: 12),
+                  TextField(
+                    key: const ValueKey('saved-location-name'),
+                    controller: _nameController,
+                    enabled: !busy && _providerReady(_providerStatus),
+                    inputFormatters: const [_WatchDestinationLabelFormatter()],
+                    decoration: const InputDecoration(
+                      border: OutlineInputBorder(),
+                      labelText: 'Display name',
+                      prefixIcon: Icon(Icons.label_outline),
                     ),
-                    const SizedBox(width: 10),
-                    Expanded(
-                      child: Text(
-                        currentDestination?.label ?? 'New Saved Location',
-                        style: theme.textTheme.titleMedium,
+                    textInputAction: TextInputAction.next,
+                  ),
+                  const SizedBox(height: 12),
+                  _placeField(
+                    context,
+                    busy: busy || !_providerReady(_providerStatus),
+                  ),
+                  const SizedBox(height: 12),
+                  SegmentedButton<WatchTravelMode>(
+                    showSelectedIcon: false,
+                    segments: const [
+                      ButtonSegment(
+                        value: WatchTravelMode.drive,
+                        icon: Icon(Icons.directions_car_outlined),
+                        label: Text('Drive'),
                       ),
-                    ),
-                    if (busy)
-                      const SizedBox.square(
-                        dimension: 18,
-                        child: CircularProgressIndicator(strokeWidth: 2),
+                      ButtonSegment(
+                        value: WatchTravelMode.walk,
+                        icon: Icon(Icons.directions_walk),
+                        label: Text('Walk'),
                       ),
-                  ],
-                ),
-                const SizedBox(height: 12),
-                TextField(
-                  key: const ValueKey('saved-location-name'),
-                  controller: _nameController,
-                  enabled: !busy,
-                  inputFormatters: const [_WatchDestinationLabelFormatter()],
-                  decoration: const InputDecoration(
-                    border: OutlineInputBorder(),
-                    labelText: 'Display name',
-                    prefixIcon: Icon(Icons.label_outline),
+                      ButtonSegment(
+                        value: WatchTravelMode.bike,
+                        icon: Icon(Icons.directions_bike),
+                        label: Text('Bike'),
+                      ),
+                    ],
+                    selected: {_travelMode},
+                    onSelectionChanged: busy || !_providerReady(_providerStatus)
+                        ? null
+                        : (selection) {
+                            setState(() {
+                              _travelMode = selection.first;
+                            });
+                          },
                   ),
-                  textInputAction: TextInputAction.next,
-                ),
-                const SizedBox(height: 12),
-                _placeField(context, busy: busy),
-                const SizedBox(height: 12),
-                SegmentedButton<WatchTravelMode>(
-                  showSelectedIcon: false,
-                  segments: const [
-                    ButtonSegment(
-                      value: WatchTravelMode.drive,
-                      icon: Icon(Icons.directions_car_outlined),
-                      label: Text('Drive'),
+                  const SizedBox(height: 12),
+                  Wrap(
+                    spacing: 8,
+                    runSpacing: 8,
+                    children: [
+                      FilledButton.icon(
+                        key: const ValueKey('saved-location-save'),
+                        onPressed: canSave ? _saveSelectedSlot : null,
+                        icon: const Icon(Icons.save_outlined),
+                        label: const Text('Save Location'),
+                      ),
+                    ],
+                  ),
+                  if (!_providerReady(_providerStatus)) ...[
+                    const SizedBox(height: 10),
+                    Text(
+                      'Validate a Google API key before changing destinations.',
+                      style: theme.textTheme.bodySmall,
                     ),
-                    ButtonSegment(
-                      value: WatchTravelMode.walk,
-                      icon: Icon(Icons.directions_walk),
-                      label: Text('Walk'),
-                    ),
-                    ButtonSegment(
-                      value: WatchTravelMode.bike,
-                      icon: Icon(Icons.directions_bike),
-                      label: Text('Bike'),
-                    ),
-                  ],
-                  selected: {_travelMode},
-                  onSelectionChanged: busy
-                      ? null
-                      : (selection) {
-                          setState(() {
-                            _travelMode = selection.first;
-                          });
-                        },
-                ),
-                const SizedBox(height: 12),
-                Wrap(
-                  spacing: 8,
-                  runSpacing: 8,
-                  children: [
-                    FilledButton.icon(
-                      key: const ValueKey('saved-location-save'),
-                      onPressed: canSave ? _saveSelectedSlot : null,
-                      icon: const Icon(Icons.save_outlined),
-                      label: const Text('Save Location'),
-                    ),
+                    const SizedBox(height: 8),
                     OutlinedButton.icon(
-                      key: const ValueKey('saved-location-clear'),
-                      onPressed: canClear ? _clearSelectedSlot : null,
-                      icon: const Icon(Icons.clear),
-                      label: const Text('Clear Location'),
+                      onPressed: _openSetup,
+                      icon: const Icon(Icons.key_outlined),
+                      label: const Text('Set up Google Maps'),
                     ),
                   ],
-                ),
-                if (!widget.providerStatus.configured) ...[
-                  const SizedBox(height: 10),
-                  Text(
-                    'Provider key required before resolving destinations.',
-                    style: theme.textTheme.bodySmall,
-                  ),
+                  if (_localMessage != null || widget.detail != null) ...[
+                    const SizedBox(height: 10),
+                    Text(
+                      _localMessage ?? widget.detail!,
+                      style: theme.textTheme.bodySmall,
+                    ),
+                  ],
                 ],
-                if (_localMessage != null || widget.detail != null) ...[
-                  const SizedBox(height: 10),
-                  Text(
-                    _localMessage ?? widget.detail!,
-                    style: theme.textTheme.bodySmall,
-                  ),
-                ],
-              ],
+              ),
             ),
           ),
-        ),
+        ],
       ],
     );
   }
@@ -4512,13 +4189,7 @@ class _SavedLocationSlotTile extends StatelessWidget {
     final theme = Theme.of(context);
     final configured = destination != null;
     final subtitle = configured
-        ? [
-            destination!.address,
-            '${destination!.latitude.toStringAsFixed(5)}, '
-                '${destination!.longitude.toStringAsFixed(5)}',
-            '${_savedLocationGeocodeStatusLabel(destination!.geocodeStatus)}; updated '
-                '${_savedLocationTimestampLabel(destination!.updatedAtMillis)}',
-          ].join('\n')
+        ? '${destination!.address}\n${destination!.defaultTravelMode.label}'
         : 'Empty';
     return ListTile(
       key: ValueKey('saved-location-slot-$slotIndex'),
@@ -4529,841 +4200,11 @@ class _SavedLocationSlotTile extends StatelessWidget {
         configured ? destination!.label : savedLocationSlotTitle(slotIndex),
       ),
       subtitle: Text(subtitle),
-      trailing: StatusPill(
-        icon: configured ? Icons.check_circle_outline : Icons.radio_button_off,
-        label: configured ? destination!.defaultTravelMode.label : 'Empty',
-        tone: configured ? StatusTone.ok : StatusTone.neutral,
-      ),
+      trailing: const Icon(Icons.chevron_right),
       selectedTileColor: theme.colorScheme.secondaryContainer.withValues(
         alpha: 0.28,
       ),
       onTap: enabled ? onTap : null,
-    );
-  }
-}
-
-class SetupScreen extends StatefulWidget {
-  const SetupScreen({
-    required this.providerStatus,
-    required this.bridgeStatus,
-    required this.permissionState,
-    required this.location,
-    required this.isValidatingProvider,
-    required this.onStoreApiKey,
-    required this.onValidateProvider,
-    required this.onClearApiKey,
-    super.key,
-  });
-
-  final ProviderStatus providerStatus;
-  final BridgeStatus bridgeStatus;
-  final LocationPermissionState permissionState;
-  final LocationSnapshot? location;
-  final bool isValidatingProvider;
-  final Future<void> Function(String apiKey) onStoreApiKey;
-  final Future<void> Function() onValidateProvider;
-  final Future<void> Function() onClearApiKey;
-
-  @override
-  State<SetupScreen> createState() => _SetupScreenState();
-}
-
-class _SetupScreenState extends State<SetupScreen> {
-  final TextEditingController _apiKeyController = TextEditingController();
-  String? _apiKeyMessage;
-
-  @override
-  void dispose() {
-    _apiKeyController.dispose();
-    super.dispose();
-  }
-
-  Future<void> _storeApiKey() async {
-    final value = _apiKeyController.text.trim();
-    String message;
-
-    final validationError = googleApiKeyValidationError(value);
-    if (validationError != null) {
-      message = validationError;
-    } else {
-      setState(() {
-        _apiKeyMessage = 'Storing key through Android secure storage.';
-      });
-      await widget.onStoreApiKey(value);
-      _apiKeyController.clear();
-      message = 'Stored. The app only shows redacted key status now.';
-    }
-
-    setState(() {
-      _apiKeyMessage = message;
-    });
-  }
-
-  Future<void> _copySetupValue(String label, String value) async {
-    await Clipboard.setData(ClipboardData(text: value));
-    if (!mounted) {
-      return;
-    }
-    ScaffoldMessenger.of(
-      context,
-    ).showSnackBar(SnackBar(content: Text('$label copied.')));
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final packageName =
-        widget.providerStatus.packageName ?? 'com.leapwardkoex.mappy';
-    final certSha1 = widget.providerStatus.certSha1;
-    final locationLabel =
-        widget.location?.coordinateLabel ?? widget.permissionState.label;
-
-    return ListView(
-      padding: const EdgeInsets.fromLTRB(16, 8, 16, 24),
-      children: [
-        _StatusPanel(
-          title: 'Google API Key',
-          rows: [
-            StatusRow(
-              icon: widget.providerStatus.configured
-                  ? Icons.key_outlined
-                  : Icons.key_off_outlined,
-              label: 'Stored key',
-              value: widget.providerStatus.keyLabel,
-            ),
-            StatusRow(
-              icon: Icons.cloud_outlined,
-              label: 'Provider validation',
-              value: widget.providerStatus.validationDetail == null
-                  ? widget.providerStatus.providerLabel
-                  : '${widget.providerStatus.providerLabel}: ${widget.providerStatus.validationDetail}',
-            ),
-            const StatusRow(
-              icon: Icons.api_outlined,
-              label: 'Required APIs',
-              value: 'Map Tiles, Places, Geocoding, Routes',
-            ),
-          ],
-        ),
-        const SizedBox(height: 16),
-        TextField(
-          controller: _apiKeyController,
-          decoration: const InputDecoration(
-            border: OutlineInputBorder(),
-            labelText: 'Google API key',
-            helperText: 'Stored full keys must not be shown after submission.',
-          ),
-          obscureText: true,
-          enableSuggestions: false,
-          autocorrect: false,
-        ),
-        const SizedBox(height: 12),
-        FilledButton.icon(
-          onPressed: widget.isValidatingProvider ? null : _storeApiKey,
-          icon: const Icon(Icons.check),
-          label: Text(widget.isValidatingProvider ? 'Validating' : 'Save Key'),
-        ),
-        const SizedBox(height: 8),
-        Row(
-          children: [
-            Expanded(
-              child: OutlinedButton.icon(
-                onPressed:
-                    widget.providerStatus.configured &&
-                        !widget.isValidatingProvider
-                    ? widget.onValidateProvider
-                    : null,
-                icon: const Icon(Icons.cloud_sync_outlined),
-                label: const Text('Validate Provider'),
-              ),
-            ),
-            const SizedBox(width: 12),
-            Expanded(
-              child: OutlinedButton.icon(
-                onPressed:
-                    widget.providerStatus.configured &&
-                        !widget.isValidatingProvider
-                    ? widget.onClearApiKey
-                    : null,
-                icon: const Icon(Icons.delete_outline),
-                label: const Text('Clear Key'),
-              ),
-            ),
-          ],
-        ),
-        if (_apiKeyMessage != null) ...[
-          const SizedBox(height: 12),
-          Text(_apiKeyMessage!, style: Theme.of(context).textTheme.bodyMedium),
-        ],
-        if (!_providerReady(widget.providerStatus)) ...[
-          const SizedBox(height: 12),
-          Text(
-            _providerFixMessage(widget.providerStatus),
-            style: Theme.of(context).textTheme.bodyMedium,
-          ),
-        ],
-        const SizedBox(height: 16),
-        _StatusPanel(
-          title: 'App Setup',
-          rows: [
-            StatusRow(
-              icon: Icons.android,
-              label: 'Android package',
-              value: packageName,
-            ),
-            StatusRow(
-              icon: Icons.verified_user_outlined,
-              label: 'Signing SHA-1',
-              value: certSha1 ?? 'Waiting for Android',
-            ),
-            StatusRow(
-              icon: Icons.watch_outlined,
-              label: 'Watch bridge',
-              value: widget.bridgeStatus.watchDetailLabel,
-            ),
-            StatusRow(
-              icon: Icons.run_circle_outlined,
-              label: 'Foreground service',
-              value: widget.bridgeStatus.foregroundServiceLabel,
-            ),
-            StatusRow(
-              icon: Icons.notifications_active_outlined,
-              label: 'Notifications',
-              value: widget.bridgeStatus.notificationPermissionState.label,
-            ),
-            StatusRow(
-              icon: Icons.gps_fixed,
-              label: 'Live GPS',
-              value: widget.bridgeStatus.locationStreamLabel,
-            ),
-            StatusRow(
-              icon: Icons.my_location,
-              label: 'Location',
-              value: locationLabel,
-            ),
-          ],
-        ),
-        const SizedBox(height: 12),
-        Row(
-          children: [
-            Expanded(
-              child: OutlinedButton.icon(
-                onPressed: () => _copySetupValue('Package', packageName),
-                icon: const Icon(Icons.copy),
-                label: const Text('Copy Package'),
-              ),
-            ),
-            const SizedBox(width: 12),
-            Expanded(
-              child: OutlinedButton.icon(
-                onPressed: certSha1 == null
-                    ? null
-                    : () => _copySetupValue('SHA-1', certSha1),
-                icon: const Icon(Icons.copy),
-                label: const Text('Copy SHA-1'),
-              ),
-            ),
-          ],
-        ),
-        const SizedBox(height: 16),
-        const Text(
-          'Android-restricted keys need this package name and the active signing SHA-1. Provider calls must be performed by Android native code with package and certificate headers.',
-        ),
-      ],
-    );
-  }
-}
-
-class SettingsScreen extends StatelessWidget {
-  const SettingsScreen({
-    required this.settings,
-    required this.displaySettings,
-    required this.isSaving,
-    required this.isSavingDisplaySettings,
-    required this.onChanged,
-    required this.onDisplaySettingsChanged,
-    required this.onClearCache,
-    this.detail,
-    this.displaySettingsDetail,
-    super.key,
-  });
-
-  final MapTileSettings settings;
-  final WatchDisplaySettings displaySettings;
-  final bool isSaving;
-  final bool isSavingDisplaySettings;
-  final String? detail;
-  final String? displaySettingsDetail;
-  final Future<void> Function(MapTileSettings settings) onChanged;
-  final Future<void> Function(WatchDisplaySettings settings)
-  onDisplaySettingsChanged;
-  final Future<void> Function() onClearCache;
-
-  @override
-  Widget build(BuildContext context) {
-    return ListView(
-      padding: const EdgeInsets.fromLTRB(16, 8, 16, 24),
-      children: [
-        _StatusPanel(
-          title: 'Display',
-          rows: [
-            StatusRow(
-              icon: Icons.brightness_6_outlined,
-              label: 'Theme',
-              value: displaySettings.themeMode.label,
-            ),
-            StatusRow(
-              icon: Icons.straighten_outlined,
-              label: 'Units',
-              value: displaySettings.unitsMode.label,
-            ),
-            StatusRow(
-              icon: Icons.alt_route_outlined,
-              label: 'Default travel mode',
-              value: displaySettings.travelMode.label,
-            ),
-            StatusRow(
-              icon: Icons.light_mode_outlined,
-              label: 'Backlight',
-              value: displaySettings.backlightMode.label,
-            ),
-            StatusRow(
-              icon: Icons.vibration,
-              label: 'Haptics',
-              value: displaySettings.hapticMode.label,
-            ),
-            StatusRow(
-              icon: Icons.visibility_outlined,
-              label: 'Navigation glance',
-              value: displaySettings.glanceMode.label,
-            ),
-            StatusRow(
-              icon: Icons.explore_outlined,
-              label: 'Map orientation',
-              value: displaySettings.mapOrientation.label,
-            ),
-            StatusRow(
-              icon: Icons.animation,
-              label: 'Tile animation',
-              value: displaySettings.tileAnimationMode.label,
-            ),
-          ],
-        ),
-        const SizedBox(height: 16),
-        _SegmentedSetting<WatchThemeMode>(
-          title: 'Theme',
-          icon: Icons.brightness_6_outlined,
-          value: displaySettings.themeMode,
-          enabled: !isSavingDisplaySettings,
-          values: WatchThemeMode.values,
-          labelFor: (value) => value.label,
-          iconFor: (value) => switch (value) {
-            WatchThemeMode.auto => Icons.brightness_auto_outlined,
-            WatchThemeMode.day => Icons.light_mode_outlined,
-            WatchThemeMode.night => Icons.dark_mode_outlined,
-          },
-          onChanged: (themeMode) => onDisplaySettingsChanged(
-            displaySettings.copyWith(themeMode: themeMode),
-          ),
-        ),
-        const SizedBox(height: 12),
-        _SegmentedSetting<WatchUnitsMode>(
-          title: 'Units',
-          icon: Icons.straighten_outlined,
-          value: displaySettings.unitsMode,
-          enabled: !isSavingDisplaySettings,
-          values: WatchUnitsMode.values,
-          labelFor: (value) => value.label,
-          iconFor: (value) => switch (value) {
-            WatchUnitsMode.imperial => Icons.speed_outlined,
-            WatchUnitsMode.metric => Icons.public_outlined,
-          },
-          onChanged: (unitsMode) => onDisplaySettingsChanged(
-            displaySettings.copyWith(unitsMode: unitsMode),
-          ),
-        ),
-        const SizedBox(height: 12),
-        _SegmentedSetting<WatchTravelMode>(
-          title: 'Default Travel Mode',
-          icon: Icons.alt_route_outlined,
-          value: displaySettings.travelMode,
-          enabled: !isSavingDisplaySettings,
-          values: const [
-            WatchTravelMode.drive,
-            WatchTravelMode.walk,
-            WatchTravelMode.bike,
-          ],
-          labelFor: (value) => value.label,
-          iconFor: (value) => switch (value) {
-            WatchTravelMode.drive => Icons.directions_car_outlined,
-            WatchTravelMode.walk => Icons.directions_walk,
-            WatchTravelMode.bike => Icons.directions_bike,
-          },
-          onChanged: (travelMode) => onDisplaySettingsChanged(
-            displaySettings.copyWith(travelMode: travelMode),
-          ),
-        ),
-        if (displaySettings.travelMode != WatchTravelMode.drive) ...[
-          const SizedBox(height: 8),
-          Text(
-            'Walk and bike routes may miss safe pedestrian or bicycling path detail.',
-            style: Theme.of(context).textTheme.bodySmall,
-          ),
-        ],
-        const SizedBox(height: 12),
-        _SegmentedSetting<WatchBacklightMode>(
-          title: 'Backlight',
-          icon: Icons.light_mode_outlined,
-          value: displaySettings.backlightMode,
-          enabled: !isSavingDisplaySettings,
-          values: WatchBacklightMode.values,
-          labelFor: (value) => value.label,
-          iconFor: (value) => switch (value) {
-            WatchBacklightMode.system => Icons.settings_suggest_outlined,
-            WatchBacklightMode.keepOn => Icons.highlight_outlined,
-          },
-          onChanged: (backlightMode) => onDisplaySettingsChanged(
-            displaySettings.copyWith(backlightMode: backlightMode),
-          ),
-        ),
-        const SizedBox(height: 12),
-        _SegmentedSetting<WatchNavigationFeedbackMode>(
-          title: 'Haptics',
-          icon: Icons.vibration,
-          value: displaySettings.hapticMode,
-          enabled: !isSavingDisplaySettings,
-          values: WatchNavigationFeedbackMode.values,
-          labelFor: (value) => value.label,
-          iconFor: _navigationFeedbackIcon,
-          onChanged: (hapticMode) => onDisplaySettingsChanged(
-            displaySettings.copyWith(hapticMode: hapticMode),
-          ),
-        ),
-        const SizedBox(height: 12),
-        _SegmentedSetting<WatchNavigationFeedbackMode>(
-          title: 'Navigation Glance',
-          icon: Icons.visibility_outlined,
-          value: displaySettings.glanceMode,
-          enabled: !isSavingDisplaySettings,
-          values: WatchNavigationFeedbackMode.values,
-          labelFor: (value) => value.label,
-          iconFor: _navigationFeedbackIcon,
-          onChanged: (glanceMode) => onDisplaySettingsChanged(
-            displaySettings.copyWith(glanceMode: glanceMode),
-          ),
-        ),
-        const SizedBox(height: 8),
-        Text(
-          'Briefly wakes the watch backlight for selected navigation events.',
-          style: Theme.of(context).textTheme.bodySmall,
-        ),
-        const SizedBox(height: 12),
-        _SegmentedSetting<WatchMapOrientation>(
-          title: 'Map Orientation',
-          icon: Icons.explore_outlined,
-          value: displaySettings.mapOrientation,
-          enabled: !isSavingDisplaySettings,
-          values: WatchMapOrientation.values,
-          labelFor: (value) => value.label,
-          iconFor: (value) => switch (value) {
-            WatchMapOrientation.northUp => Icons.north_outlined,
-            WatchMapOrientation.forwardUp => Icons.navigation_outlined,
-          },
-          onChanged: (mapOrientation) => onDisplaySettingsChanged(
-            displaySettings.copyWith(mapOrientation: mapOrientation),
-          ),
-        ),
-        const SizedBox(height: 12),
-        _SegmentedSetting<WatchTileAnimationMode>(
-          title: 'Tile Animation',
-          icon: Icons.animation,
-          value: displaySettings.tileAnimationMode,
-          enabled: !isSavingDisplaySettings,
-          values: WatchTileAnimationMode.values,
-          labelFor: (value) => value.label,
-          iconFor: (value) => switch (value) {
-            WatchTileAnimationMode.none => Icons.block,
-            WatchTileAnimationMode.fadeIn => Icons.opacity,
-            WatchTileAnimationMode.fadeZoom => Icons.zoom_out_map,
-          },
-          onChanged: (tileAnimationMode) => onDisplaySettingsChanged(
-            displaySettings.copyWith(tileAnimationMode: tileAnimationMode),
-          ),
-        ),
-        if (displaySettingsDetail != null) ...[
-          const SizedBox(height: 12),
-          Text(
-            displaySettingsDetail!,
-            style: Theme.of(context).textTheme.bodyMedium,
-          ),
-        ],
-        const SizedBox(height: 16),
-        _StatusPanel(
-          title: 'Map Tiles',
-          rows: [
-            StatusRow(
-              icon: Icons.map_outlined,
-              label: 'Source',
-              value: settings.source.label,
-            ),
-            StatusRow(
-              icon: Icons.grid_on_outlined,
-              label: 'Rendered tile',
-              value: settings.tileSize.label,
-            ),
-          ],
-        ),
-        const SizedBox(height: 16),
-        _SegmentedSetting<MapTileSource>(
-          title: 'Source',
-          icon: Icons.map_outlined,
-          value: settings.source,
-          enabled: !isSaving,
-          values: MapTileSource.values,
-          labelFor: (value) => value.label,
-          iconFor: (value) => switch (value) {
-            MapTileSource.roadmap => Icons.route_outlined,
-            MapTileSource.satellite => Icons.satellite_alt_outlined,
-            MapTileSource.hybrid => Icons.layers_outlined,
-            MapTileSource.terrain => Icons.terrain_outlined,
-          },
-          onChanged: (source) => onChanged(settings.copyWith(source: source)),
-        ),
-        const SizedBox(height: 12),
-        _SegmentedSetting<WatchTileSize>(
-          title: 'Rendered Tile',
-          icon: Icons.grid_on_outlined,
-          value: settings.tileSize,
-          enabled: !isSaving,
-          values: WatchTileSize.values,
-          labelFor: (value) => value.label,
-          iconFor: (value) => switch (value) {
-            WatchTileSize.small => Icons.grid_4x4_outlined,
-            WatchTileSize.medium => Icons.grid_view_outlined,
-            WatchTileSize.large => Icons.grid_on_outlined,
-          },
-          onChanged: (tileSize) =>
-              onChanged(settings.copyWith(tileSize: tileSize)),
-        ),
-        const SizedBox(height: 16),
-        OutlinedButton.icon(
-          onPressed: isSaving ? null : onClearCache,
-          icon: const Icon(Icons.delete_sweep_outlined),
-          label: const Text('Clear Tile Cache'),
-        ),
-        if (detail != null) ...[
-          const SizedBox(height: 12),
-          Text(detail!, style: Theme.of(context).textTheme.bodyMedium),
-        ],
-      ],
-    );
-  }
-}
-
-IconData _navigationFeedbackIcon(WatchNavigationFeedbackMode mode) {
-  return switch (mode) {
-    WatchNavigationFeedbackMode.all => Icons.notifications_active_outlined,
-    WatchNavigationFeedbackMode.turns => Icons.alt_route_outlined,
-    WatchNavigationFeedbackMode.arrival => Icons.flag_outlined,
-    WatchNavigationFeedbackMode.off => Icons.notifications_off_outlined,
-  };
-}
-
-class _SegmentedSetting<T> extends StatelessWidget {
-  const _SegmentedSetting({
-    required this.title,
-    required this.icon,
-    required this.value,
-    required this.values,
-    required this.enabled,
-    required this.labelFor,
-    required this.iconFor,
-    required this.onChanged,
-  });
-
-  final String title;
-  final IconData icon;
-  final T value;
-  final List<T> values;
-  final bool enabled;
-  final String Function(T value) labelFor;
-  final IconData Function(T value) iconFor;
-  final ValueChanged<T> onChanged;
-
-  @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    return DecoratedBox(
-      decoration: BoxDecoration(
-        color: theme.colorScheme.surface,
-        border: Border.all(color: theme.colorScheme.outlineVariant),
-        borderRadius: BorderRadius.circular(8),
-      ),
-      child: Padding(
-        padding: const EdgeInsets.all(14),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Row(
-              children: [
-                Icon(icon, size: 20, color: theme.colorScheme.primary),
-                const SizedBox(width: 10),
-                Text(title, style: theme.textTheme.titleSmall),
-              ],
-            ),
-            const SizedBox(height: 12),
-            SingleChildScrollView(
-              scrollDirection: Axis.horizontal,
-              child: SegmentedButton<T>(
-                showSelectedIcon: false,
-                segments: [
-                  for (final option in values)
-                    ButtonSegment<T>(
-                      value: option,
-                      icon: Icon(iconFor(option)),
-                      label: Text(labelFor(option)),
-                    ),
-                ],
-                selected: {value},
-                onSelectionChanged: (selection) {
-                  final selected = selection.single;
-                  if (!enabled || selected == value) {
-                    return;
-                  }
-                  onChanged(selected);
-                },
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-}
-
-class DiagnosticsScreen extends StatelessWidget {
-  const DiagnosticsScreen({
-    required this.events,
-    required this.isClearingDiagnostics,
-    required this.onExportDiagnostics,
-    required this.onClearDiagnostics,
-    required this.isClearingTileCache,
-    required this.onClearTileCache,
-    required this.isClearingRouteCache,
-    required this.onClearRouteCache,
-    required this.isClearingProviderValidationCache,
-    required this.onClearProviderValidationCache,
-    super.key,
-  });
-
-  final List<String> events;
-  final bool isClearingDiagnostics;
-  final Future<void> Function() onExportDiagnostics;
-  final Future<void> Function() onClearDiagnostics;
-  final bool isClearingTileCache;
-  final Future<void> Function() onClearTileCache;
-  final bool isClearingRouteCache;
-  final Future<void> Function() onClearRouteCache;
-  final bool isClearingProviderValidationCache;
-  final Future<void> Function() onClearProviderValidationCache;
-
-  @override
-  Widget build(BuildContext context) {
-    return ListView(
-      padding: const EdgeInsets.fromLTRB(16, 8, 16, 24),
-      children: [
-        _StatusPanel(
-          title: 'Recent Events',
-          rows: [
-            StatusRow(
-              icon: events.isEmpty
-                  ? Icons.info_outline
-                  : Icons.receipt_long_outlined,
-              label: 'Log',
-              value: events.isEmpty
-                  ? 'No diagnostics yet'
-                  : events.take(8).join('\n'),
-            ),
-            const StatusRow(
-              icon: Icons.privacy_tip_outlined,
-              label: 'Redaction',
-              value: 'Credential text must be redacted on export',
-            ),
-          ],
-        ),
-        const SizedBox(height: 16),
-        OutlinedButton.icon(
-          onPressed: onExportDiagnostics,
-          icon: const Icon(Icons.ios_share),
-          label: const Text('Export Diagnostics'),
-        ),
-        const SizedBox(height: 8),
-        OutlinedButton.icon(
-          onPressed: isClearingDiagnostics ? null : onClearDiagnostics,
-          icon: const Icon(Icons.delete_outline),
-          label: Text(
-            isClearingDiagnostics
-                ? 'Clearing Diagnostics'
-                : 'Clear Diagnostics',
-          ),
-        ),
-        const SizedBox(height: 8),
-        OutlinedButton.icon(
-          onPressed: isClearingTileCache ? null : onClearTileCache,
-          icon: const Icon(Icons.delete_sweep_outlined),
-          label: Text(
-            isClearingTileCache ? 'Clearing Tile Cache' : 'Clear Tile Cache',
-          ),
-        ),
-        const SizedBox(height: 8),
-        OutlinedButton.icon(
-          onPressed: isClearingRouteCache ? null : onClearRouteCache,
-          icon: const Icon(Icons.route_outlined),
-          label: Text(
-            isClearingRouteCache ? 'Clearing Route Cache' : 'Clear Route Cache',
-          ),
-        ),
-        const SizedBox(height: 8),
-        OutlinedButton.icon(
-          onPressed: isClearingProviderValidationCache
-              ? null
-              : onClearProviderValidationCache,
-          icon: const Icon(Icons.verified_user_outlined),
-          label: Text(
-            isClearingProviderValidationCache
-                ? 'Clearing Provider Validation'
-                : 'Clear Provider Validation',
-          ),
-        ),
-      ],
-    );
-  }
-}
-
-class _LocationAction {
-  const _LocationAction({
-    required this.icon,
-    required this.label,
-    required this.onPressed,
-  });
-
-  final IconData icon;
-  final String label;
-  final VoidCallback onPressed;
-}
-
-enum StatusTone { ok, warning, neutral }
-
-class StatusPill extends StatelessWidget {
-  const StatusPill({
-    required this.icon,
-    required this.label,
-    required this.tone,
-    super.key,
-  });
-
-  final IconData icon;
-  final String label;
-  final StatusTone tone;
-
-  @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    final (background, foreground) = switch (tone) {
-      StatusTone.ok => (const Color(0xFFE0F1E7), const Color(0xFF135D36)),
-      StatusTone.warning => (const Color(0xFFFFF0C2), const Color(0xFF715000)),
-      StatusTone.neutral => (
-        theme.colorScheme.surfaceContainerHighest,
-        theme.colorScheme.onSurfaceVariant,
-      ),
-    };
-
-    return DecoratedBox(
-      decoration: BoxDecoration(
-        color: background,
-        borderRadius: BorderRadius.circular(18),
-      ),
-      child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-        child: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Icon(icon, size: 18, color: foreground),
-            const SizedBox(width: 8),
-            Text(
-              label,
-              style: theme.textTheme.labelLarge?.copyWith(color: foreground),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-}
-
-class StatusRow {
-  const StatusRow({
-    required this.icon,
-    required this.label,
-    required this.value,
-  });
-
-  final IconData icon;
-  final String label;
-  final String value;
-}
-
-class _StatusPanel extends StatelessWidget {
-  const _StatusPanel({required this.title, required this.rows});
-
-  final String title;
-  final List<StatusRow> rows;
-
-  @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-
-    return DecoratedBox(
-      decoration: BoxDecoration(
-        color: theme.colorScheme.surface,
-        border: Border.all(color: theme.colorScheme.outlineVariant),
-        borderRadius: BorderRadius.circular(8),
-      ),
-      child: Padding(
-        padding: const EdgeInsets.all(14),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text(title, style: theme.textTheme.titleMedium),
-            const SizedBox(height: 10),
-            for (final row in rows)
-              Padding(
-                padding: const EdgeInsets.symmetric(vertical: 6),
-                child: Row(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Icon(row.icon, size: 20, color: theme.colorScheme.primary),
-                    const SizedBox(width: 10),
-                    Expanded(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text(row.label, style: theme.textTheme.labelLarge),
-                          const SizedBox(height: 2),
-                          Text(
-                            row.value,
-                            style: theme.textTheme.bodyMedium?.copyWith(
-                              color: theme.colorScheme.onSurfaceVariant,
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-          ],
-        ),
-      ),
     );
   }
 }

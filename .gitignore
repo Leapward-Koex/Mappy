@@ -1,4 +1,5 @@
 # Local credentials and signing material
+apps/mobile-companion/android/.signing/
 **/local.properties
 **/key.properties
 **/*.keystore

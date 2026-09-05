@@ -15,6 +15,16 @@ internal data class NativeRouteCalculation(
     val detail: String? = null
 )
 
+private data class RouteOperationToken(
+    val generation: Int,
+    val savedSlot: Int?
+)
+
+internal data class ReservedActiveRouteOperation(
+    val request: PersistedActiveRouteRequest,
+    val generation: Int
+)
+
 internal class MappyWatchCommandDispatcher(
     context: Context,
     val apiKeyStore: ApiKeyStore,
@@ -34,6 +44,7 @@ internal class MappyWatchCommandDispatcher(
     private var fullRoutePoints: List<Map<*, *>> = emptyList()
     private var routeSteps: List<Map<*, *>> = emptyList()
     private var routeGeneration = 0
+    private var currentRouteOperation: RouteOperationToken? = null
     private var activeRequest: PersistedActiveRouteRequest? = NativeActiveRoutePersistence.read(appContext)
     private var recoveryJob: Job? = null
     private var mapSettingsGeneration = 0
@@ -70,34 +81,72 @@ internal class MappyWatchCommandDispatcher(
             else -> listOf(errorMessage(ERROR_ROUTE_PROVIDER, intValue(message, KEY_CMD) ?: 0, "Unsupported watch command."))
         }
 
-    fun startNavigation(request: Map<*, *>): NativeRouteCalculation {
-        val destination = (request["destination"] as? Map<*, *>)?.let(::parseNativeRouteEndpoint)
-            ?: return failure(ERROR_DESTINATION_NOT_CONFIGURED, "Destination is missing or invalid.")
-        val originPolicy = if (stringValue(request, "originPolicy") == ROUTE_ORIGIN_EXPLICIT_PLACE) {
-            ROUTE_ORIGIN_EXPLICIT_PLACE
-        } else {
-            ROUTE_ORIGIN_CURRENT_LOCATION
+    fun startNavigation(
+        request: Map<*, *>,
+        reservedGeneration: Int? = null
+    ): NativeRouteCalculation {
+        return try {
+            val destination = (request["destination"] as? Map<*, *>)?.let(::parseNativeRouteEndpoint)
+                ?: return failure(ERROR_DESTINATION_NOT_CONFIGURED, "Destination is missing or invalid.")
+            val originPolicy = if (stringValue(request, "originPolicy") == ROUTE_ORIGIN_EXPLICIT_PLACE) {
+                ROUTE_ORIGIN_EXPLICIT_PLACE
+            } else {
+                ROUTE_ORIGIN_CURRENT_LOCATION
+            }
+            val origin = if (originPolicy == ROUTE_ORIGIN_EXPLICIT_PLACE) {
+                (request["origin"] as? Map<*, *>)?.let(::parseNativeRouteEndpoint)
+                    ?: return failure(ERROR_DESTINATION_NOT_CONFIGURED, "Route origin is missing or invalid.")
+            } else null
+            val routeRequest = PersistedActiveRouteRequest(
+                requestId = allocateRequestId(),
+                originPolicy = originPolicy,
+                origin = origin,
+                destination = destination,
+                travelMode = travelProtocolValue(intValue(request, "travelMode") ?: settings.travelMode),
+                savedSlot = null,
+                updatedAtMillis = System.currentTimeMillis()
+            )
+            computeRoute(
+                routeRequest,
+                persistOnSuccess = true,
+                reservedGeneration = reservedGeneration
+            )
+        } finally {
+            reservedGeneration?.let(::finishRouteOperation)
         }
-        val origin = if (originPolicy == ROUTE_ORIGIN_EXPLICIT_PLACE) {
-            (request["origin"] as? Map<*, *>)?.let(::parseNativeRouteEndpoint)
-                ?: return failure(ERROR_DESTINATION_NOT_CONFIGURED, "Route origin is missing or invalid.")
-        } else null
-        val routeRequest = PersistedActiveRouteRequest(
-            requestId = allocateRequestId(),
-            originPolicy = originPolicy,
-            origin = origin,
-            destination = destination,
-            travelMode = travelProtocolValue(intValue(request, "travelMode") ?: settings.travelMode),
-            savedSlot = null,
-            updatedAtMillis = System.currentTimeMillis()
-        )
-        return computeRoute(routeRequest, persistOnSuccess = true)
     }
 
-    fun rerouteActiveRoute(): NativeRouteCalculation {
-        val request = synchronized(lock) { activeRequest } ?: NativeActiveRoutePersistence.read(appContext)
-            ?: return failure(ERROR_DESTINATION_NOT_CONFIGURED, "No active route target.")
-        return computeRoute(request.copy(updatedAtMillis = System.currentTimeMillis()), persistOnSuccess = true)
+    fun reservePhoneRouteOperation(): Int = synchronized(lock) {
+        reserveRouteOperationLocked(
+            savedSlot = null,
+            cancelRecovery = true
+        )
+    }
+
+    fun reserveActiveRouteOperation(): ReservedActiveRouteOperation? {
+        val request = readAuthoritativeActiveRequest() ?: return null
+        return synchronized(lock) {
+            if (activeRequest != request) return@synchronized null
+            ReservedActiveRouteOperation(
+                request = request,
+                generation = reserveRouteOperationLocked(
+                    savedSlot = request.savedSlot,
+                    cancelRecovery = true
+                )
+            )
+        }
+    }
+
+    fun rerouteActiveRoute(): NativeRouteCalculation =
+        rerouteActiveRoute(reserveActiveRouteOperation())
+
+    fun rerouteActiveRoute(operation: ReservedActiveRouteOperation?): NativeRouteCalculation {
+        operation ?: return failure(ERROR_DESTINATION_NOT_CONFIGURED, "No active route target.")
+        return computeRoute(
+            operation.request.copy(updatedAtMillis = System.currentTimeMillis()),
+            persistOnSuccess = true,
+            reservedGeneration = operation.generation
+        )
     }
 
     fun clearRouteMessages(): List<Map<String, Any?>> {
@@ -106,17 +155,18 @@ internal class MappyWatchCommandDispatcher(
     }
 
     fun clearActiveRoute(requestId: Int? = null): Boolean {
-        synchronized(lock) {
-            if (requestId != null && activeRequest?.requestId != null && activeRequest?.requestId != requestId) {
-                return false
+        return synchronized(lock) {
+            val persisted = NativeActiveRoutePersistence.read(appContext)
+            if (requestId != null && persisted != null && persisted.requestId != requestId) {
+                return@synchronized false
             }
-            routeGeneration++
-            routePoints = emptyList()
-            fullRoutePoints = emptyList()
-            routeSteps = emptyList()
-            activeRequest = null
+            if (!NativeActiveRoutePersistence.clear(appContext)) {
+                return@synchronized false
+            }
+            clearCachedActiveRouteLocked()
+            emitActiveRouteChanged(null)
+            true
         }
-        return NativeActiveRoutePersistence.clear(appContext, requestId)
     }
 
     fun setDestination(raw: Map<*, *>): List<Map<String, Any?>> {
@@ -124,13 +174,15 @@ internal class MappyWatchCommandDispatcher(
             errorMessage(category, command, text, offset)
         }
         update.error?.let { return listOf(it) }
-        synchronized(lock) {
+        val clearsActiveRoute = synchronized(lock) {
+            invalidateSavedRouteOperationLocked(update.slot)
             destinations.removeAll { it.slot == update.slot }
             update.destination?.let { destinations.add(it) }
             destinations.sortBy { it.slot }
             persistNativeDestinations(appContext, destinations)
-            if (activeRequest?.savedSlot == update.slot) clearActiveRoute()
+            activeRequest?.savedSlot == update.slot
         }
+        if (clearsActiveRoute) clearActiveRoute()
         return listOf(destinationsMessage())
     }
 
@@ -149,12 +201,14 @@ internal class MappyWatchCommandDispatcher(
             if (!seen.add(update.slot)) return listOf(errorMessage(ERROR_DESTINATION_NOT_CONFIGURED, CMD_DESTINATIONS, "Duplicate destination.", update.slot))
             update.destination?.let(parsed::add)
         }
-        synchronized(lock) {
+        val clearsActiveRoute = synchronized(lock) {
+            invalidateSavedRouteOperationLocked()
             destinations.clear()
             destinations.addAll(parsed.sortedBy { it.slot })
             persistNativeDestinations(appContext, destinations)
-            if (activeRequest?.savedSlot != null) clearActiveRoute()
+            activeRequest?.savedSlot != null
         }
+        if (clearsActiveRoute) clearActiveRoute()
         return listOf(destinationsMessage())
     }
 
@@ -191,7 +245,11 @@ internal class MappyWatchCommandDispatcher(
             ))
         }
 
-    fun activeRequestId(): Int? = synchronized(lock) { activeRequest?.requestId }
+    fun currentActiveRoute(): Map<String, Any?>? {
+        return readAuthoritativeActiveRequest()?.toChannelMap()
+    }
+
+    fun activeRequestId(): Int? = readAuthoritativeActiveRequest()?.requestId
 
     fun hasBackgroundWork(): Boolean = synchronized(lock) { recoveryJob?.isActive == true }
 
@@ -233,9 +291,17 @@ internal class MappyWatchCommandDispatcher(
         synchronized(lock) {
             activeRequest = request
             if (recoveryJob?.isActive == true) return
+            val generation = reserveRouteOperationLocked(
+                savedSlot = request.savedSlot,
+                cancelRecovery = false
+            )
             recoveryJob = scope.launch {
                 eventSink(mapOf("event" to "routeRehydrationStarted", KEY_REQUEST_ID to request.requestId))
-                val result = computeRoute(request, persistOnSuccess = true)
+                val result = computeRoute(
+                    request,
+                    persistOnSuccess = true,
+                    reservedGeneration = generation
+                )
                 if (result.successful) enqueueLater(result.messages)
                 eventSink(mapOf(
                     "event" to if (result.successful) "routeRehydrationSucceeded" else "routeRehydrationFailed",
@@ -295,63 +361,95 @@ internal class MappyWatchCommandDispatcher(
         return computeRoute(request, persistOnSuccess = true).messages
     }
 
-    private fun computeRoute(request: PersistedActiveRouteRequest, persistOnSuccess: Boolean): NativeRouteCalculation {
-        val originCoordinates = if (request.originPolicy == ROUTE_ORIGIN_EXPLICIT_PLACE) {
-            val origin = request.origin ?: return failure(ERROR_DESTINATION_NOT_CONFIGURED, "Route origin is missing.", request.requestId)
-            origin.latitude to origin.longitude
-        } else {
-            val location = WatchLocationStreamer.awaitCurrentLocation(appContext, ROUTE_LOCATION_FRESH_MILLIS, LOCATION_REQUEST_TIMEOUT_MILLIS)
-                ?: return failure(ERROR_LOCATION_UNAVAILABLE, "Waiting for GPS.", request.requestId)
-            location.latitude to location.longitude
-        }
-        val generation = synchronized(lock) { ++routeGeneration }
-        val route = mapTilesProvider.computeRoute(
-            originLatitude = originCoordinates.first,
-            originLongitude = originCoordinates.second,
-            destinationAddress = request.destination.address,
-            destinationLatitude = request.destination.latitude,
-            destinationLongitude = request.destination.longitude,
-            travelMode = providerTravelMode(request.travelMode),
-            language = DEFAULT_LANGUAGE,
-            region = DEFAULT_REGION
-        )
-        if (route["ok"] != true) {
-            val category = intValue(route, KEY_ERROR_CATEGORY) ?: ERROR_ROUTE_PROVIDER
-            val detail = route["detail"] as? String ?: if (category == ERROR_NO_ROUTE) "No route found." else "Route provider failed."
-            if (category == ERROR_NO_ROUTE) clearActiveRoute(request.requestId)
-            return NativeRouteCalculation(
-                request.requestId,
-                if (category == ERROR_NO_ROUTE) listOf(
-                    routePointsMessage(emptyList(), generation, request, false),
-                    errorMessage(category, CMD_ROUTE_REQUEST, detail, request.savedSlot ?: 0, extra = mapOf(KEY_REQUEST_ID to request.requestId))
-                ) else listOf(errorMessage(category, CMD_ROUTE_REQUEST, detail, request.savedSlot ?: 0, extra = mapOf(KEY_REQUEST_ID to request.requestId))),
-                false, category, detail
+    private fun computeRoute(
+        request: PersistedActiveRouteRequest,
+        persistOnSuccess: Boolean,
+        reservedGeneration: Int? = null
+    ): NativeRouteCalculation {
+        val generation = reservedGeneration ?: reserveRouteOperation(request)
+        return try {
+            if (!synchronized(lock) { isRouteOperationCurrentLocked(generation) }) {
+                return supersededRouteCalculation(request.requestId)
+            }
+            val originCoordinates = if (request.originPolicy == ROUTE_ORIGIN_EXPLICIT_PLACE) {
+                val origin = request.origin
+                    ?: return failure(ERROR_DESTINATION_NOT_CONFIGURED, "Route origin is missing.", request.requestId)
+                origin.latitude to origin.longitude
+            } else {
+                val location = WatchLocationStreamer.awaitCurrentLocation(
+                    appContext,
+                    ROUTE_LOCATION_FRESH_MILLIS,
+                    LOCATION_REQUEST_TIMEOUT_MILLIS
+                ) ?: return failure(ERROR_LOCATION_UNAVAILABLE, "Waiting for GPS.", request.requestId)
+                location.latitude to location.longitude
+            }
+            val route = mapTilesProvider.computeRoute(
+                originLatitude = originCoordinates.first,
+                originLongitude = originCoordinates.second,
+                destinationAddress = request.destination.address,
+                destinationLatitude = request.destination.latitude,
+                destinationLongitude = request.destination.longitude,
+                travelMode = providerTravelMode(request.travelMode),
+                language = DEFAULT_LANGUAGE,
+                region = DEFAULT_REGION
             )
+            if (route["ok"] != true) {
+                val category = intValue(route, KEY_ERROR_CATEGORY) ?: ERROR_ROUTE_PROVIDER
+                val detail = route["detail"] as? String
+                    ?: if (category == ERROR_NO_ROUTE) "No route found." else "Route provider failed."
+                if (category == ERROR_NO_ROUTE) {
+                    when (clearActiveRouteForOperation(generation)) {
+                        null -> return supersededRouteCalculation(request.requestId)
+                        false -> return failure(
+                            ERROR_ROUTE_PROVIDER,
+                            "No route was found, but the previous active route could not be cleared.",
+                            request.requestId
+                        )
+                        true -> Unit
+                    }
+                }
+                return NativeRouteCalculation(
+                    request.requestId,
+                    if (category == ERROR_NO_ROUTE) listOf(
+                        routePointsMessage(emptyList(), generation, request, false),
+                        errorMessage(category, CMD_ROUTE_REQUEST, detail, request.savedSlot ?: 0, extra = mapOf(KEY_REQUEST_ID to request.requestId))
+                    ) else listOf(errorMessage(category, CMD_ROUTE_REQUEST, detail, request.savedSlot ?: 0, extra = mapOf(KEY_REQUEST_ID to request.requestId))),
+                    false, category, detail
+                )
+            }
+            val points = listOfMaps(route["routePoints"])
+            if (points.size < 2) return failure(ERROR_ROUTE_PROVIDER, "Route geometry is invalid.", request.requestId)
+            val fullPoints = listOfMaps(route["fullRoutePoints"]).ifEmpty { points }
+            val steps = listOfMaps(route["steps"])
+            synchronized(lock) {
+                if (!isRouteOperationCurrentLocked(generation)) {
+                    return supersededRouteCalculation(request.requestId)
+                }
+                val updatedRequest = request.copy(updatedAtMillis = System.currentTimeMillis())
+                if (persistOnSuccess && !NativeActiveRoutePersistence.write(appContext, updatedRequest)) {
+                    return failure(ERROR_ROUTE_PROVIDER, "Could not save the active route.", request.requestId)
+                }
+                routePoints = points
+                fullRoutePoints = fullPoints
+                routeSteps = steps
+                activeRequest = updatedRequest
+                settings = settings.copy(travelMode = request.travelMode)
+                saveNativeDisplaySettings(appContext, settings)
+                if (persistOnSuccess) emitActiveRouteChanged(updatedRequest)
+            }
+            val messages = mutableListOf(routePointsMessage(points, generation, request, steps.isNotEmpty()))
+            navStepsMessage(0, generation, request.requestId)?.let(messages::add)
+            NativeRouteCalculation(request.requestId, messages, true)
+        } finally {
+            finishRouteOperation(generation)
         }
-        val points = listOfMaps(route["routePoints"])
-        if (points.size < 2) return failure(ERROR_ROUTE_PROVIDER, "Route geometry is invalid.", request.requestId)
-        val fullPoints = listOfMaps(route["fullRoutePoints"]).ifEmpty { points }
-        val steps = listOfMaps(route["steps"])
-        synchronized(lock) {
-            if (generation != routeGeneration) return NativeRouteCalculation(request.requestId, emptyList(), false, detail = "Route superseded.")
-            routePoints = points
-            fullRoutePoints = fullPoints
-            routeSteps = steps
-            activeRequest = request.copy(updatedAtMillis = System.currentTimeMillis())
-            settings = settings.copy(travelMode = request.travelMode)
-            saveNativeDisplaySettings(appContext, settings)
-            if (persistOnSuccess) NativeActiveRoutePersistence.write(appContext, activeRequest!!)
-        }
-        val messages = mutableListOf(routePointsMessage(points, generation, request, steps.isNotEmpty()))
-        navStepsMessage(0, generation, request.requestId)?.let(messages::add)
-        return NativeRouteCalculation(request.requestId, messages, true)
     }
 
     private fun activeRouteMessages(): List<Map<String, Any?>> {
+        val authoritativeRequest = readAuthoritativeActiveRequest() ?: return emptyList()
         val snapshot = synchronized(lock) {
-            val request = activeRequest ?: return emptyList()
             if (routePoints.size < 2) return emptyList()
-            Triple(request, routeGeneration, routePoints to routeSteps)
+            Triple(authoritativeRequest, routeGeneration, routePoints to routeSteps)
         }
         val messages = mutableListOf(routePointsMessage(snapshot.third.first, snapshot.second, snapshot.first, snapshot.third.second.isNotEmpty()))
         navStepsMessage(0, snapshot.second, snapshot.first.requestId)?.let(messages::add)
@@ -359,14 +457,14 @@ internal class MappyWatchCommandDispatcher(
     }
 
     private fun handleNavSteps(message: Map<*, *>): List<Map<String, Any?>> {
-        val request = synchronized(lock) { activeRequest } ?: return emptyList()
+        val request = readAuthoritativeActiveRequest() ?: return emptyList()
         val requestedId = intValue(message, KEY_REQUEST_ID)
         if (requestedId != null && requestedId != request.requestId) return emptyList()
         return listOfNotNull(navStepsMessage(intValue(message, KEY_BUTTON_ID) ?: 0, routeGeneration, request.requestId))
     }
 
     private fun handleRouteWindowRequest(message: Map<*, *>): List<Map<String, Any?>> {
-        val request = synchronized(lock) { activeRequest } ?: return emptyList()
+        val request = readAuthoritativeActiveRequest() ?: return emptyList()
         val requestedId = intValue(message, KEY_REQUEST_ID)
         if (requestedId != null && requestedId != request.requestId) return emptyList()
         val generation = intValue(message, KEY_TOTAL_BYTES) ?: routeGeneration
@@ -382,6 +480,101 @@ internal class MappyWatchCommandDispatcher(
             KEY_REQUEST_ID to request.requestId,
             KEY_CHUNK_DATA to encodeRoutePoints(points.take(MAX_ROUTE_POINTS))
         )))
+    }
+
+    private fun readAuthoritativeActiveRequest(): PersistedActiveRouteRequest? {
+        return synchronized(lock) {
+            val persisted = NativeActiveRoutePersistence.read(appContext)
+            if (persisted == null && !NativeActiveRoutePersistence.clear(appContext)) {
+                return@synchronized activeRequest
+            }
+            val notifyClear = activeRequest != null && persisted == null
+            reconcileActiveRouteLocked(persisted)
+            if (notifyClear) emitActiveRouteChanged(null)
+            persisted
+        }
+    }
+
+    private fun reconcileActiveRouteLocked(persisted: PersistedActiveRouteRequest?) {
+        if (activeRequest == persisted) return
+        invalidateRouteOperationLocked()
+        routePoints = emptyList()
+        fullRoutePoints = emptyList()
+        routeSteps = emptyList()
+        activeRequest = persisted
+    }
+
+    private fun clearCachedActiveRouteLocked() {
+        invalidateRouteOperationLocked()
+        routePoints = emptyList()
+        fullRoutePoints = emptyList()
+        routeSteps = emptyList()
+        activeRequest = null
+    }
+
+    private fun reserveRouteOperation(request: PersistedActiveRouteRequest): Int =
+        synchronized(lock) {
+            reserveRouteOperationLocked(
+                savedSlot = request.savedSlot,
+                cancelRecovery = true
+            )
+        }
+
+    private fun reserveRouteOperationLocked(
+        savedSlot: Int?,
+        cancelRecovery: Boolean
+    ): Int {
+        routeGeneration++
+        currentRouteOperation = RouteOperationToken(routeGeneration, savedSlot)
+        if (cancelRecovery) {
+            recoveryJob?.cancel()
+            recoveryJob = null
+        }
+        return routeGeneration
+    }
+
+    private fun finishRouteOperation(generation: Int) {
+        synchronized(lock) {
+            if (currentRouteOperation?.generation == generation) {
+                currentRouteOperation = null
+            }
+        }
+    }
+
+    private fun isRouteOperationCurrentLocked(generation: Int): Boolean =
+        routeGeneration == generation && currentRouteOperation?.generation == generation
+
+    private fun invalidateRouteOperationLocked() {
+        routeGeneration++
+        currentRouteOperation = null
+        recoveryJob?.cancel()
+        recoveryJob = null
+    }
+
+    private fun invalidateSavedRouteOperationLocked(slot: Int? = null) {
+        val operation = currentRouteOperation ?: return
+        if (operation.savedSlot == null || (slot != null && operation.savedSlot != slot)) return
+        invalidateRouteOperationLocked()
+    }
+
+    private fun clearActiveRouteForOperation(generation: Int): Boolean? {
+        return synchronized(lock) {
+            if (!isRouteOperationCurrentLocked(generation)) return@synchronized null
+            if (!NativeActiveRoutePersistence.clear(appContext)) return@synchronized false
+            clearCachedActiveRouteLocked()
+            emitActiveRouteChanged(null)
+            true
+        }
+    }
+
+    private fun supersededRouteCalculation(requestId: Int) =
+        NativeRouteCalculation(requestId, emptyList(), false, detail = "Route superseded.")
+
+    private fun emitActiveRouteChanged(request: PersistedActiveRouteRequest?) {
+        eventSink(mapOf(
+            "event" to "activeRouteChanged",
+            "activeRoute" to request?.toChannelMap()
+        ))
     }
 
     private fun routePointsMessage(points: List<Map<*, *>>, generation: Int, request: PersistedActiveRouteRequest, expectsSteps: Boolean): Map<String, Any?> =

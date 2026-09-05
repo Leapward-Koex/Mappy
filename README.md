@@ -20,6 +20,8 @@ location, provider access, routing, tile generation, settings, and diagnostics.
 The app is backend-free: the user supplies a Google Maps Platform API key, and
 the Android companion performs map, route, tile, location, and diagnostic work
 locally. The current implementation includes the native Android bridge, BYOK
-provider path, Flutter welcome/Navigate/Status/Setup UI, watch transport, map
-tile/routing workers, diagnostics, and local tests. Final release signing and
-hardware/device acceptance remain release gates.
+provider path, a three-tab Flutter interface (Navigate, Saved, and Settings),
+focused setup and permission recovery, active-route restoration, watch
+transport, a one-time first-run setup checklist, map tile/routing workers,
+diagnostics, and local tests. Final
+release signing and hardware/device acceptance remain release gates.

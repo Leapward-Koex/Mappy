@@ -4,6 +4,7 @@ import 'package:flutter/services.dart';
 
 import 'location_bridge.dart';
 import 'provider_bridge.dart';
+import 'watch_phone_worker.dart';
 
 enum BridgeSetupState { ready, providerRequired, locationRequired, unavailable }
 
@@ -52,6 +53,7 @@ class BridgeLocationStreamStatus {
     required this.streaming,
     required this.providers,
     required this.permissionState,
+    this.locationAccessStatus = const LocationAccessStatus.unavailable(),
     required this.headingAvailable,
     this.lastFixAge,
     required this.lastFixFresh,
@@ -62,6 +64,7 @@ class BridgeLocationStreamStatus {
       streaming = false,
       providers = const [],
       permissionState = LocationPermissionState.unavailable,
+      locationAccessStatus = const LocationAccessStatus.unavailable(),
       headingAvailable = false,
       lastFixAge = null,
       lastFixFresh = false;
@@ -70,6 +73,7 @@ class BridgeLocationStreamStatus {
   final bool streaming;
   final List<String> providers;
   final LocationPermissionState permissionState;
+  final LocationAccessStatus locationAccessStatus;
   final bool headingAvailable;
   final Duration? lastFixAge;
   final bool lastFixFresh;
@@ -93,13 +97,22 @@ class BridgeLocationStreamStatus {
     }
     final data = Map<Object?, Object?>.from(raw);
     final lastFixAgeMillis = _asInt(data['lastFixAgeMillis']);
+    final permissionState = BridgeStatus._permissionStateFromName(
+      data['permissionState'] as String?,
+    );
+    final locationAccessStatus = data.containsKey('locationAccessStatus')
+        ? LocationAccessStatus.fromMethodChannel(data['locationAccessStatus'])
+        : LocationAccessStatus.fromLegacy(
+            permissionState,
+            backgroundRequired: _asBool(data['backgroundLocationRequired']),
+            backgroundGranted: _asBool(data['backgroundLocationGranted']),
+          );
     return BridgeLocationStreamStatus(
       requested: _asBool(data['requested']) ?? false,
       streaming: _asBool(data['streaming']) ?? false,
       providers: _stringList(data['providers']),
-      permissionState: BridgeStatus._permissionStateFromName(
-        data['permissionState'] as String?,
-      ),
+      permissionState: permissionState,
+      locationAccessStatus: locationAccessStatus,
       headingAvailable: _asBool(data['headingAvailable']) ?? false,
       lastFixAge: lastFixAgeMillis == null
           ? null
@@ -177,7 +190,10 @@ class ShareRoutingStatus {
       state == 'activeRoute' ||
       state == 'unsupported' ||
       state == 'noRoute' ||
-      state == 'error';
+      state == 'error' ||
+      state == 'launchFailed' ||
+      state == 'protocolMismatch' ||
+      state == 'queuedUnconfirmed';
 
   String get title {
     switch (state) {
@@ -199,6 +215,12 @@ class ShareRoutingStatus {
         return 'Unsupported Share';
       case 'error':
         return 'Share Route Problem';
+      case 'launchFailed':
+        return 'Watch Could Not Open';
+      case 'protocolMismatch':
+        return 'Watch Update Required';
+      case 'queuedUnconfirmed':
+        return 'Route Queued';
       default:
         return 'Google Maps Share';
     }
@@ -211,6 +233,11 @@ class ShareRoutingStatus {
         'unsupported' => 'This share is not supported.',
         'noRoute' => 'No route was found.',
         'error' => 'The shared route could not be started.',
+        'launchFailed' => 'The route is ready, but the watch app did not open.',
+        'protocolMismatch' =>
+          'Update the phone and watch apps together before navigating.',
+        'queuedUnconfirmed' =>
+          'The route is ready on the phone, but the watch did not confirm it.',
         _ => 'Working on the shared Google Maps item.',
       };
 
@@ -302,6 +329,7 @@ class BridgeStatus {
     required this.inFlight,
     required this.setupState,
     required this.permissionState,
+    this.locationAccessStatus = const LocationAccessStatus.unavailable(),
     required this.notificationPermissionState,
     required this.providerStatus,
     this.diagnosticCount = 0,
@@ -324,6 +352,7 @@ class BridgeStatus {
       inFlight = false,
       setupState = BridgeSetupState.unavailable,
       permissionState = LocationPermissionState.unavailable,
+      locationAccessStatus = const LocationAccessStatus.unavailable(),
       notificationPermissionState = NotificationPermissionState.unavailable,
       providerStatus = const ProviderStatus.notConfigured(),
       diagnosticCount = 0,
@@ -344,6 +373,7 @@ class BridgeStatus {
   final bool inFlight;
   final BridgeSetupState setupState;
   final LocationPermissionState permissionState;
+  final LocationAccessStatus locationAccessStatus;
   final NotificationPermissionState notificationPermissionState;
   final ProviderStatus providerStatus;
   final int diagnosticCount;
@@ -415,6 +445,7 @@ class BridgeStatus {
     bool? inFlight,
     BridgeSetupState? setupState,
     LocationPermissionState? permissionState,
+    LocationAccessStatus? locationAccessStatus,
     NotificationPermissionState? notificationPermissionState,
     ProviderStatus? providerStatus,
     int? diagnosticCount,
@@ -436,6 +467,10 @@ class BridgeStatus {
           permissionState ??
           locationStream?.permissionState ??
           this.permissionState,
+      locationAccessStatus:
+          locationAccessStatus ??
+          locationStream?.locationAccessStatus ??
+          this.locationAccessStatus,
       notificationPermissionState:
           notificationPermissionState ?? this.notificationPermissionState,
       providerStatus: providerStatus ?? this.providerStatus,
@@ -463,6 +498,20 @@ class BridgeStatus {
         ? Map<Object?, Object?>.from(data['locationStream'] as Map)
         : const <Object?, Object?>{};
     final lastFixAgeMillis = _asInt(locationStream['lastFixAgeMillis']);
+    final permissionState = _permissionStateFromName(
+      data['permissionState'] as String?,
+    );
+    final locationAccessStatus = data.containsKey('locationAccessStatus')
+        ? LocationAccessStatus.fromMethodChannel(data['locationAccessStatus'])
+        : LocationAccessStatus.fromLegacy(
+            permissionState,
+            backgroundRequired: _asBool(
+              locationStream['backgroundLocationRequired'],
+            ),
+            backgroundGranted: _asBool(
+              locationStream['backgroundLocationGranted'],
+            ),
+          );
 
     return BridgeStatus(
       registered:
@@ -488,9 +537,8 @@ class BridgeStatus {
       inFlight:
           _asBool(data['inFlight']) ?? _asBool(watch['inFlight']) ?? false,
       setupState: _setupStateFromName(data['setupState'] as String?),
-      permissionState: _permissionStateFromName(
-        data['permissionState'] as String?,
-      ),
+      permissionState: permissionState,
+      locationAccessStatus: locationAccessStatus,
       notificationPermissionState: _notificationPermissionStateFromName(
         data['notificationPermissionState'] as String?,
       ),
@@ -602,6 +650,9 @@ class BridgeEvent {
     this.status,
     this.providerStatus,
     this.locationStream,
+    this.locationAccessStatus,
+    this.activeRoute,
+    this.activeRouteMalformed = false,
     this.shareStatus,
     this.command,
     this.result,
@@ -622,6 +673,9 @@ class BridgeEvent {
   final BridgeStatus? status;
   final ProviderStatus? providerStatus;
   final BridgeLocationStreamStatus? locationStream;
+  final LocationAccessStatus? locationAccessStatus;
+  final WatchActiveRoute? activeRoute;
+  final bool activeRouteMalformed;
   final ShareRoutingStatus? shareStatus;
   final int? command;
   final String? result;
@@ -645,6 +699,19 @@ class BridgeEvent {
     final data = Map<Object?, Object?>.from(raw);
     final type = data['event'] as String? ?? 'unknown';
     final timestampMillis = BridgeStatus._asInt(data['timestampMillis']);
+    WatchActiveRoute? activeRoute;
+    var activeRouteMalformed = false;
+    if (type == 'activeRouteChanged') {
+      if (!data.containsKey('activeRoute')) {
+        activeRouteMalformed = true;
+      } else if (data['activeRoute'] != null) {
+        try {
+          activeRoute = WatchActiveRoute.fromChannelMap(data['activeRoute']);
+        } on FormatException {
+          activeRouteMalformed = true;
+        }
+      }
+    }
 
     return BridgeEvent(
       type: type,
@@ -657,6 +724,11 @@ class BridgeEvent {
       locationStream: data.containsKey('locationStream')
           ? BridgeLocationStreamStatus.fromMethodChannel(data['locationStream'])
           : null,
+      locationAccessStatus: data.containsKey('locationAccessStatus')
+          ? LocationAccessStatus.fromMethodChannel(data['locationAccessStatus'])
+          : null,
+      activeRoute: activeRoute,
+      activeRouteMalformed: activeRouteMalformed,
       shareStatus: type == 'shareStatus'
           ? ShareRoutingStatus.fromEventChannel(data)
           : null,
@@ -680,11 +752,19 @@ class BridgeEvent {
 }
 
 abstract class BridgeRepository {
+  const BridgeRepository();
+
   Future<BridgeStatus> getBridgeStatus();
+
+  Future<int> getSetupChecklistVersion() async => 0;
+
+  Future<bool> setSetupChecklistVersion(int version) async => false;
 
   Future<BridgeStatus> startWatchApp();
 
   Future<BridgeStatus> requestNotificationPermission();
+
+  Future<bool> openNotificationSettings() async => false;
 
   Future<Map<String, Object?>> exportDiagnostics();
 
@@ -693,7 +773,7 @@ abstract class BridgeRepository {
   Stream<BridgeEvent> get events;
 }
 
-class NativeBridgeRepository implements BridgeRepository {
+class NativeBridgeRepository extends BridgeRepository {
   const NativeBridgeRepository();
 
   static const MethodChannel _methodChannel = MethodChannel(
@@ -714,6 +794,38 @@ class NativeBridgeRepository implements BridgeRepository {
       return const BridgeStatus.unavailable();
     } on PlatformException {
       return const BridgeStatus.unavailable();
+    }
+  }
+
+  @override
+  Future<int> getSetupChecklistVersion() async {
+    try {
+      final result = await _methodChannel.invokeMethod<Object?>(
+        'getSetupChecklistVersion',
+      );
+      return result is int && result >= 0 ? result : 0;
+    } on MissingPluginException {
+      return 0;
+    } on PlatformException {
+      return 0;
+    }
+  }
+
+  @override
+  Future<bool> setSetupChecklistVersion(int version) async {
+    if (version < 0) {
+      return false;
+    }
+    try {
+      final result = await _methodChannel.invokeMethod<Object?>(
+        'setSetupChecklistVersion',
+        <String, Object?>{'version': version},
+      );
+      return result is bool && result;
+    } on MissingPluginException {
+      return false;
+    } on PlatformException {
+      return false;
     }
   }
 
@@ -742,6 +854,20 @@ class NativeBridgeRepository implements BridgeRepository {
       return const BridgeStatus.unavailable();
     } on PlatformException {
       return const BridgeStatus.unavailable();
+    }
+  }
+
+  @override
+  Future<bool> openNotificationSettings() async {
+    try {
+      return await _methodChannel.invokeMethod<bool>(
+            'openNotificationSettings',
+          ) ??
+          false;
+    } on MissingPluginException {
+      return false;
+    } on PlatformException {
+      return false;
     }
   }
 

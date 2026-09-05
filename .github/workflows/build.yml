@@ -16,7 +16,9 @@ jobs:
   android:
     name: Android
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
+    env:
+      MAPPY_ANDROID_SDK_API_KEY: ${{ vars.MAPPY_ANDROID_SDK_API_KEY }}
     defaults:
       run:
         working-directory: apps/mobile-companion
@@ -54,15 +56,79 @@ jobs:
       - name: Run Android unit tests
         run: bash android/gradlew --project-dir android testDebugUnitTest --no-daemon
 
+      - name: Enable KVM for Android instrumentation tests
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | \
+            sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - name: Run Android Keystore instrumentation tests
+        uses: reactivecircus/android-emulator-runner@a421e43855164a8197daf9d8d40fe71c6996bb0d # v2.38.0
+        with:
+          api-level: 36
+          arch: x86_64
+          working-directory: apps/mobile-companion/android
+          script: >-
+            bash gradlew connectedDebugAndroidTest --no-daemon
+            -Pandroid.testInstrumentationRunnerArguments.class=com.leapwardkoex.mappy.ApiKeyStoreInstrumentedTest
+
+      - name: Configure protected Android release signing
+        if: github.event_name != 'pull_request'
+        env:
+          MAPPY_RELEASE_KEYSTORE_BASE64: ${{ secrets.MAPPY_RELEASE_KEYSTORE_BASE64 }}
+          MAPPY_RELEASE_STORE_PASSWORD: ${{ secrets.MAPPY_RELEASE_STORE_PASSWORD }}
+          MAPPY_RELEASE_KEY_ALIAS: ${{ secrets.MAPPY_RELEASE_KEY_ALIAS }}
+          MAPPY_RELEASE_KEY_PASSWORD: ${{ secrets.MAPPY_RELEASE_KEY_PASSWORD }}
+        run: |
+          if [[ -z "$MAPPY_RELEASE_KEYSTORE_BASE64" || \
+                -z "$MAPPY_RELEASE_STORE_PASSWORD" || \
+                -z "$MAPPY_RELEASE_KEY_ALIAS" || \
+                -z "$MAPPY_RELEASE_KEY_PASSWORD" ]]; then
+            echo "::error::All MAPPY_RELEASE_* signing secrets are required for release builds."
+            exit 1
+          fi
+
+          store_file="$RUNNER_TEMP/mappy-release.jks"
+          printf '%s' "$MAPPY_RELEASE_KEYSTORE_BASE64" | base64 --decode > "$store_file"
+          chmod 600 "$store_file"
+          keytool -list -v \
+            -keystore "$store_file" \
+            -storepass:env MAPPY_RELEASE_STORE_PASSWORD \
+            -alias "$MAPPY_RELEASE_KEY_ALIAS" \
+            > "$RUNNER_TEMP/mappy-release-certificate.txt"
+
+          if grep -Eiq '(Owner|Issuer):.*CN=Android Debug' "$RUNNER_TEMP/mappy-release-certificate.txt"; then
+            echo "::error::The configured release keystore contains an Android debug certificate."
+            exit 1
+          fi
+
+          printf 'MAPPY_RELEASE_STORE_FILE=%s\n' "$store_file" >> "$GITHUB_ENV"
+
       - name: Build release APK
+        if: github.event_name != 'pull_request'
+        env:
+          MAPPY_RELEASE_STORE_PASSWORD: ${{ secrets.MAPPY_RELEASE_STORE_PASSWORD }}
+          MAPPY_RELEASE_KEY_ALIAS: ${{ secrets.MAPPY_RELEASE_KEY_ALIAS }}
+          MAPPY_RELEASE_KEY_PASSWORD: ${{ secrets.MAPPY_RELEASE_KEY_PASSWORD }}
         run: flutter build apk --release --no-pub
 
+      - name: Verify embedded Android SDK key in release APK
+        if: github.event_name != 'pull_request'
+        run: python3 ../../tooling/verify-android-sdk-key.py build/app/outputs/flutter-apk/app-release.apk
+
+      - name: Build debug APK for pull request
+        if: github.event_name == 'pull_request'
+        run: flutter build apk --debug --no-pub
+
       - name: Prepare Android artifact
+        if: github.event_name != 'pull_request'
         run: |
           mkdir -p dist
           cp build/app/outputs/flutter-apk/app-release.apk dist/mappy-android.apk
 
       - name: Upload Android artifact
+        if: github.event_name != 'pull_request'
         uses: actions/upload-artifact@v7
         with:
           name: android-apk

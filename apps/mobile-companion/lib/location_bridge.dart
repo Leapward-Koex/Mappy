@@ -13,6 +13,205 @@ enum LocationPermissionState {
   unavailable,
 }
 
+enum ForegroundLocationState {
+  requestAvailable,
+  precise,
+  approximate,
+  denied,
+  permanentlyDenied,
+  unavailable,
+}
+
+extension ForegroundLocationStateDisplay on ForegroundLocationState {
+  bool get allowsLocation =>
+      this == ForegroundLocationState.precise ||
+      this == ForegroundLocationState.approximate;
+
+  bool get canRequest =>
+      this == ForegroundLocationState.requestAvailable ||
+      this == ForegroundLocationState.denied;
+
+  String get label {
+    switch (this) {
+      case ForegroundLocationState.requestAvailable:
+        return 'Request available';
+      case ForegroundLocationState.precise:
+        return 'Precise';
+      case ForegroundLocationState.approximate:
+        return 'Approximate';
+      case ForegroundLocationState.denied:
+        return 'Not allowed';
+      case ForegroundLocationState.permanentlyDenied:
+        return 'System settings required';
+      case ForegroundLocationState.unavailable:
+        return 'Unavailable';
+    }
+  }
+}
+
+/// Non-lossy view of Android location readiness.
+///
+/// Location services, foreground accuracy, and background access are separate
+/// concerns. Keeping them separate lets the UI offer the correct recovery
+/// action without guessing from a combined legacy enum value.
+class LocationAccessStatus {
+  const LocationAccessStatus({
+    required this.servicesEnabled,
+    required this.foregroundState,
+    required this.backgroundRequired,
+    required this.backgroundGranted,
+  });
+
+  const LocationAccessStatus.unavailable()
+    : servicesEnabled = false,
+      foregroundState = ForegroundLocationState.unavailable,
+      backgroundRequired = true,
+      backgroundGranted = false;
+
+  final bool servicesEnabled;
+  final ForegroundLocationState foregroundState;
+  final bool backgroundRequired;
+  final bool backgroundGranted;
+
+  bool get foregroundGranted => foregroundState.allowsLocation;
+
+  bool get backgroundReady => !backgroundRequired || backgroundGranted;
+
+  bool get isReady => servicesEnabled && foregroundGranted && backgroundReady;
+
+  /// Compatibility projection for code that has not migrated to the richer
+  /// status yet. New UI should read the individual fields instead.
+  LocationPermissionState get legacyPermissionState {
+    if (!foregroundGranted) {
+      return switch (foregroundState) {
+        ForegroundLocationState.requestAvailable =>
+          LocationPermissionState.requestAvailable,
+        ForegroundLocationState.denied => LocationPermissionState.denied,
+        ForegroundLocationState.permanentlyDenied =>
+          LocationPermissionState.permanentlyDenied,
+        ForegroundLocationState.unavailable =>
+          LocationPermissionState.unavailable,
+        ForegroundLocationState.precise ||
+        ForegroundLocationState.approximate => LocationPermissionState.unknown,
+      };
+    }
+    if (!servicesEnabled) {
+      return LocationPermissionState.serviceDisabled;
+    }
+    if (foregroundState == ForegroundLocationState.precise) {
+      return backgroundReady
+          ? LocationPermissionState.grantedAlwaysPrecise
+          : LocationPermissionState.grantedPrecise;
+    }
+    return backgroundReady
+        ? LocationPermissionState.grantedAlwaysApproximate
+        : LocationPermissionState.grantedApproximate;
+  }
+
+  static LocationAccessStatus fromMethodChannel(Object? raw) {
+    if (raw is! Map) {
+      return const LocationAccessStatus.unavailable();
+    }
+    final data = Map<Object?, Object?>.from(raw);
+    final foregroundState = data['foregroundState'];
+    return LocationAccessStatus(
+      servicesEnabled: data['servicesEnabled'] == true,
+      foregroundState: _foregroundStateFromName(
+        foregroundState is String ? foregroundState : null,
+      ),
+      backgroundRequired: data['backgroundRequired'] != false,
+      backgroundGranted: data['backgroundGranted'] == true,
+    );
+  }
+
+  static LocationAccessStatus fromLegacy(
+    LocationPermissionState state, {
+    bool? backgroundRequired,
+    bool? backgroundGranted,
+  }) {
+    final inferredBackgroundRequired = backgroundRequired ?? true;
+    switch (state) {
+      case LocationPermissionState.requestAvailable:
+        return LocationAccessStatus(
+          servicesEnabled: true,
+          foregroundState: ForegroundLocationState.requestAvailable,
+          backgroundRequired: inferredBackgroundRequired,
+          backgroundGranted: backgroundGranted ?? false,
+        );
+      case LocationPermissionState.grantedPrecise:
+        return LocationAccessStatus(
+          servicesEnabled: true,
+          foregroundState: ForegroundLocationState.precise,
+          backgroundRequired: inferredBackgroundRequired,
+          backgroundGranted: backgroundGranted ?? false,
+        );
+      case LocationPermissionState.grantedApproximate:
+        return LocationAccessStatus(
+          servicesEnabled: true,
+          foregroundState: ForegroundLocationState.approximate,
+          backgroundRequired: inferredBackgroundRequired,
+          backgroundGranted: backgroundGranted ?? false,
+        );
+      case LocationPermissionState.grantedAlwaysPrecise:
+        return LocationAccessStatus(
+          servicesEnabled: true,
+          foregroundState: ForegroundLocationState.precise,
+          backgroundRequired: inferredBackgroundRequired,
+          backgroundGranted: true,
+        );
+      case LocationPermissionState.grantedAlwaysApproximate:
+        return LocationAccessStatus(
+          servicesEnabled: true,
+          foregroundState: ForegroundLocationState.approximate,
+          backgroundRequired: inferredBackgroundRequired,
+          backgroundGranted: true,
+        );
+      case LocationPermissionState.denied:
+        return LocationAccessStatus(
+          servicesEnabled: true,
+          foregroundState: ForegroundLocationState.denied,
+          backgroundRequired: inferredBackgroundRequired,
+          backgroundGranted: backgroundGranted ?? false,
+        );
+      case LocationPermissionState.permanentlyDenied:
+        return LocationAccessStatus(
+          servicesEnabled: true,
+          foregroundState: ForegroundLocationState.permanentlyDenied,
+          backgroundRequired: inferredBackgroundRequired,
+          backgroundGranted: backgroundGranted ?? false,
+        );
+      case LocationPermissionState.serviceDisabled:
+        return LocationAccessStatus(
+          servicesEnabled: false,
+          foregroundState: ForegroundLocationState.unavailable,
+          backgroundRequired: inferredBackgroundRequired,
+          backgroundGranted: backgroundGranted ?? false,
+        );
+      case LocationPermissionState.unknown:
+      case LocationPermissionState.unavailable:
+        return const LocationAccessStatus.unavailable();
+    }
+  }
+
+  static ForegroundLocationState _foregroundStateFromName(String? name) {
+    switch (name) {
+      case 'requestAvailable':
+        return ForegroundLocationState.requestAvailable;
+      case 'precise':
+        return ForegroundLocationState.precise;
+      case 'approximate':
+        return ForegroundLocationState.approximate;
+      case 'denied':
+        return ForegroundLocationState.denied;
+      case 'permanentlyDenied':
+        return ForegroundLocationState.permanentlyDenied;
+      case 'unavailable':
+      default:
+        return ForegroundLocationState.unavailable;
+    }
+  }
+}
+
 extension LocationPermissionStateDisplay on LocationPermissionState {
   bool get allowsLocation =>
       this == LocationPermissionState.grantedPrecise ||
@@ -115,14 +314,26 @@ class LocationSnapshot {
 }
 
 abstract class LocationRepository {
+  const LocationRepository();
+
   Future<LocationPermissionState> getPermissionState();
 
   Future<LocationPermissionState> requestLocationPermission();
 
+  Future<LocationAccessStatus> getLocationAccessStatus() async =>
+      LocationAccessStatus.fromLegacy(await getPermissionState());
+
+  Future<LocationAccessStatus> requestForegroundLocationPermission() async =>
+      LocationAccessStatus.fromLegacy(await requestLocationPermission());
+
+  Future<bool> openAppLocationSettings() async => false;
+
+  Future<bool> openLocationServicesSettings() async => false;
+
   Future<LocationSnapshot?> getCurrentLocation({Duration? timeout});
 }
 
-class NativeLocationRepository implements LocationRepository {
+class NativeLocationRepository extends LocationRepository {
   const NativeLocationRepository();
 
   static const MethodChannel _channel = MethodChannel(
@@ -154,6 +365,42 @@ class NativeLocationRepository implements LocationRepository {
       return LocationPermissionState.unavailable;
     }
   }
+
+  @override
+  Future<LocationAccessStatus> getLocationAccessStatus() async {
+    try {
+      final result = await _channel.invokeMethod<Object?>(
+        'getLocationAccessStatus',
+      );
+      return LocationAccessStatus.fromMethodChannel(result);
+    } on MissingPluginException {
+      return const LocationAccessStatus.unavailable();
+    } on PlatformException {
+      return const LocationAccessStatus.unavailable();
+    }
+  }
+
+  @override
+  Future<LocationAccessStatus> requestForegroundLocationPermission() async {
+    try {
+      final result = await _channel.invokeMethod<Object?>(
+        'requestForegroundLocationPermission',
+      );
+      return LocationAccessStatus.fromMethodChannel(result);
+    } on MissingPluginException {
+      return const LocationAccessStatus.unavailable();
+    } on PlatformException {
+      return const LocationAccessStatus.unavailable();
+    }
+  }
+
+  @override
+  Future<bool> openAppLocationSettings() =>
+      _invokeSettingsAction('openAppLocationSettings');
+
+  @override
+  Future<bool> openLocationServicesSettings() =>
+      _invokeSettingsAction('openLocationServicesSettings');
 
   @override
   Future<LocationSnapshot?> getCurrentLocation({Duration? timeout}) async {
@@ -194,6 +441,16 @@ class NativeLocationRepository implements LocationRepository {
         return LocationPermissionState.unavailable;
       default:
         return LocationPermissionState.unknown;
+    }
+  }
+
+  static Future<bool> _invokeSettingsAction(String method) async {
+    try {
+      return await _channel.invokeMethod<bool>(method) ?? false;
+    } on MissingPluginException {
+      return false;
+    } on PlatformException {
+      return false;
     }
   }
 }

@@ -124,7 +124,11 @@ internal object WatchLocationStreamer {
             callback != null
         }
 
-    fun status(context: Context, permissionState: String): Map<String, Any?> {
+    fun status(
+        context: Context,
+        permissionState: String,
+        locationAccessStatus: Map<String, Any?>
+    ): Map<String, Any?> {
         val latest = synchronized(lock) { latestLocation?.let { Location(it) } }
         val ageMillis = latest?.let { System.currentTimeMillis() - it.time }
         return mapOf(
@@ -133,6 +137,7 @@ internal object WatchLocationStreamer {
             "providers" to listOf("fused"),
             "updateSource" to "fused",
             "permissionState" to permissionState,
+            "locationAccessStatus" to locationAccessStatus,
             "backgroundLocationGranted" to hasBackgroundLocation(context),
             "backgroundLocationRequired" to backgroundLocationPermissionApplies(),
             "headingAvailable" to (latest?.hasBearing() == true),
@@ -199,45 +204,63 @@ internal object WatchLocationStreamer {
         }
     }
 
-    fun openAppLocationSettings(context: Context) {
+    fun openAppLocationSettings(context: Context): Boolean {
         val intent = Intent(
             Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
             Uri.fromParts("package", context.packageName, null)
         ).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-        context.startActivity(intent)
+        return startSettingsActivity(context, intent)
+    }
+
+    fun openLocationServicesSettings(context: Context): Boolean {
+        val locationIntent = Intent(Settings.ACTION_LOCATION_SOURCE_SETTINGS)
+            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        if (startSettingsActivity(context, locationIntent)) {
+            return true
+        }
+        return startSettingsActivity(
+            context,
+            Intent(Settings.ACTION_SETTINGS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        )
+    }
+
+    fun locationAccessStatus(context: Context, wasForegroundRequested: Boolean): Map<String, Any?> {
+        val activity = context as? android.app.Activity
+        val foregroundState = resolveForegroundLocationState(
+            fineGranted = hasFineLocation(context),
+            coarseGranted = hasCoarseLocation(context),
+            wasRequested = wasForegroundRequested,
+            shouldShowFineRationale = activity?.shouldShowRequestPermissionRationale(
+                Manifest.permission.ACCESS_FINE_LOCATION
+            ) ?: true,
+            shouldShowCoarseRationale = activity?.shouldShowRequestPermissionRationale(
+                Manifest.permission.ACCESS_COARSE_LOCATION
+            ) ?: true
+        )
+        return linkedMapOf(
+            "servicesEnabled" to hasEnabledLocationProvider(context),
+            "foregroundState" to foregroundState,
+            "backgroundRequired" to backgroundLocationPermissionApplies(),
+            "backgroundGranted" to hasBackgroundLocation(context)
+        )
     }
 
     fun permissionState(context: Context, wasForegroundRequested: Boolean): String {
-        val locationEnabled = hasEnabledLocationProvider(context)
-        val fine = hasFineLocation(context)
-        val coarse = hasCoarseLocation(context)
-        val background = hasBackgroundLocation(context)
-
-        if (fine) {
-            return when {
-                !locationEnabled -> "serviceDisabled"
-                background -> "grantedAlwaysPrecise"
+        val access = locationAccessStatus(context, wasForegroundRequested)
+        return when (access["foregroundState"]) {
+            "precise" -> when {
+                access["servicesEnabled"] != true -> "serviceDisabled"
+                access["backgroundGranted"] == true -> "grantedAlwaysPrecise"
                 else -> "grantedPrecise"
             }
-        }
-        if (coarse) {
-            return when {
-                !locationEnabled -> "serviceDisabled"
-                background -> "grantedAlwaysApproximate"
+            "approximate" -> when {
+                access["servicesEnabled"] != true -> "serviceDisabled"
+                access["backgroundGranted"] == true -> "grantedAlwaysApproximate"
                 else -> "grantedApproximate"
             }
-        }
-        if (!wasForegroundRequested) {
-            return "requestAvailable"
-        }
-        return if (
-            context is android.app.Activity &&
-            !context.shouldShowRequestPermissionRationale(Manifest.permission.ACCESS_FINE_LOCATION) &&
-            !context.shouldShowRequestPermissionRationale(Manifest.permission.ACCESS_COARSE_LOCATION)
-        ) {
-            "permanentlyDenied"
-        } else {
-            "denied"
+            "requestAvailable" -> "requestAvailable"
+            "permanentlyDenied" -> "permanentlyDenied"
+            else -> "denied"
         }
     }
 
@@ -269,6 +292,14 @@ internal object WatchLocationStreamer {
                 }
             }
     }
+
+    private fun startSettingsActivity(context: Context, intent: Intent): Boolean =
+        try {
+            context.startActivity(intent)
+            true
+        } catch (_: Exception) {
+            false
+        }
 
     private fun startIfPossible(context: Context) {
         if (Looper.myLooper() != Looper.getMainLooper()) {

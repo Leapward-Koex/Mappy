@@ -85,20 +85,38 @@ internal class MappyWatchRuntime private constructor(context: Context) {
     fun enqueueAll(messages: List<Map<String, Any?>>) = bridge.enqueueAll(messages)
 
     fun startNavigation(request: Map<*, *>, onResult: (Map<String, Any?>) -> Unit) {
+        val operationGeneration = dispatcher.reservePhoneRouteOperation()
         launchTracked {
-            onResult(dispatchNavigation(dispatcher.startNavigation(request)))
+            onResult(
+                dispatchNavigation(
+                    dispatcher.startNavigation(
+                        request,
+                        reservedGeneration = operationGeneration
+                    )
+                )
+            )
         }
     }
 
     fun rerouteActiveRoute(onResult: (Map<String, Any?>) -> Unit) {
+        val operation = dispatcher.reserveActiveRouteOperation()
         launchTracked {
-            onResult(dispatchNavigation(dispatcher.rerouteActiveRoute()))
+            onResult(dispatchNavigation(dispatcher.rerouteActiveRoute(operation)))
         }
     }
 
+    fun activeRoute(): Map<String, Any?>? = dispatcher.currentActiveRoute()
+
     fun clearActiveRoute(): Map<String, Any?> {
         val requestId = dispatcher.activeRequestId() ?: 0
-        dispatcher.clearActiveRoute()
+        if (!dispatcher.clearActiveRoute()) {
+            return mapOf(
+                "responses" to emptyList<Map<String, Any?>>(),
+                "deliveryState" to "deliveryFailed",
+                "routeRequestId" to requestId,
+                "detail" to "The active route could not be cleared."
+            )
+        }
         val messages = listOf(watchMessage(CMD_ROUTE_CLEAR, mapOf(KEY_REQUEST_ID to requestId)))
         bridge.enqueueAll(messages)
         return mapOf(
@@ -264,8 +282,9 @@ internal class MappyWatchRuntime private constructor(context: Context) {
         val currentKey = runCatching { apiKeyStore.getPlaintextKey() }.getOrNull()
         val seeded = apiKeyStore.hasSeededDevelopmentKeyMarker()
         if (currentKey == null || (seeded && currentKey != developmentKey)) {
-            mapTilesProvider.clearProviderSessions()
-            apiKeyStore.storeSeededDevelopmentApiKey(developmentKey)
+            mapTilesProvider.mutateCredentialState {
+                apiKeyStore.storeSeededDevelopmentApiKey(developmentKey)
+            }
         }
     }
 
