@@ -71,7 +71,8 @@ data class GoogleHttpRequest(
     val url: String,
     val method: String = "GET",
     val headers: Map<String, String> = emptyMap(),
-    val body: ByteArray? = null
+    val body: ByteArray? = null,
+    val expectsBinary: Boolean = false
 )
 
 data class GoogleHttpResponse(
@@ -91,6 +92,14 @@ interface GoogleHttpClient {
         return execute(request).also {
             throwIfProviderOperationCancelled(isCancelled)
         }
+    }
+
+    fun execute(
+        request: GoogleHttpRequest,
+        isCancelled: () -> Boolean,
+        cancellation: TileCancellationToken?
+    ): GoogleHttpResponse = execute(request) {
+        isCancelled() || cancellation?.isCancelled == true
     }
 
     fun cancelAll() = Unit
@@ -126,8 +135,15 @@ class UrlGoogleHttpClient(
     override fun execute(
         request: GoogleHttpRequest,
         isCancelled: () -> Boolean
+    ): GoogleHttpResponse = execute(request, isCancelled, null)
+
+    override fun execute(
+        request: GoogleHttpRequest,
+        isCancelled: () -> Boolean,
+        cancellation: TileCancellationToken?
     ): GoogleHttpResponse {
-        throwIfProviderOperationCancelled(isCancelled)
+        val requestCancelled = { isCancelled() || cancellation?.isCancelled == true }
+        throwIfProviderOperationCancelled(requestCancelled)
         val connection = connectionFactory(URL(request.url)).apply {
             connectTimeout = NETWORK_TIMEOUT_MILLIS
             readTimeout = NETWORK_TIMEOUT_MILLIS
@@ -140,13 +156,14 @@ class UrlGoogleHttpClient(
             }
         }
         activeConnections.add(connection)
+        val cancellationRegistration = cancellation?.register { connection.disconnect() }
 
         return try {
-            throwIfProviderOperationCancelled(isCancelled)
+            throwIfProviderOperationCancelled(requestCancelled)
             request.body?.let { body ->
                 connection.outputStream.use { it.write(body) }
             }
-            throwIfProviderOperationCancelled(isCancelled)
+            throwIfProviderOperationCancelled(requestCancelled)
             val httpStatus = connection.responseCode
             val stream = if (httpStatus in 200..299) {
                 connection.inputStream
@@ -160,18 +177,19 @@ class UrlGoogleHttpClient(
             } ?: ByteArray(0)
             GoogleHttpResponse(
                 httpStatus = httpStatus,
-                bodyText = bytes.toString(Charsets.UTF_8),
+                bodyText = if (request.expectsBinary && httpStatus in 200..299) "" else bytes.toString(Charsets.UTF_8),
                 bodyBytes = bytes
             ).also {
-                throwIfProviderOperationCancelled(isCancelled)
+                throwIfProviderOperationCancelled(requestCancelled)
             }
         } catch (exception: Exception) {
             // disconnect() commonly surfaces as a transport IOException. Preserve the
             // stronger cancellation signal so stale work cannot publish a failure after
             // the credential has been removed or replaced.
-            throwIfProviderOperationCancelled(isCancelled)
+            throwIfProviderOperationCancelled(requestCancelled)
             throw exception
         } finally {
+            cancellationRegistration?.close()
             activeConnections.remove(connection)
             connection.disconnect()
         }

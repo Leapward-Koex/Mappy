@@ -8,6 +8,8 @@
   error contracts.
 - `MAP_TILE_PIPELINE_MVP.md`: phone-generated raster map tile pipeline for the
   Mappy MVP.
+- `TILE_PERFORMANCE_RESULTS.md`: protocol-v4 implementation, measured Android/
+  watch results, and remaining physical Bluetooth acceptance.
 - `MAP_ORIENTATION_SETTING_SPEC.md`: north-up versus face-forward centered-map
   orientation preference, follow/manual-browse behavior, and projection
   contract.

@@ -26,7 +26,6 @@ AppTimer *s_tile_request_watchdog_timer;
 bool s_outbox_busy;
 int32_t s_outbox_cmd;
 int32_t s_next_request_id;
-int s_theme_mode;
 bool s_has_gps;
 GRect s_screen_bounds;
 Layer *s_map_layer;
@@ -302,7 +301,6 @@ static void reset_fixture(void) {
   s_outbox_busy = false;
   s_outbox_cmd = 0;
   s_next_request_id = 1;
-  s_theme_mode = 0;
   s_has_gps = true;
   s_screen_bounds.size.w = 200;
   s_screen_bounds.size.h = 200;

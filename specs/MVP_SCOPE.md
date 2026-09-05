@@ -71,7 +71,7 @@ MVP data ownership:
 - The phone performs geocoding, route fetches, route simplification, map tile
   generation, settings persistence, and diagnostic log storage.
 - The watch stores only small persisted settings needed for fast startup, such
-  as theme, backlight mode, travel mode, and last display state.
+  as backlight mode, travel mode, and last display state.
 - The Android native companion bridge owns Pebble AppMessage transport for MVP.
 - The Flutter app owns user-facing configuration, key validation UX,
   saved-location editing, permission prompts, and diagnostics export.
@@ -271,7 +271,6 @@ MVP settings:
 - Notification permission: requested only when Android requires it for the
   watch-session foreground-service notification.
 - Display units: imperial/metric.
-- Theme: auto/day/night.
 - Backlight: auto/always on, if supported by the watch app.
 - Centered map orientation: north-up or face-forward.
 - Diagnostic logging toggle and log export.
@@ -351,7 +350,7 @@ MVP is not complete until these pass:
    request when needed.
 9. Reroute: user-triggered reroute refreshes the active route or shows an error
    without crashing.
-10. Settings: theme, units, backlight, and centered map orientation choices survive
+10. Settings: units, backlight, and centered map orientation choices survive
     restart where supported.
 11. Offline/failure: tile, route, and GPS failures produce visible degraded
     states and bounded retry behavior.

@@ -12,6 +12,48 @@ void main() {
         .setMockMethodCallHandler(providerChannel, null);
   });
 
+  test('watch tile method carries codec geometry and native metrics', () async {
+    final payload = Uint8List.fromList([0xf1, 0xe1]);
+    MethodCall? request;
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(providerChannel, (call) async {
+          request = call;
+          return {
+            'ok': true,
+            'providerStatus': {'configured': true, 'validationState': 'valid'},
+            'world_x': 123,
+            'world_y': 456,
+            'tile_zoom': 16,
+            'width': 72,
+            'height': 84,
+            'compression_format': 4,
+            'total_bytes': payload.length,
+            'chunk_data': payload,
+            'preparation_metrics': {
+              'encoding_ms': 0.5,
+              'encoded_cache_hit': true,
+            },
+          };
+        });
+    final result = await const NativeProviderRepository().getWatchTile(
+      worldX: 123,
+      worldY: 456,
+      zoom: 16,
+    );
+    expect(request!.method, 'getWatchTile');
+    expect(request!.arguments, {'worldX': 123, 'worldY': 456, 'zoom': 16});
+    expect(result.ok, isTrue);
+    expect(result.width, 72);
+    expect(result.height, 84);
+    expect(result.compressionFormat, 4);
+    expect(result.chunkData, payload);
+    expect(result.totalBytes, payload.length);
+    expect(result.preparationMetrics, {
+      'encoding_ms': 0.5,
+      'encoded_cache_hit': true,
+    });
+  });
+
   test(
     'native provider calls do not accept Android identity header overrides',
     () async {

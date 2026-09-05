@@ -2,23 +2,6 @@
 
 // Tile-affecting settings handlers from the phone protocol.
 
-void apply_theme(DictionaryIterator *iter) {
-  Tuple *mode_tuple = dict_find(iter, MESSAGE_KEY_button_id);
-  int next_theme = mode_tuple ? mode_tuple->value->int32 : 0;
-  if (next_theme < 0 || next_theme > 2) {
-    next_theme = 0;
-  }
-  if (next_theme != s_theme_mode) {
-    s_theme_mode = next_theme;
-    persist_write_int(PERSIST_THEME, s_theme_mode);
-    invalidate_tiles_with_reason(TileInvalidateTheme);
-    queue_visible_tiles();
-    if (s_map_layer) {
-      layer_mark_dirty(s_map_layer);
-    }
-  }
-}
-
 void apply_map_settings(DictionaryIterator *iter) {
   Tuple *width_tuple = dict_find(iter, MESSAGE_KEY_width);
   Tuple *height_tuple = dict_find(iter, MESSAGE_KEY_height);

@@ -116,6 +116,24 @@ def main() -> int:
     expect_equal("Dart message-key names", dart_key_names, set(canonical_keys))
     expect_equal("Dart commands", dart_commands, canonical_commands)
 
+    # Protocol v4 activates the formerly reserved codec key. All runtimes must
+    # agree even though they have different naming conventions.
+    expect_equal("watch protocol version", int(re.search(r"#define WATCH_PROTOCOL_VERSION (\d+)", c_header).group(1)), 4)
+    expect_equal("Android protocol version", int(re.search(r"WATCH_PROTOCOL_VERSION = (\d+)", kotlin).group(1)), 4)
+    expect_equal("Dart protocol version", int(re.search(r"watchProtocolVersion = (\d+)", dart).group(1)), 4)
+    expected_codecs = {"RLE": 1, "PACKED": 2, "LZ4_PACKED": 3, "LZ4_RLE": 4}
+    kotlin_codecs = {name: int(value) for name, value in re.findall(r"TILE_COMPRESSION_([A-Z0-9_]+) = (\d+)", kotlin)}
+    expect_equal("Android tile codecs", kotlin_codecs, expected_codecs)
+    c_codec = read("apps/pebble-watch/src/c/tile_codec.h")
+    c_codec_names = {"Rle": "RLE", "Packed": "PACKED", "Lz4Packed": "LZ4_PACKED", "Lz4Rle": "LZ4_RLE"}
+    c_codecs = {c_codec_names[name]: int(value) for name, value in re.findall(r"TileCompression([A-Za-z0-9]+) = (\d+)", c_codec)}
+    expect_equal("watch tile codecs", c_codecs, expected_codecs)
+    dart_codec_block = re.search(r"abstract final class WatchTileCompression \{(.*?)\n\}", dart, re.S)
+    if dart_codec_block is None:
+        fail("Dart tile codec constants were not found")
+    dart_codecs = {camel_to_upper_snake(name): int(value) for name, value in re.findall(r"static const ([A-Za-z0-9]+) = (\d+);", dart_codec_block.group(1))}
+    expect_equal("Dart tile codecs", dart_codecs, expected_codecs)
+
     protocol_spec = read("specs/shared/PROTOCOL_MVP.md")
     documented_keys = {
         name: int(value)

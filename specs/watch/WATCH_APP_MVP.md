@@ -115,7 +115,6 @@ On init:
 1. Initialize windows/layers.
 2. Initialize AppMessage with inbox size at least 4,096 bytes.
 3. Load persisted settings:
-   - theme mode,
    - travel mode,
    - backlight mode,
     - centered map orientation,
@@ -128,7 +127,6 @@ On init:
 
 ```text
 cmd         = CMD_INIT (101)
-tile_zoom   = theme mode
 button_id   = travel mode
 total_bytes = backlight mode
 chunk_offset = centered map orientation
@@ -157,7 +155,6 @@ The watch must handle these MVP inbound commands:
 | `CMD_ROUTE_POINTS` | Replace active route polyline or clear route on zero points. |
 | `CMD_NAV_STEPS` | Store nav-step chunk and update current instruction cache. |
 | `CMD_ROUTE_CLEAR` | Clear route, steps, route status, and route error. |
-| `CMD_THEME` | Store theme, clear/re-request visible tile cache. |
 | `CMD_TRAVEL_MODE` | Store selected/default travel mode. |
 | `CMD_UNITS` | Store display units. |
 | `CMD_MAP_SETTINGS` | Clear/re-request visible tile cache after phone-side map source or rendered tile size changes. |
@@ -187,7 +184,6 @@ The watch sends:
 | `CMD_ROUTE_REQUEST` | User selects saved-location shortcut or reroute. |
 | `CMD_NAV_STEPS` | Watch needs next nav-step chunk. |
 | `CMD_ROUTE_CLEAR` | User exits active navigation, or the watch finishes a trip after local destination arrival. |
-| `CMD_THEME` | User changes theme on watch, if watch UI exposes it. |
 | `CMD_TRAVEL_MODE` | User changes travel mode on watch. If an active route uses a different mode, queue an active-route reroute using the new mode. |
 | `CMD_MAP_ORIENTATION` | User changes centered map orientation on watch, if watch UI exposes it. |
 | `CMD_TILE_ANIMATION` | User changes tile animation on watch, if watch UI exposes it. |
@@ -256,7 +252,7 @@ satisfy an unavoidable byte-budget shortfall is not requested again until it
 leaves the viewport. This keeps pathological imagery stable instead of cycling
 continuously between request and eviction.
 
-Theme, zoom, or `CMD_MAP_SETTINGS` changes invalidate encoded-color cache
+Zoom or `CMD_MAP_SETTINGS` changes invalidate encoded-color cache
 entries because phone palette selection or source tile generation changes the
 tile bytes. The watch should clear visible tile valid bits and re-request.
 
@@ -331,7 +327,7 @@ Map tile rendering:
 - Read packed nibbles as palette indexes.
 - Even source pixel index uses low nibble.
 - Odd source pixel index uses high nibble.
-- Map through active day/night palette to GColor8.
+- Map through active day palette to GColor8.
 - Clip all writes to the layer bounds.
 - Use nearest-neighbor sampling during zoom transitions.
 - In facing-up GPS-follow mode, sample compressed tile pixels through
@@ -467,7 +463,7 @@ MVP menus:
   `CMD_DESTINATIONS` payload. Primary ad-hoc
   destination search happens in the phone app, not on the watch.
 - Active route actions: reroute, clear route, change travel mode.
-- Settings controls: theme, units, backlight, haptics, navigation glance,
+- Settings controls: units, backlight, haptics, navigation glance,
   centered map orientation, tile animation, and diagnostics status. Haptics and
   glance cycle independently through All, Turns, Arrival, and Off.
 
@@ -601,7 +597,6 @@ Error text must be byte-limited and null-terminated after validation.
 
 Watch persists:
 
-- theme mode,
 - travel mode,
 - backlight mode,
 - centered map orientation,
@@ -654,7 +649,6 @@ Watch does not persist:
 - Plausible short GPS movement is visually smoothed: facing-up GPS-follow
   glides the map under the centered current-location puck, and north-up glides
   the puck/cone display point. Large or stale movements snap.
-- Theme change clears visible tile cache and queues new requests.
 - `CMD_MAP_SETTINGS` clears visible tile cache and queues new requests without
   changing route, GPS, destination, or UI state.
 - Tile animation supports no animation, fade in, and fade + zoom as specified

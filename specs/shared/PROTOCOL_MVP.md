@@ -46,8 +46,8 @@ by domain so additions remain predictable and reviewable.
 | `width` | 51 | phone -> watch | Active rendered tile width in pixels for `CMD_TILE` and `CMD_MAP_SETTINGS`. |
 | `height` | 52 | phone -> watch | Active rendered tile height in pixels for `CMD_TILE` and `CMD_MAP_SETTINGS`. |
 | `bytes_per_row` | 53 | reserved | Reserved for future negotiated bitmap formats. |
-| `is_color` | 54 | both | Overloaded command-specific scalar: theme/display context for tile/button paths or travel mode for route request/route response paths. |
-| `compression_format` | 55 | reserved | Reserved; MVP tile format is implied by command. |
+| `is_color` | 54 | both | Command-specific scalar, including travel mode for route requests and responses; no tile theme context. |
+| `compression_format` | 55 | phone -> watch | Required on v4 tile chunks: 1 RLE, 2 packed4, 3 LZ4-packed4, 4 LZ4-RLE. |
 | `total_bytes` | 56 | both | Byte count or small scalar by command. |
 | `chunk_index` | 57 | both | Chunk index or requested step index by command. |
 | `chunk_offset` | 58 | both | Offset/distance scalar by command. |
@@ -57,13 +57,13 @@ by domain so additions remain predictable and reviewable.
 | `destination` | 62 | phone -> watch | Destination/display text. |
 | `world_x` | 63 | both | World-pixel x for map, route, and GPS messages. |
 | `world_y` | 64 | both | World-pixel y for map, route, and GPS messages. |
-| `tile_zoom` | 65 | both | Map zoom, route zoom, or startup theme sync by command. |
+| `tile_zoom` | 65 | both | Map zoom or route zoom by command. |
 | `gps_sequence` | 66 | phone -> watch | Optional monotonic `CMD_GPS` ordering sequence. |
 | `gps_elapsed_ms` | 67 | phone -> watch | Optional platform monotonic fix timestamp for diagnostics/reconciliation. |
 | `gps_accuracy_cm` | 68 | phone -> watch | Optional horizontal accuracy in centimeters, or `-1` if unavailable. |
 | `gps_provider` | 69 | phone -> watch | Optional short provider label, for example `gps` or `network`. |
 | `request_id` | 70 | both | Positive request identity for tile and route delivery; responses must echo it. |
-| `protocol_version` | 71 | both | Mandatory protocol version; current phone and watch require version 3. |
+| `protocol_version` | 71 | both | Mandatory protocol version; current phone and watch require version 4. |
 
 Phone and watch code use the same `world_x`, `world_y`, and `tile_zoom` names so
 wire data and internal geometry remain unambiguous.
@@ -77,7 +77,7 @@ MVP commands:
 | 101 | `CMD_INIT` | watch -> phone | Watch ready; sends persisted settings. |
 | 102 | `CMD_ERROR_STATE` | phone -> watch | Recoverable error/status message. |
 | 103 | `CMD_LOG_EVENT` | watch -> phone | Structured diagnostic event. |
-| 104 | `CMD_PHONE_READY` | phone -> watch | Confirms protocol version 3 and completes the startup handshake. |
+| 104 | `CMD_PHONE_READY` | phone -> watch | Confirms protocol version 4 and completes the startup handshake. |
 | 201 | `CMD_GPS` | phone -> watch | Current location as zoom-16 world pixels plus heading. |
 | 202 | `CMD_TILE_REQUEST` | watch -> phone | Request one map tile crop using the current negotiated rendered tile size. |
 | 203 | `CMD_TILE` | phone -> watch | Packed map tile crop with explicit width/height; may arrive in multiple chunks. |
@@ -94,7 +94,6 @@ MVP commands:
 | 307 | `CMD_ROUTE_WINDOW_POINTS` | phone -> watch | Packed high-detail route window for the active route generation. |
 | 308 | `CMD_ROUTE_APPLIED` | watch -> phone | Confirms route geometry and the first required navigation-step chunk were applied. |
 | 309 | `CMD_ROUTE_COMPLETE` | watch -> phone | Reports arrival and clears the matching persisted route request. |
-| 401 | `CMD_THEME` | both | Theme change or sync. |
 | 402 | `CMD_TRAVEL_MODE` | both | Travel mode setting. |
 | 403 | `CMD_UNITS` | phone -> watch | Display units. |
 | 404 | `CMD_BACKLIGHT` | phone -> watch | Backlight setting, if supported. |
@@ -117,21 +116,20 @@ Post-MVP features continue the grouped command ranges defined here.
 
 ## Lifecycle
 
-Protocol version 3 is mandatory. `CMD_INIT` and `CMD_PHONE_READY` both carry
-`protocol_version = 3`. A missing or different value is a terminal
+Protocol version 4 is mandatory. `CMD_INIT` and `CMD_PHONE_READY` both carry
+`protocol_version = 4`. A missing or different value is a terminal
 synchronization error for that session: the phone records a diagnostic and the
 watch displays an update-required state. There is no legacy fallback or payload
 downgrade.
 
 Startup:
 
-1. Watch initializes AppMessage and sends `CMD_INIT` with protocol version 3.
+1. Watch initializes AppMessage and sends `CMD_INIT` with protocol version 4.
 2. `CMD_INIT` includes persisted settings:
-   - `tile_zoom`: theme mode, `0` auto, `1` day, `2` night.
    - `button_id`: travel mode, `0` walk, `1` bike, `2` drive.
    - `total_bytes`: backlight mode, `0` auto, `1` always on.
    - `chunk_offset`: centered-map orientation, `0` north up, `1` facing up.
-3. Phone sends `CMD_PHONE_READY` with protocol version 3. Only this reply
+3. Phone sends `CMD_PHONE_READY` with protocol version 4. Only this reply
    completes watch initialization.
 4. Phone worker verifies that MVP prerequisites are available:
    - phone location permission,
@@ -147,7 +145,7 @@ Reconnect:
 - Phone must treat repeated init as idempotent.
 - Phone should resend current settings, destinations, latest GPS, and active
   route summary after reconnect.
-- Phone must not push stale theme/backlight values over watch-owned startup
+- Phone must not push stale backlight values over watch-owned startup
   values unless the user changed them in the mobile UI after reconnect.
 - Until matching phone-ready arrives, the watch retries INIT after 1, 2, 4, and
   8 seconds, then every 8 seconds while the app remains open. Message-begin and
@@ -224,7 +222,6 @@ Payload:
 | Key | Meaning |
 | --- | --- |
 | `button_id` | `1` zoom in, `-1` zoom out, other values reserved |
-| `is_color` | optional current theme mode |
 
 MVP decision:
 
@@ -259,7 +256,6 @@ Payload:
 | `world_x` | requested crop top-left world x |
 | `world_y` | requested crop top-left world y |
 | `tile_zoom` | requested zoom |
-| `is_color` | optional current theme/display mode |
 | `request_id` | positive monotonic request identity |
 
 The request geometry is the current `width` and `height` most recently supplied
@@ -282,10 +278,11 @@ Payload:
 | `tile_zoom` | crop zoom |
 | `width` | rendered tile width in pixels |
 | `height` | rendered tile height in pixels |
-| `total_bytes` | full packed tile byte length across all chunks |
+| `total_bytes` | transmitted payload byte length across all chunks |
+| `compression_format` | required integer: 1 RLE, 2 packed4, 3 LZ4-packed4, 4 LZ4-RLE |
 | `chunk_index` | zero-based tile chunk index |
 | `chunk_offset` | byte offset of `chunk_data` within the full packed tile |
-| `chunk_data` | tile RLE payload bytes for this chunk |
+| `chunk_data` | encoded payload bytes for this chunk |
 | `request_id` | exact request identity echoed from `CMD_TILE_REQUEST` |
 
 Tile format is specified in `MAP_TILE_PIPELINE_MVP.md`.
@@ -295,9 +292,9 @@ Watch assembly rules:
 - A default `54x63` tile may arrive as a single message with `chunk_index = 0`
   and `chunk_offset = 0`.
 - Larger rendered tiles may arrive as multiple `CMD_TILE` messages sharing the
-  same world x/y/zoom/width/height.
-- The watch must buffer chunks until `total_bytes` are assembled for that tile
-  key, then decode exactly one complete RLE payload.
+  same world x/y/zoom/width/height/compression format.
+- The watch incrementally decodes/copies chunks into its bounded scratch and
+  validates the complete selected format before allocating cache storage.
 - The watch rejects chunks and errors whose request ID does not match the newest
   outstanding request for that coordinate.
 - A tile error without a positive `request_id` is not a matching terminal
@@ -306,7 +303,7 @@ Watch assembly rules:
   different tile responses must not interleave; higher-priority non-tile
   messages may be delivered between chunks.
 - A logical response is keyed by x/y/zoom, request ID, dimensions, and
-  `total_bytes`. Its chunks use that key plus `chunk_index` and `chunk_offset`.
+  `total_bytes` and `compression_format`. Its chunks use that key plus `chunk_index` and `chunk_offset`.
   A newer request ID supersedes the complete older queued response, never an
   individual sibling chunk.
 - Chunk indices and offsets start at zero, remain contiguous, and cover exactly
@@ -563,7 +560,6 @@ without making another network call.
 
 | Command | Direction | Payload |
 | --- | --- | --- |
-| `CMD_THEME` | both | `button_id`: `0` auto, `1` day, `2` night |
 | `CMD_TRAVEL_MODE` | both | `button_id`: `0` walk, `1` bike, `2` drive |
 | `CMD_UNITS` | phone -> watch | `button_id`: `0` imperial, `1` metric |
 | `CMD_MAP_SETTINGS` | phone -> watch | `button_id`: invalidation reason, `width`/`height`: active rendered tile size, `total_bytes`: map settings generation |
@@ -574,7 +570,7 @@ without making another network call.
 | `CMD_HAPTIC_MODE` | both | `button_id`: `0` off, `1` turns, `2` arrival, `3` all |
 | `CMD_GLANCE_MODE` | both | `button_id`: `0` off, `1` turns, `2` arrival, `3` all |
 
-The watch may persist theme, travel mode, backlight, centered map orientation,
+The watch may persist travel mode, backlight, centered map orientation,
 tile animation, haptic mode, and glance mode for fast startup. The phone
 persists the user-visible settings and reconciles them after `CMD_INIT`. If the
 watch changes
@@ -608,7 +604,7 @@ Payload:
 
 The phone sends this command after a Flutter/user setting change has been
 persisted and after stale tile work has been cancelled or marked obsolete. The
-next `CMD_TILE_REQUEST` messages still carry only world x/y/zoom/theme context;
+next `CMD_TILE_REQUEST` messages still carry only world x/y/zoom context;
 the active rendered tile geometry is whatever `width`/`height` pair this
 command most recently supplied.
 

@@ -93,7 +93,6 @@ extern AppTimer *s_tile_request_watchdog_timer;
 extern bool s_outbox_busy;
 extern int32_t s_outbox_cmd;
 extern int32_t s_next_request_id;
-extern int s_theme_mode;
 extern bool s_has_gps;
 extern GRect s_screen_bounds;
 extern Layer *s_map_layer;

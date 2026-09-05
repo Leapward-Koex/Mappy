@@ -29,7 +29,7 @@ MVP screens:
 | API Key | Enter, validate, replace, and clear a Google API key. |
 | Permissions | Request/check foreground location permission and explain watch impact. |
 | Saved Locations | Optionally add, edit, and clear saved watch shortcuts. |
-| Settings | Units, travel mode, theme, backlight, map source, and rendered tile size preferences. |
+| Settings | Units, travel mode, backlight, map source, and rendered tile size preferences. |
 | Diagnostics | Recent events, cache controls, log export, and redaction status. |
 
 Navigation:
@@ -311,7 +311,6 @@ MVP controls:
 | --- | --- | --- |
 | Units | Imperial, metric | Phone UI pushed to watch |
 | Default travel mode | Drive, walk, bike | Phone and watch reconciled |
-| Theme | Auto/day, day, night | Phone and watch reconciled |
 | Backlight | System/default, keep on during app where supported | Watch/phone reconciled |
 | Haptics | All, turns, arrival, off | Watch/phone reconciled |
 | Navigation glance | All, turns, arrival, off | Watch/phone reconciled |
@@ -325,7 +324,6 @@ Rules:
 - Settings must persist locally.
 - Watch startup settings from `CMD_INIT` may initialize empty phone settings.
 - Explicit phone UI changes override and push to the watch.
-- Theme changes must invalidate affected tile caches.
 - Centered map orientation changes must call the normal display settings path
   and send `CMD_MAP_ORIENTATION`; they must not call `setMapTileSettings`,
   clear provider caches, or refresh the active route.

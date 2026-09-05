@@ -92,7 +92,7 @@ The native bridge exposes a small Flutter method/event channel API:
 | `startNavigation` | Flutter -> native | Start routing from current location or a resolved explicit origin to a resolved ad-hoc or saved-location target. |
 | `setDestinations` | Flutter -> native | Push normalized saved-location records. |
 | `setDestination` | Flutter -> native | Patch one normalized saved-location record. |
-| `setSettings` | Flutter -> native | Push theme, units, travel mode, backlight, centered map orientation, tile animation, haptics, and navigation glance. |
+| `setSettings` | Flutter -> native | Push units, travel mode, backlight, centered map orientation, tile animation, haptics, and navigation glance. |
 | `setMapTileSettings` | Flutter -> native | Push map source and rendered tile size. |
 | `requestLocationPermissionState` | Flutter -> native | Return permission state and prompt availability. |
 | `clearCaches` | Flutter -> native | Clear tile, route, or provider-validation cache/status. |
@@ -332,7 +332,6 @@ MVP settings:
 
 | Setting | Source of truth | Watch sync |
 | --- | --- | --- |
-| Theme auto/day/night | Phone UI, watch can report startup persisted value | `CMD_THEME` |
 | Units imperial/metric | Phone UI | `CMD_UNITS` |
 | Travel mode default | Phone UI, watch can change current mode | `CMD_TRAVEL_MODE` |
 | Backlight auto/always | Phone UI, watch can report startup persisted value | `CMD_BACKLIGHT` |
@@ -450,7 +449,7 @@ The tile worker implements `../shared/MAP_TILE_PIPELINE_MVP.md`:
   configuration with the user's key.
 - Reads pixels into a phone-local buffer.
 - Generates 54x63 watch crops.
-- Applies day/night palette mapping.
+- Applies day palette mapping.
 - RLE-encodes payloads.
 - Sends `CMD_TILE`.
 - Sends `CMD_ERROR_STATE` on setup/provider failures.
@@ -458,14 +457,14 @@ The tile worker implements `../shared/MAP_TILE_PIPELINE_MVP.md`:
 Cache requirements:
 
 - Source tile cache is bounded by count and memory.
-- Encoded watch tile cache is bounded and keyed by x/y/zoom/theme plus every map
+- Encoded watch tile cache is bounded and keyed by x/y/zoom plus every map
   tile setting that affects output bytes.
 - Cache clear control is exposed in diagnostics/settings.
 - Cache policy must respect current Google response headers and terms.
 - Tile worker state machine: idle, waiting_for_key, waiting_for_location,
   creating_session, loading_sources, encoding, sending, failed.
-- Duplicate tile requests are deduped by world x/y/zoom/theme.
-- Stale in-flight tile work is cancelled or ignored after zoom/theme changes.
+- Duplicate tile requests are deduped by world x/y/zoom.
+- Stale in-flight tile work is cancelled or ignored after zoom changes.
 - Oversized or repeatedly NACKed tiles send `CMD_ERROR_STATE` category 5 with
   failed command ID and tile x/y/z echoed as defined in
   `../shared/PROTOCOL_MVP.md`.
