@@ -47,7 +47,6 @@ CMD_ROUTE_REQUEST = 302
 CMD_ROUTE_POINTS = 303
 CMD_ROUTE_CLEAR = 304
 CMD_NAV_STEPS = 305
-CMD_THEME = 401
 CMD_TRAVEL_MODE = 402
 CMD_UNITS = 403
 CMD_BACKLIGHT = 404
@@ -85,25 +84,6 @@ DAY_PALETTE = [
     (66, 74, 72),
     (218, 96, 81),
     (25, 112, 109),
-]
-
-NIGHT_PALETTE = [
-    (22, 28, 34),
-    (32, 42, 51),
-    (42, 55, 65),
-    (55, 70, 80),
-    (62, 78, 71),
-    (72, 91, 79),
-    (86, 103, 86),
-    (93, 101, 110),
-    (105, 116, 124),
-    (123, 130, 135),
-    (145, 136, 105),
-    (167, 148, 103),
-    (190, 166, 111),
-    (98, 149, 171),
-    (202, 103, 91),
-    (228, 232, 220),
 ]
 
 DEFAULT_ORIGIN = (51.50740, -0.12780)
@@ -675,7 +655,6 @@ def write_pkjs(path: Path, fixture: dict[str, Any]) -> None:
   var CMD_GPS = {CMD_GPS};
   var CMD_TILE_REQUEST = {CMD_TILE_REQUEST};
   var CMD_TILE = {CMD_TILE};
-  var CMD_THEME = {CMD_THEME};
   var CMD_DESTINATIONS = {CMD_DESTINATIONS};
   var CMD_ROUTE_REQUEST = {CMD_ROUTE_REQUEST};
   var CMD_ROUTE_POINTS = {CMD_ROUTE_POINTS};
@@ -773,8 +752,7 @@ def write_pkjs(path: Path, fixture: dict[str, Any]) -> None:
   function sendStartupState() {{
     if (didSendStartupState) return;
     didSendStartupState = true;
-    enqueue('phone-ready', {{ cmd: CMD_PHONE_READY, protocol_version: 3 }});
-    enqueue('theme', {{ cmd: CMD_THEME, button_id: 1 }});
+    enqueue('phone-ready', {{ cmd: CMD_PHONE_READY, protocol_version: 4 }});
     enqueue('units', {{ cmd: CMD_UNITS, button_id: 1 }});
     enqueue('backlight', {{ cmd: CMD_BACKLIGHT, button_id: 0 }});
     enqueue('haptic-mode', {{ cmd: CMD_HAPTIC_MODE, button_id: 3 }});
@@ -796,8 +774,8 @@ def write_pkjs(path: Path, fixture: dict[str, Any]) -> None:
     }});
   }}
 
-  function tileKey(wx, wy, zoom, theme) {{
-    return wx + ':' + wy + ':' + zoom + ':' + theme;
+  function tileKey(wx, wy, zoom) {{
+    return wx + ':' + wy + ':' + zoom;
   }}
 
   function clamp(value, minValue, maxValue) {{
@@ -808,9 +786,8 @@ def write_pkjs(path: Path, fixture: dict[str, Any]) -> None:
     return origin + Math.round((value - origin) / step) * step;
   }}
 
-  function findFixtureTile(wx, wy, zoom, theme) {{
-    var direct = FIXTURE.tiles[tileKey(wx, wy, zoom, theme)] ||
-      FIXTURE.tiles[tileKey(wx, wy, zoom, 1)];
+  function findFixtureTile(wx, wy, zoom) {{
+    var direct = FIXTURE.tiles[tileKey(wx, wy, zoom)];
     if (direct) {{
       return {{ data: direct, fallback: false }};
     }}
@@ -824,8 +801,7 @@ def write_pkjs(path: Path, fixture: dict[str, Any]) -> None:
       FIXTURE.bank.minWorldX, FIXTURE.bank.maxWorldX);
     var snappedY = clamp(snapToGrid(clampedY, FIXTURE.bank.minWorldY, {WATCH_TILE_HEIGHT}),
       FIXTURE.bank.minWorldY, FIXTURE.bank.maxWorldY);
-    var fallback = FIXTURE.tiles[tileKey(snappedX, snappedY, FIXTURE.gps.zoom, theme)] ||
-      FIXTURE.tiles[tileKey(snappedX, snappedY, FIXTURE.gps.zoom, 1)];
+    var fallback = FIXTURE.tiles[tileKey(snappedX, snappedY, FIXTURE.gps.zoom)];
     if (!fallback) {{
       return null;
     }}
@@ -858,9 +834,8 @@ def write_pkjs(path: Path, fixture: dict[str, Any]) -> None:
       var wx = Number(pick(payload, 'world_x', KEY_WORLD_X) || 0);
       var wy = Number(pick(payload, 'world_y', KEY_WORLD_Y) || 0);
       var zoom = Number(pick(payload, 'tile_zoom', KEY_TILE_ZOOM) || FIXTURE.gps.zoom);
-      var theme = Number(pick(payload, 'is_color', KEY_IS_COLOR) || 1);
       var requestId = Number(pick(payload, 'request_id', KEY_REQUEST_ID) || 0);
-      var tileResult = findFixtureTile(wx, wy, zoom, theme);
+      var tileResult = findFixtureTile(wx, wy, zoom);
       if (!tileResult) {{
         enqueue('tile-outside-fixture', {{
           cmd: CMD_ERROR_STATE,
@@ -882,6 +857,7 @@ def write_pkjs(path: Path, fixture: dict[str, Any]) -> None:
         world_x: wx,
         world_y: wy,
         tile_zoom: zoom,
+        compression_format: 1,
         total_bytes: tileResult.data.length,
         request_id: requestId,
         chunk_data: tileResult.data
@@ -993,16 +969,11 @@ def build_fixture(args: argparse.Namespace) -> dict[str, Any]:
             key, package_name, cert_sha1, session_token, ROUTE_WORLD_ZOOM, tile_x, tile_y
         )
 
-    themes = [(1, DAY_PALETTE)]
-    if args.include_night:
-        themes.append((2, NIGHT_PALETTE))
-
     tiles: dict[str, list[int]] = {}
-    for theme, palette in themes:
-        print(f"Encoding {len(crop_origins)} watch crops for theme {theme}...")
-        for world_x, world_y in crop_origins:
-            key_name = f"{world_x}:{world_y}:{ROUTE_WORLD_ZOOM}:{theme}"
-            tiles[key_name] = crop_watch_tile(source_tiles, world_x, world_y, ROUTE_WORLD_ZOOM, palette)
+    print(f"Encoding {len(crop_origins)} day watch crops...")
+    for world_x, world_y in crop_origins:
+        key_name = f"{world_x}:{world_y}:{ROUTE_WORLD_ZOOM}"
+        tiles[key_name] = crop_watch_tile(source_tiles, world_x, world_y, ROUTE_WORLD_ZOOM, DAY_PALETTE)
 
     nav_payloads = {
         str(first): encode_nav_payload(steps, first)
@@ -1088,7 +1059,6 @@ def main(argv: list[str]) -> int:
     parser.add_argument("--bank-margin", type=int, default=4)
     parser.add_argument("--max-cols", type=int, default=17)
     parser.add_argument("--max-rows", type=int, default=17)
-    parser.add_argument("--include-night", action="store_true")
     parser.add_argument(
         "--json-output",
         default=str(root / "tooling" / "real-map-fixtures" / "generated" / "sample-fixture.json"),

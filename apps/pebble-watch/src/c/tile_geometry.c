@@ -9,8 +9,6 @@ int normalize_tile_animation_mode(int mode) {
 
 const char *tile_invalidation_reason_label(TileInvalidationReason reason) {
   switch (reason) {
-    case TileInvalidateTheme:
-      return "theme";
     case TileInvalidateMapSettings:
       return "settings";
     case TileInvalidateZoom:

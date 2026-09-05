@@ -99,7 +99,7 @@ Map-ready view shows:
 Current-location puck and view cone:
 
 - Must follow `CURRENT_LOCATION_VIEW_CONE_SPEC.md`.
-- Must be visible over both day and night tile palettes.
+- Must be visible over the day tile palette.
 - Must not cover the entire route line.
 - Should remain centered during normal GPS-follow mode.
 - Must ignore `CMD_GPS` updates whose `gps_sequence` is not newer than the last
@@ -236,7 +236,7 @@ Settings/actions menu:
 
 - Minimum actions: saved-location menu, travel mode, reroute when route active,
   clear route when route active.
-- The eight Settings rows are Theme, Units, Backlight, Haptics, Glance,
+- The seven Settings rows are Units, Backlight, Haptics, Glance,
   Orientation, Tile animation, and Diagnostics. Haptics and Glance cycle
   independently through All, Turns, Arrival, and Off.
 
@@ -287,21 +287,16 @@ Touch-capable map state:
 Shake/tap reroute is not required for MVP. If implemented later, it requires
 the background/navigation power spec.
 
-## Color And Theme
+## Color
 
-Themes:
-
-- Day.
-- Night.
-- Auto/day, where phone or watch setting chooses day/night state.
+The map and watch UI always use the fixed day appearance.
 
 Rules:
 
-- Theme changes clear visible tile cache and queue new tile requests.
 - Phone-side map source or rendered tile size changes clear visible tile cache
   through `CMD_MAP_SETTINGS` and queue new tile requests.
 - UI bands and text must remain legible over map colors.
-- Route line and marker colors must be visible in both day and night modes.
+- Route line and marker colors must be visible in day mode.
 - Do not rely on a single hue for all UI states.
 
 ## Error Text
@@ -342,7 +337,6 @@ Required screenshots on `emery`:
 - Active route with instruction.
 - No route found.
 - Route/provider error.
-- Night theme.
 
 Pixel/layout checks:
 
@@ -364,7 +358,6 @@ Unit tests:
 - Text truncation is byte-safe.
 - Menu rendering handles zero records, more than seven records, and the current
   payload order without empty placeholder rows.
-- Theme change invalidates tile cache.
 - `CMD_MAP_SETTINGS` invalidates tile cache without changing route or viewport.
 - `CMD_MAP_ORIENTATION` changes geographic projection without changing route,
   GPS, destination, or nav-step state.
@@ -379,8 +372,8 @@ Emulator tests:
 - Build/install on `emery`.
 - Capture screenshots for required states.
 - Use deterministic fixture screen positions to capture straight-edge,
-  near-corner, exact-corner, and recentered current-location states in day and
-  night themes.
+  near-corner, exact-corner, and recentered current-location states with day
+  rendering.
 - Replay mock phone messages for GPS, tiles, destinations, route, nav steps, and
   errors.
 - Verify 5x5 tile requests cover the target viewport.

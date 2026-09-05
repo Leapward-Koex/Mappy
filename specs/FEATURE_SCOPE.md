@@ -22,7 +22,6 @@ Status labels:
 | Map tiles | MVP | `shared/MAP_TILE_PIPELINE_MVP.md` | Use 54x63 crops, palette indexes, RLE payloads, and watch-side decode. |
 | Centered map orientation | MVP design | `shared/MAP_ORIENTATION_SETTING_SPEC.md` | Phone owns north-up/face-forward preference; manual browsing is north-up. |
 | Tile cache | MVP design | `watch/WATCH_APP_MVP.md` | Target a 5x5 visible grid on `emery`, subject to measured memory limits. |
-| Theme | MVP | `watch/WATCH_APP_MVP.md` | Theme changes clear tile cache and request fresh tiles. |
 | Backlight | MVP | `watch/WATCH_APP_MVP.md` | Watch reports startup value; phone can push user setting. |
 | Navigation feedback controls | MVP design | `watch/TURN_HAPTIC_ALERT_SPEC.md`, `shared/PROTOCOL_MVP.md` | Independent Haptics and Glance presets synchronize between watch and phone. |
 | Long-Select recenter | MVP design | `watch/WATCH_APP_MVP.md`, `watch/WATCH_TOUCH_INPUT_SPEC.md` | A 700 ms Select hold recenters the map without entering Actions. |

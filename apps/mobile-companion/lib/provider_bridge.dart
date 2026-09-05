@@ -506,6 +506,10 @@ class WatchTileResult {
     this.worldX,
     this.worldY,
     this.zoom,
+    this.width,
+    this.height,
+    this.compressionFormat,
+    this.preparationMetrics = const {},
     this.totalBytes,
     this.chunkData,
     this.detail,
@@ -518,6 +522,10 @@ class WatchTileResult {
   final int? worldX;
   final int? worldY;
   final int? zoom;
+  final int? width;
+  final int? height;
+  final int? compressionFormat;
+  final Map<String, Object?> preparationMetrics;
   final int? totalBytes;
   final Uint8List? chunkData;
   final String? detail;
@@ -540,6 +548,14 @@ class WatchTileResult {
       worldX: ProviderStatus._asInt(data['world_x']),
       worldY: ProviderStatus._asInt(data['world_y']),
       zoom: ProviderStatus._asInt(data['tile_zoom']),
+      width: ProviderStatus._asInt(data['width']),
+      height: ProviderStatus._asInt(data['height']),
+      compressionFormat: ProviderStatus._asInt(data['compression_format']),
+      preparationMetrics: data['preparation_metrics'] is Map
+          ? Map<String, Object?>.unmodifiable(
+              Map<String, Object?>.from(data['preparation_metrics'] as Map),
+            )
+          : const {},
       totalBytes: ProviderStatus._asInt(data['total_bytes']),
       chunkData: _asBytes(data['chunk_data']),
       detail: data['detail'] as String?,
@@ -1069,7 +1085,6 @@ abstract class ProviderRepository {
     required int worldX,
     required int worldY,
     required int zoom,
-    int themeMode = 0,
   });
 }
 
@@ -1383,17 +1398,11 @@ class NativeProviderRepository implements ProviderRepository {
     required int worldX,
     required int worldY,
     required int zoom,
-    int themeMode = 0,
   }) async {
     try {
       final result = await _channel.invokeMethod<Object?>(
         'getWatchTile',
-        <String, Object?>{
-          'worldX': worldX,
-          'worldY': worldY,
-          'zoom': zoom,
-          'themeMode': themeMode,
-        },
+        <String, Object?>{'worldX': worldX, 'worldY': worldY, 'zoom': zoom},
       );
       return WatchTileResult.fromMethodChannel(result);
     } on MissingPluginException {

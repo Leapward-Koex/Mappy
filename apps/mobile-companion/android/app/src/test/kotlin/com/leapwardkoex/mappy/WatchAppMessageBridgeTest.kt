@@ -15,14 +15,14 @@ class WatchAppMessageBridgeTest {
     @Test
     fun inboundWatchMessageIsAckedAndResponsesAreSentOneAtATime() {
         val transport = FakePebbleTransport()
-        val events = mutableListOf<Map<String, Any?>>()
+        val events = java.util.concurrent.CopyOnWriteArrayList<Map<String, Any?>>()
         val bridge = WatchAppMessageBridge(
             uuid,
             transport,
             eventSink = { events.add(it) }
         ) {
             listOf(
-                watchMessage(CMD_THEME, mapOf(KEY_BUTTON_ID to 1)),
+                watchMessage(CMD_UNITS, mapOf(KEY_BUTTON_ID to 1)),
                 watchMessage(CMD_GPS, mapOf(KEY_WORLD_X to 10, KEY_WORLD_Y to 20))
             )
         }
@@ -35,19 +35,19 @@ class WatchAppMessageBridgeTest {
 
         waitUntil { transport.sent.size == 1 }
         assertEquals(listOf(42), transport.acks)
-        assertEquals(CMD_THEME, transport.sent.single().command)
+        assertEquals(CMD_UNITS, transport.sent.single().command)
         assertTrue(events.any { it["event"] == "watchCommand" && it["command"] == CMD_INIT })
 
         transport.ack(transport.sent.single().transactionId)
         waitUntil { transport.sent.size == 2 }
         assertEquals(CMD_GPS, transport.sent.last().command)
-        assertTrue(events.any { it["event"] == "sendResult" && it["result"] == "ack" && it["command"] == CMD_THEME })
+        assertTrue(events.any { it["event"] == "sendResult" && it["result"] == "ack" && it["command"] == CMD_UNITS })
     }
 
     @Test
     fun inboundWatchLogForwardsBoundedSemanticFields() {
         val transport = FakePebbleTransport()
-        val events = mutableListOf<Map<String, Any?>>()
+        val events = java.util.concurrent.CopyOnWriteArrayList<Map<String, Any?>>()
         val bridge = WatchAppMessageBridge(
             uuid,
             transport,
@@ -98,7 +98,7 @@ class WatchAppMessageBridgeTest {
     @Test
     fun queuedSettingsArePrioritizedAheadOfTilesAfterCurrentSendSettles() {
         val settingsCommands = listOf(
-            CMD_THEME,
+            CMD_UNITS,
             CMD_TRAVEL_MODE,
             CMD_UNITS,
             CMD_BACKLIGHT,
@@ -179,13 +179,15 @@ class WatchAppMessageBridgeTest {
     }
 
     @Test
-    fun validInboundTrafficRestoresWatchReadiness() {
+    fun inboundTrafficWithoutHandshakeDoesNotEstablishProtocolReadiness() {
         val transport = FakePebbleTransport()
         val bridge = WatchAppMessageBridge(uuid, transport) { emptyList() }
 
         bridge.start()
         transport.deliverWatchData(10, watchMessage(CMD_BUTTON, mapOf(KEY_BUTTON_ID to 1)))
 
+        assertEquals(false, bridge.status()["watchReady"])
+        markWatchReady(transport)
         assertEquals(true, bridge.status()["watchReady"])
     }
 
@@ -207,7 +209,7 @@ class WatchAppMessageBridgeTest {
     @Test
     fun disconnectRequeuesInFlightMessageForReconnect() {
         val transport = FakePebbleTransport()
-        val events = mutableListOf<Map<String, Any?>>()
+        val events = java.util.concurrent.CopyOnWriteArrayList<Map<String, Any?>>()
         val bridge = WatchAppMessageBridge(
             uuid,
             transport,
@@ -239,7 +241,7 @@ class WatchAppMessageBridgeTest {
     @Test
     fun lostAckTimeoutRetriesAndDoesNotStallQueue() {
         val transport = FakePebbleTransport()
-        val events = mutableListOf<Map<String, Any?>>()
+        val events = java.util.concurrent.CopyOnWriteArrayList<Map<String, Any?>>()
         val bridge = WatchAppMessageBridge(
             uuid,
             transport,
@@ -275,11 +277,11 @@ class WatchAppMessageBridgeTest {
 
         bridge.start()
         markWatchReady(transport)
-        bridge.enqueue(watchMessage(CMD_THEME, mapOf(KEY_BUTTON_ID to 1)))
+        bridge.enqueue(watchMessage(CMD_UNITS, mapOf(KEY_BUTTON_ID to 1)))
         bridge.enqueue(watchMessage(CMD_UNITS, mapOf(KEY_BUTTON_ID to 1)))
 
         waitUntil { transport.sent.size >= 3 }
-        assertEquals(CMD_THEME, transport.sent[0].command)
+        assertEquals(CMD_UNITS, transport.sent[0].command)
         assertEquals(CMD_UNITS, transport.sent[1].command)
         assertEquals(CMD_UNITS, transport.sent[2].command)
         assertTrue(transport.sent[1].transactionId != transport.sent[2].transactionId)
@@ -345,7 +347,7 @@ class WatchAppMessageBridgeTest {
     @Test
     fun tileResponseDropsAfterThreeNacks() {
         val transport = FakePebbleTransport()
-        val events = mutableListOf<Map<String, Any?>>()
+        val events = java.util.concurrent.CopyOnWriteArrayList<Map<String, Any?>>()
         val bridge = WatchAppMessageBridge(
             uuid,
             transport,
@@ -379,7 +381,7 @@ class WatchAppMessageBridgeTest {
     @Test
     fun tileQueueOverflowReportsDroppedTile() {
         val transport = FakePebbleTransport(connected = false)
-        val events = mutableListOf<Map<String, Any?>>()
+        val events = java.util.concurrent.CopyOnWriteArrayList<Map<String, Any?>>()
         val bridge = WatchAppMessageBridge(
             uuid,
             transport,
@@ -404,7 +406,7 @@ class WatchAppMessageBridgeTest {
     @Test
     fun exactDuplicateTileTransferIsIgnoredWithoutDroppingSiblingChunks() {
         val transport = FakePebbleTransport(connected = false)
-        val events = mutableListOf<Map<String, Any?>>()
+        val events = java.util.concurrent.CopyOnWriteArrayList<Map<String, Any?>>()
         val bridge = WatchAppMessageBridge(
             uuid,
             transport,
@@ -424,7 +426,7 @@ class WatchAppMessageBridgeTest {
     @Test
     fun duplicateTransferAfterPartialAckDoesNotReappendAcknowledgedChunks() {
         val transport = FakePebbleTransport()
-        val events = mutableListOf<Map<String, Any?>>()
+        val events = java.util.concurrent.CopyOnWriteArrayList<Map<String, Any?>>()
         val bridge = WatchAppMessageBridge(
             uuid,
             transport,
@@ -454,7 +456,7 @@ class WatchAppMessageBridgeTest {
     @Test
     fun fiveChunkTileTransferIsSentContiguouslyAndInOrder() {
         val transport = FakePebbleTransport()
-        val events = mutableListOf<Map<String, Any?>>()
+        val events = java.util.concurrent.CopyOnWriteArrayList<Map<String, Any?>>()
         val bridge = WatchAppMessageBridge(
             uuid,
             transport,
@@ -517,7 +519,7 @@ class WatchAppMessageBridgeTest {
     @Test
     fun newerRequestReplacesTheWholeQueuedTransferForItsCoordinate() {
         val transport = FakePebbleTransport(connected = false)
-        val events = mutableListOf<Map<String, Any?>>()
+        val events = java.util.concurrent.CopyOnWriteArrayList<Map<String, Any?>>()
         val bridge = WatchAppMessageBridge(
             uuid,
             transport,
@@ -543,7 +545,7 @@ class WatchAppMessageBridgeTest {
     @Test
     fun olderLateRequestCannotSupersedeANewerQueuedTransfer() {
         val transport = FakePebbleTransport(connected = false)
-        val events = mutableListOf<Map<String, Any?>>()
+        val events = java.util.concurrent.CopyOnWriteArrayList<Map<String, Any?>>()
         val bridge = WatchAppMessageBridge(
             uuid,
             transport,
@@ -568,7 +570,7 @@ class WatchAppMessageBridgeTest {
     @Test
     fun olderLateRequestCannotSupersedeANewerInFlightTransfer() {
         val transport = FakePebbleTransport()
-        val events = mutableListOf<Map<String, Any?>>()
+        val events = java.util.concurrent.CopyOnWriteArrayList<Map<String, Any?>>()
         val bridge = WatchAppMessageBridge(
             uuid,
             transport,
@@ -594,7 +596,7 @@ class WatchAppMessageBridgeTest {
     @Test
     fun requestIdWrapTreatsOneAsNewerThanMaxPositiveId() {
         val transport = FakePebbleTransport(connected = false)
-        val events = mutableListOf<Map<String, Any?>>()
+        val events = java.util.concurrent.CopyOnWriteArrayList<Map<String, Any?>>()
         val bridge = WatchAppMessageBridge(
             uuid,
             transport,
@@ -618,7 +620,7 @@ class WatchAppMessageBridgeTest {
     @Test
     fun malformedTileBatchIsRejectedAtomically() {
         val transport = FakePebbleTransport(connected = false)
-        val events = mutableListOf<Map<String, Any?>>()
+        val events = java.util.concurrent.CopyOnWriteArrayList<Map<String, Any?>>()
         val bridge = WatchAppMessageBridge(
             uuid,
             transport,
@@ -642,7 +644,7 @@ class WatchAppMessageBridgeTest {
     @Test
     fun queueOverflowDropsTheOldestLogicalTransferOnce() {
         val transport = FakePebbleTransport(connected = false)
-        val events = mutableListOf<Map<String, Any?>>()
+        val events = java.util.concurrent.CopyOnWriteArrayList<Map<String, Any?>>()
         val bridge = WatchAppMessageBridge(
             uuid,
             transport,
@@ -673,7 +675,7 @@ class WatchAppMessageBridgeTest {
     @Test
     fun terminalChunkFailureDropsTheRestOfTheLogicalTransfer() {
         val transport = FakePebbleTransport()
-        val events = mutableListOf<Map<String, Any?>>()
+        val events = java.util.concurrent.CopyOnWriteArrayList<Map<String, Any?>>()
         val bridge = WatchAppMessageBridge(
             uuid,
             transport,
@@ -714,14 +716,14 @@ class WatchAppMessageBridgeTest {
         transport.deliverWatchData(9, watchMessage(CMD_BUTTON, mapOf(KEY_BUTTON_ID to 1)))
 
         assertEquals(0, queueLengthAtAck)
-        assertEquals(1L, epochAtAck)
+        assertEquals(2L, epochAtAck)
         assertEquals(listOf(1, 9), transport.acks)
     }
 
     @Test
     fun zoomCancellationStopsRemainingChunksOfAnInFlightTransfer() {
         val transport = FakePebbleTransport()
-        val events = mutableListOf<Map<String, Any?>>()
+        val events = java.util.concurrent.CopyOnWriteArrayList<Map<String, Any?>>()
         val bridge = WatchAppMessageBridge(
             uuid,
             transport,
@@ -750,7 +752,7 @@ class WatchAppMessageBridgeTest {
         val transport = FakePebbleTransport(connected = false)
         val dispatchStarted = CountDownLatch(1)
         val releaseDispatch = CountDownLatch(1)
-        val events = mutableListOf<Map<String, Any?>>()
+        val events = java.util.concurrent.CopyOnWriteArrayList<Map<String, Any?>>()
         val bridge = WatchAppMessageBridge(
             uuid,
             transport,
@@ -846,7 +848,7 @@ class WatchAppMessageBridgeTest {
     @Test
     fun queuedTileResponsesAreLeftForWatchSideStaleFiltering() {
         val transport = FakePebbleTransport(connected = false)
-        val events = mutableListOf<Map<String, Any?>>()
+        val events = java.util.concurrent.CopyOnWriteArrayList<Map<String, Any?>>()
         val bridge = WatchAppMessageBridge(
             uuid,
             transport,
@@ -871,7 +873,7 @@ class WatchAppMessageBridgeTest {
     @Test
     fun mapSettingsDropQueuedTileResponses() {
         val transport = FakePebbleTransport(connected = false)
-        val events = mutableListOf<Map<String, Any?>>()
+        val events = java.util.concurrent.CopyOnWriteArrayList<Map<String, Any?>>()
         val bridge = WatchAppMessageBridge(
             uuid,
             transport,
@@ -897,7 +899,7 @@ class WatchAppMessageBridgeTest {
     @Test
     fun mapSettingsBatchDropsTileResponsesFromSameBatch() {
         val transport = FakePebbleTransport(connected = false)
-        val events = mutableListOf<Map<String, Any?>>()
+        val events = java.util.concurrent.CopyOnWriteArrayList<Map<String, Any?>>()
         val bridge = WatchAppMessageBridge(
             uuid,
             transport,
@@ -926,7 +928,7 @@ class WatchAppMessageBridgeTest {
     @Test
     fun nonTileResponseReportsDeliveryFailureAfterThreeAttempts() {
         val transport = FakePebbleTransport()
-        val events = mutableListOf<Map<String, Any?>>()
+        val events = java.util.concurrent.CopyOnWriteArrayList<Map<String, Any?>>()
         val bridge = WatchAppMessageBridge(
             uuid,
             transport,
@@ -961,7 +963,7 @@ class WatchAppMessageBridgeTest {
     @Test
     fun destinationResponseReportsDeliveryFailureAfterThreeAttempts() {
         val transport = FakePebbleTransport()
-        val events = mutableListOf<Map<String, Any?>>()
+        val events = java.util.concurrent.CopyOnWriteArrayList<Map<String, Any?>>()
         val bridge = WatchAppMessageBridge(
             uuid,
             transport,
@@ -1072,12 +1074,99 @@ class WatchAppMessageBridgeTest {
         assertTrue((decoded[KEY_CHUNK_DATA] as ByteArray).contentEquals(byteArrayOf(1, 2, 3)))
     }
 
+    @Test
+    fun rejectsMissingUnknownAndMixedCompressionFormats() {
+        val transport = FakePebbleTransport()
+        val events = java.util.concurrent.CopyOnWriteArrayList<Map<String, Any?>>()
+        val bridge = WatchAppMessageBridge(uuid, transport, eventSink = { events.add(it) }) { emptyList() }
+        bridge.start()
+        markWatchReady(transport)
+        bridge.enqueue(tileMessage(1) - KEY_COMPRESSION_FORMAT)
+        bridge.enqueue(tileMessage(2) + (KEY_COMPRESSION_FORMAT to 99))
+        val mixed = tileTransfer(3, 3, listOf(10, 10)).mapIndexed { index, fields ->
+            fields + (KEY_COMPRESSION_FORMAT to (index + 1))
+        }
+        bridge.enqueueAll(mixed)
+        assertTrue(transport.sent.isEmpty())
+        assertEquals(3, events.count { it["reason"] == "invalidTileTransfer" })
+        bridge.stop()
+    }
+
+    @Test
+    fun lifecycleChangesCancelActiveProviderConsumers() {
+        for (change in listOf("zoom", "settings", "disconnect", "stop")) {
+            val transport = FakePebbleTransport()
+            val started = CountDownLatch(1)
+            val cancelled = CountDownLatch(1)
+            val bridge = WatchAppMessageBridge(uuid, transport,
+                cancellableDispatcher = { fields, token ->
+                    if (fields[KEY_CMD] == CMD_TILE_REQUEST) {
+                        token.register { cancelled.countDown() }.use {
+                            started.countDown()
+                            cancelled.await(2, TimeUnit.SECONDS)
+                            token.throwIfCancelled()
+                        }
+                    }
+                    emptyList()
+                }) { emptyList() }
+            bridge.start()
+            markWatchReady(transport)
+            transport.deliverWatchData(2, tileRequestMessage(30))
+            assertTrue(started.await(1, TimeUnit.SECONDS))
+            when (change) {
+                "zoom" -> transport.deliverWatchData(3, watchMessage(CMD_BUTTON, mapOf(KEY_BUTTON_ID to 1)))
+                "settings" -> bridge.enqueue(mapSettingsMessage(72, 84))
+                "disconnect" -> bridge.onWatchDisconnected()
+                "stop" -> bridge.stop()
+            }
+            assertTrue(cancelled.await(1, TimeUnit.SECONDS), "Consumer was not cancelled on $change")
+            assertEquals(0, bridge.status()["activeTileRequests"])
+            if (change != "stop") bridge.stop()
+        }
+    }
+
+    @Test
+    fun mismatchedHandshakeCannotBeBypassedByAnotherCommand() {
+        val transport = FakePebbleTransport()
+        var tileDispatched = false
+        val bridge = WatchAppMessageBridge(uuid, transport) { message ->
+            if (message[KEY_CMD] == CMD_TILE_REQUEST) tileDispatched = true
+            emptyList()
+        }
+        bridge.start()
+        transport.deliverWatchData(1, watchMessage(CMD_INIT, mapOf(KEY_PROTOCOL_VERSION to 3)))
+        transport.deliverWatchData(2, tileRequestMessage(1))
+        Thread.sleep(50)
+        assertFalse(tileDispatched)
+        assertEquals(false, bridge.status()["watchReady"])
+        bridge.stop()
+    }
+
     private fun tileMessage(index: Int): Map<String, Any?> =
         tileTransfer(
             worldX = index,
             requestId = index.coerceAtLeast(1),
             chunkSizes = listOf(1)
         ).single()
+
+    @Test
+    fun rejectedHandshakeCommandsAreMarkedUnacceptedForRuntimeSideEffects() {
+        val transport = FakePebbleTransport()
+        val events = java.util.concurrent.CopyOnWriteArrayList<Map<String, Any?>>()
+        val bridge = WatchAppMessageBridge(java.util.UUID.randomUUID(), transport, eventSink = events::add) { emptyList() }
+        bridge.start()
+        try {
+            bridge.onWatchData(1, mapOf(KEY_CMD to CMD_INIT, KEY_PROTOCOL_VERSION to 3))
+            for (command in listOf(CMD_ROUTE_APPLIED, CMD_ROUTE_COMPLETE)) {
+                bridge.onWatchData(command, mapOf(KEY_CMD to command, KEY_REQUEST_ID to 1))
+                val event = events.last { it["event"] == "watchCommand" && it["command"] == command }
+                assertEquals(false, event["accepted"])
+            }
+            markWatchReady(transport)
+            bridge.onWatchData(6, mapOf(KEY_CMD to CMD_ROUTE_APPLIED, KEY_REQUEST_ID to 2))
+            assertEquals(true, events.last { it["event"] == "watchCommand" }["accepted"])
+        } finally { bridge.stop() }
+    }
 
     private fun tileTransfer(
         worldX: Int,
@@ -1097,6 +1186,7 @@ class WatchAppMessageBridgeTest {
                     KEY_WIDTH to 54,
                     KEY_HEIGHT to 63,
                     KEY_TOTAL_BYTES to totalBytes,
+                    KEY_COMPRESSION_FORMAT to 1,
                     KEY_CHUNK_INDEX to index,
                     KEY_CHUNK_OFFSET to offset,
                     KEY_REQUEST_ID to requestId,
@@ -1113,7 +1203,6 @@ class WatchAppMessageBridgeTest {
                 KEY_WORLD_X to index,
                 KEY_WORLD_Y to index + 1,
                 KEY_TILE_ZOOM to 16,
-                KEY_IS_COLOR to 0,
                 KEY_REQUEST_ID to (index + 1)
             )
         )
@@ -1152,9 +1241,9 @@ class WatchAppMessageBridgeTest {
         var appActive: Boolean = true
     ) : PebbleTransport {
         private var receiver: PebbleTransportReceiver? = null
-        val sent = mutableListOf<SentMessage>()
-        val acks = mutableListOf<Int>()
-        val nacks = mutableListOf<Int>()
+        val sent = java.util.concurrent.CopyOnWriteArrayList<SentMessage>()
+        val acks = java.util.concurrent.CopyOnWriteArrayList<Int>()
+        val nacks = java.util.concurrent.CopyOnWriteArrayList<Int>()
         var onSendAck: ((Int) -> Unit)? = null
         var onSend: ((SentMessage) -> Unit)? = null
 

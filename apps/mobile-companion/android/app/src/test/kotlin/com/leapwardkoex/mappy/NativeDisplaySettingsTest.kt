@@ -20,7 +20,6 @@ class NativeDisplaySettingsTest {
         assertEquals(3, DEFAULT_GLANCE_MODE)
 
         val defaults = NativeDisplaySettings(
-            themeMode = 0,
             travelMode = 2,
             unitsMode = 1,
             backlightMode = 0,
@@ -34,7 +33,6 @@ class NativeDisplaySettingsTest {
     @Test
     fun displaySettingsExposeIndependentFeedbackModes() {
         val settings = NativeDisplaySettings(
-            themeMode = 0,
             travelMode = 2,
             unitsMode = 1,
             backlightMode = 0,
@@ -51,8 +49,8 @@ class NativeDisplaySettingsTest {
     }
 
     @Test
-    fun feedbackCommandsUseProtocolVersionThreeIds() {
-        assertEquals(3, WATCH_PROTOCOL_VERSION)
+    fun feedbackCommandsUseProtocolVersionFourIds() {
+        assertEquals(4, WATCH_PROTOCOL_VERSION)
         assertEquals(406, CMD_HAPTIC_MODE)
         assertEquals(407, CMD_GLANCE_MODE)
     }

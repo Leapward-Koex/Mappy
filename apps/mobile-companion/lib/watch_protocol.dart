@@ -50,7 +50,6 @@ abstract final class WatchCommands {
   static const routeWindowPoints = 307;
   static const routeApplied = 308;
   static const routeComplete = 309;
-  static const theme = 401;
   static const travelMode = 402;
   static const units = 403;
   static const backlight = 404;
@@ -62,7 +61,22 @@ abstract final class WatchCommands {
   static const debugRouteProgress = 903;
 }
 
-const watchProtocolVersion = 3;
+const watchProtocolVersion = 4;
+
+abstract final class WatchTileCompression {
+  static const rle = 1;
+  static const packed = 2;
+  static const lz4Packed = 3;
+  static const lz4Rle = 4;
+
+  static bool isSupported(int? value) =>
+      value != null && value >= 1 && value <= 4;
+}
+
+bool isSupportedWatchTileGeometry(int? width, int? height) =>
+    (width == 54 && height == 63) ||
+    (width == 72 && height == 84) ||
+    (width == 108 && height == 126);
 
 const watchTileWidth = 54;
 const watchTileHeight = 63;
@@ -83,25 +97,6 @@ const maxSavedLocationId = 253;
 const maxDestinationLabelBytes = 30;
 
 bool isSavedLocationId(int value) => value >= 0 && value <= maxSavedLocationId;
-
-enum WatchThemeMode {
-  auto(0, 'Auto'),
-  day(1, 'Day'),
-  night(2, 'Night');
-
-  const WatchThemeMode(this.protocolValue, this.label);
-
-  final int protocolValue;
-  final String label;
-
-  static WatchThemeMode fromProtocol(int? value) {
-    return switch (value) {
-      1 => WatchThemeMode.day,
-      2 => WatchThemeMode.night,
-      _ => WatchThemeMode.auto,
-    };
-  }
-}
 
 enum WatchTravelMode {
   walk(0, 'Walk'),
@@ -301,6 +296,7 @@ class DecodedWatchTile {
     required this.width,
     required this.height,
     required this.encodedBytes,
+    required this.compressionFormat,
     required this.decodedNibbles,
     required this.paletteIndexes,
   });
@@ -311,6 +307,7 @@ class DecodedWatchTile {
   final int width;
   final int height;
   final int encodedBytes;
+  final int compressionFormat;
   final Uint8List decodedNibbles;
   final Uint8List paletteIndexes;
 
@@ -414,7 +411,6 @@ String watchCommandName(int? command) {
     WatchCommands.tile => 'CMD_TILE',
     WatchCommands.button => 'CMD_BUTTON',
     WatchCommands.gps => 'CMD_GPS',
-    WatchCommands.theme => 'CMD_THEME',
     WatchCommands.tileRequest => 'CMD_TILE_REQUEST',
     WatchCommands.destinations => 'CMD_DESTINATIONS',
     WatchCommands.routeRequest => 'CMD_ROUTE_REQUEST',
@@ -466,8 +462,9 @@ DecodedWatchTile decodeWatchTile(WatchMessage message) {
   final worldX = asInt(message.fields[WatchKeys.worldX]);
   final worldY = asInt(message.fields[WatchKeys.worldY]);
   final zoom = asInt(message.fields[WatchKeys.tileZoom]);
-  final width = asInt(message.fields[WatchKeys.width]) ?? watchTileWidth;
-  final height = asInt(message.fields[WatchKeys.height]) ?? watchTileHeight;
+  final width = asInt(message.fields[WatchKeys.width]);
+  final height = asInt(message.fields[WatchKeys.height]);
+  final compressionFormat = asInt(message.fields[WatchKeys.compressionFormat]);
   final totalBytes = asInt(message.fields[WatchKeys.totalBytes]);
   if (bytes == null) {
     throw const WatchProtocolException('Tile message has no chunk_data.');
@@ -482,11 +479,55 @@ DecodedWatchTile decodeWatchTile(WatchMessage message) {
       'Tile total_bytes $totalBytes does not match ${bytes.length}.',
     );
   }
-  final paletteIndexes = decodeRlePaletteIndexes(
-    bytes,
-    width: width,
-    height: height,
-  );
+  if (width == null ||
+      height == null ||
+      !isSupportedWatchTileGeometry(width, height)) {
+    throw const WatchProtocolException(
+      'Tile geometry is missing or unsupported.',
+    );
+  }
+  if (!WatchTileCompression.isSupported(compressionFormat)) {
+    throw const WatchProtocolException(
+      'Tile compression_format is missing or unsupported.',
+    );
+  }
+  final tilePixels = width * height;
+  final packedBytes = tilePixels ~/ 2;
+  final rleIndexBytes = height * ((width + 31) ~/ 32) * 3;
+  if (bytes.isEmpty || bytes.length > tilePixels) {
+    throw const WatchProtocolException('Tile payload size is invalid.');
+  }
+  final Uint8List paletteIndexes;
+  switch (compressionFormat!) {
+    case WatchTileCompression.rle:
+      paletteIndexes = decodeRlePaletteIndexes(
+        bytes,
+        width: width,
+        height: height,
+      );
+    case WatchTileCompression.packed:
+      paletteIndexes = unpackPaletteNibbles(
+        bytes,
+        width: width,
+        height: height,
+      );
+    case WatchTileCompression.lz4Packed:
+      paletteIndexes = unpackPaletteNibbles(
+        decodeLz4Block(bytes, maxOutputBytes: packedBytes),
+        width: width,
+        height: height,
+      );
+    case WatchTileCompression.lz4Rle:
+      paletteIndexes = decodeRlePaletteIndexes(
+        decodeLz4Block(bytes, maxOutputBytes: packedBytes - rleIndexBytes - 1),
+        width: width,
+        height: height,
+      );
+    default:
+      throw const WatchProtocolException(
+        'Tile compression_format is unsupported.',
+      );
+  }
   return DecodedWatchTile(
     worldX: worldX,
     worldY: worldY,
@@ -494,6 +535,7 @@ DecodedWatchTile decodeWatchTile(WatchMessage message) {
     width: width,
     height: height,
     encodedBytes: bytes.length,
+    compressionFormat: compressionFormat,
     decodedNibbles: packPaletteNibbles(
       paletteIndexes,
       width: width,
@@ -503,13 +545,114 @@ DecodedWatchTile decodeWatchTile(WatchMessage message) {
   );
 }
 
+/// Decodes a raw LZ4 block with a caller-supplied allocation and output bound.
+/// Matches copy forwards so offsets shorter than a match support overlap.
+Uint8List decodeLz4Block(Uint8List bytes, {required int maxOutputBytes}) {
+  if (maxOutputBytes < 0 || maxOutputBytes > 6804 || bytes.isEmpty) {
+    throw const WatchProtocolException('Invalid LZ4 block bounds.');
+  }
+  final output = Uint8List(maxOutputBytes);
+  var inputOffset = 0;
+  var outputOffset = 0;
+  int? lastMatchStart;
+
+  int readLength(int initialLength) {
+    var length = initialLength;
+    if (initialLength == 15) {
+      int extension;
+      do {
+        if (inputOffset == bytes.length) {
+          throw const WatchProtocolException('Truncated LZ4 length.');
+        }
+        extension = bytes[inputOffset++];
+        length += extension;
+        if (length > maxOutputBytes) {
+          throw const WatchProtocolException('LZ4 length exceeds tile bounds.');
+        }
+      } while (extension == 255);
+    }
+    return length;
+  }
+
+  while (inputOffset < bytes.length) {
+    final token = bytes[inputOffset++];
+    final literalLength = readLength(token >> 4);
+    if (literalLength > bytes.length - inputOffset ||
+        literalLength > maxOutputBytes - outputOffset) {
+      throw const WatchProtocolException('Invalid LZ4 literals.');
+    }
+    output.setRange(
+      outputOffset,
+      outputOffset + literalLength,
+      bytes,
+      inputOffset,
+    );
+    inputOffset += literalLength;
+    outputOffset += literalLength;
+    if (inputOffset == bytes.length) {
+      // The raw block format reserves five final literals and twelve bytes
+      // after the last match start for safe interoperable decoder endings.
+      if (outputOffset == 0 ||
+          (lastMatchStart != null &&
+              (literalLength < 5 || outputOffset - lastMatchStart < 12))) {
+        throw const WatchProtocolException(
+          'Invalid LZ4 final literal sequence.',
+        );
+      }
+      return Uint8List.sublistView(output, 0, outputOffset);
+    }
+    if (bytes.length - inputOffset < 2) {
+      throw const WatchProtocolException('Truncated LZ4 match offset.');
+    }
+    final offset = bytes[inputOffset] | (bytes[inputOffset + 1] << 8);
+    inputOffset += 2;
+    if (offset == 0 || offset > outputOffset) {
+      throw const WatchProtocolException('Invalid LZ4 match offset.');
+    }
+    final matchLength = readLength(token & 0x0f) + 4;
+    if (matchLength > maxOutputBytes - outputOffset) {
+      throw const WatchProtocolException('LZ4 match exceeds tile bounds.');
+    }
+    lastMatchStart = outputOffset;
+    for (var index = 0; index < matchLength; index++) {
+      output[outputOffset] = output[outputOffset - offset];
+      outputOffset++;
+    }
+  }
+  throw const WatchProtocolException(
+    'LZ4 block has no final literal sequence.',
+  );
+}
+
+Uint8List unpackPaletteNibbles(
+  Uint8List bytes, {
+  int width = watchTileWidth,
+  int height = watchTileHeight,
+}) {
+  final tilePixels = width * height;
+  if (width <= 0 ||
+      height <= 0 ||
+      tilePixels > 13608 ||
+      bytes.length != (tilePixels + 1) ~/ 2) {
+    throw const WatchProtocolException('Packed tile pixel count is invalid.');
+  }
+  final indexes = Uint8List(tilePixels);
+  for (var index = 0; index < tilePixels; index++) {
+    indexes[index] = (bytes[index ~/ 2] >> ((index & 1) * 4)) & 0x0f;
+  }
+  return indexes;
+}
+
 Uint8List decodeRlePaletteIndexes(
   Uint8List bytes, {
   int width = watchTileWidth,
   int height = watchTileHeight,
 }) {
   final tilePixels = width * height;
-  if (bytes.length > tilePixels) {
+  if (width <= 0 ||
+      height <= 0 ||
+      tilePixels > 13608 ||
+      bytes.length > tilePixels) {
     throw const WatchProtocolException('Tile RLE payload is oversized.');
   }
   final output = Uint8List(tilePixels);
@@ -569,7 +712,10 @@ Uint8List packPaletteNibbles(
   for (var index = 0; index < paletteIndexes.length; index += 2) {
     output[index ~/ 2] =
         (paletteIndexes[index] & 0x0f) |
-        ((paletteIndexes[index + 1] & 0x0f) << 4);
+        ((index + 1 < paletteIndexes.length
+                ? paletteIndexes[index + 1] & 0x0f
+                : 0) <<
+            4);
   }
   return output;
 }

@@ -343,7 +343,6 @@ class WatchNavigationDispatchResult extends ListBase<WatchMessage> {
 
 class WatchDisplaySettings {
   const WatchDisplaySettings({
-    required this.themeMode,
     required this.travelMode,
     required this.unitsMode,
     required this.backlightMode,
@@ -353,7 +352,6 @@ class WatchDisplaySettings {
     required this.tileAnimationMode,
   });
 
-  final WatchThemeMode themeMode;
   final WatchTravelMode travelMode;
   final WatchUnitsMode unitsMode;
   final WatchBacklightMode backlightMode;
@@ -363,7 +361,6 @@ class WatchDisplaySettings {
   final WatchTileAnimationMode tileAnimationMode;
 
   static const defaults = WatchDisplaySettings(
-    themeMode: WatchThemeMode.auto,
     travelMode: WatchTravelMode.drive,
     unitsMode: WatchUnitsMode.metric,
     backlightMode: WatchBacklightMode.system,
@@ -374,7 +371,6 @@ class WatchDisplaySettings {
   );
 
   WatchDisplaySettings copyWith({
-    WatchThemeMode? themeMode,
     WatchTravelMode? travelMode,
     WatchUnitsMode? unitsMode,
     WatchBacklightMode? backlightMode,
@@ -384,7 +380,6 @@ class WatchDisplaySettings {
     WatchTileAnimationMode? tileAnimationMode,
   }) {
     return WatchDisplaySettings(
-      themeMode: themeMode ?? this.themeMode,
       travelMode: travelMode ?? this.travelMode,
       unitsMode: unitsMode ?? this.unitsMode,
       backlightMode: backlightMode ?? this.backlightMode,
@@ -397,7 +392,6 @@ class WatchDisplaySettings {
 
   Map<String, Object?> toChannelMap() {
     return <String, Object?>{
-      'themeMode': themeMode.protocolValue,
       'travelMode': travelMode.protocolValue,
       'unitsMode': unitsMode.protocolValue,
       'backlightMode': backlightMode.protocolValue,
@@ -410,9 +404,6 @@ class WatchDisplaySettings {
 
   List<WatchMessage> toMessages() {
     return [
-      WatchMessage.command(WatchCommands.theme, {
-        WatchKeys.buttonId: themeMode.protocolValue,
-      }),
       WatchMessage.command(WatchCommands.travelMode, {
         WatchKeys.buttonId: travelMode.protocolValue,
       }),
@@ -440,7 +431,6 @@ class WatchDisplaySettings {
   static WatchDisplaySettings fromChannelMap(Map<dynamic, dynamic> value) {
     final tileAnimationValue = asInt(value['tileAnimationMode']);
     return WatchDisplaySettings(
-      themeMode: WatchThemeMode.fromProtocol(asInt(value['themeMode'])),
       travelMode: WatchTravelMode.fromProtocol(asInt(value['travelMode'])),
       unitsMode: WatchUnitsMode.fromProtocol(asInt(value['unitsMode'])),
       backlightMode: WatchBacklightMode.fromProtocol(
@@ -791,7 +781,6 @@ class WatchPhoneWorker implements WatchMessageDispatcher {
   final ProviderRepository providerRepository;
   final List<WatchDestinationConfig> destinations;
 
-  WatchThemeMode themeMode = WatchThemeMode.auto;
   WatchTravelMode travelMode = WatchTravelMode.drive;
   WatchMapOrientation mapOrientation = WatchMapOrientation.northUp;
   WatchTileAnimationMode tileAnimationMode = WatchTileAnimationMode.fadeIn;
@@ -969,11 +958,6 @@ class WatchPhoneWorker implements WatchMessageDispatcher {
           _clearActiveRoute();
         }
         return const [];
-      case WatchCommands.theme:
-        themeMode = WatchThemeMode.fromProtocol(
-          asInt(message.fields[WatchKeys.buttonId]),
-        );
-        return [_themeMessage()];
       case WatchCommands.travelMode:
         travelMode = WatchTravelMode.fromProtocol(
           asInt(message.fields[WatchKeys.buttonId]),
@@ -1028,7 +1012,6 @@ class WatchPhoneWorker implements WatchMessageDispatcher {
   @override
   Future<WatchDisplaySettings> getDisplaySettings() async =>
       WatchDisplaySettings(
-        themeMode: themeMode,
         travelMode: travelMode,
         unitsMode: unitsMode,
         backlightMode: backlightMode,
@@ -1045,7 +1028,6 @@ class WatchPhoneWorker implements WatchMessageDispatcher {
   Future<List<WatchMessage>> setDisplaySettings(
     WatchDisplaySettings settings,
   ) async {
-    themeMode = settings.themeMode;
     travelMode = settings.travelMode;
     unitsMode = settings.unitsMode;
     backlightMode = settings.backlightMode;
@@ -1054,7 +1036,6 @@ class WatchPhoneWorker implements WatchMessageDispatcher {
     mapOrientation = settings.mapOrientation;
     tileAnimationMode = settings.tileAnimationMode;
     final messages = [
-      _themeMessage(),
       _travelModeMessage(),
       _unitsMessage(),
       _backlightMessage(),
@@ -1091,9 +1072,6 @@ class WatchPhoneWorker implements WatchMessageDispatcher {
         ),
       ];
     }
-    themeMode = WatchThemeMode.fromProtocol(
-      asInt(message.fields[WatchKeys.tileZoom]),
-    );
     travelMode = WatchTravelMode.fromProtocol(
       asInt(message.fields[WatchKeys.buttonId]),
     );
@@ -1108,7 +1086,6 @@ class WatchPhoneWorker implements WatchMessageDispatcher {
       WatchMessage.command(WatchCommands.phoneReady, {
         WatchKeys.protocolVersion: watchProtocolVersion,
       }),
-      _themeMessage(),
       _travelModeMessage(),
       _unitsMessage(),
       _backlightMessage(),
@@ -1141,8 +1118,6 @@ class WatchPhoneWorker implements WatchMessageDispatcher {
     final worldY = asInt(message.fields[WatchKeys.worldY]);
     final zoom = asInt(message.fields[WatchKeys.tileZoom]);
     final requestId = asInt(message.fields[WatchKeys.requestId]);
-    final theme =
-        asInt(message.fields[WatchKeys.isColor]) ?? themeMode.protocolValue;
 
     if (worldX == null || worldY == null || zoom == null || requestId == null) {
       return [
@@ -1159,11 +1134,16 @@ class WatchPhoneWorker implements WatchMessageDispatcher {
       worldX: worldX,
       worldY: worldY,
       zoom: zoom,
-      themeMode: theme,
     );
     lastProviderStatus = tile.status;
 
-    if (!tile.ok || tile.chunkData == null) {
+    if (!tile.ok ||
+        tile.chunkData == null ||
+        !WatchTileCompression.isSupported(tile.compressionFormat) ||
+        !isSupportedWatchTileGeometry(tile.width, tile.height) ||
+        tile.totalBytes != tile.chunkData!.length ||
+        tile.chunkData!.isEmpty ||
+        tile.chunkData!.length > tile.width! * tile.height!) {
       return [
         _errorMessage(
           category: tile.errorCategory ?? 5,
@@ -1182,7 +1162,10 @@ class WatchPhoneWorker implements WatchMessageDispatcher {
         WatchKeys.worldX: tile.worldX ?? worldX,
         WatchKeys.worldY: tile.worldY ?? worldY,
         WatchKeys.tileZoom: tile.zoom ?? zoom,
-        WatchKeys.totalBytes: tile.totalBytes ?? tile.chunkData!.length,
+        WatchKeys.width: tile.width,
+        WatchKeys.height: tile.height,
+        WatchKeys.compressionFormat: tile.compressionFormat,
+        WatchKeys.totalBytes: tile.totalBytes,
         WatchKeys.chunkData: tile.chunkData,
         WatchKeys.requestId: requestId,
       }),
@@ -1774,12 +1757,6 @@ class WatchPhoneWorker implements WatchMessageDispatcher {
     return WatchMessage.command(WatchCommands.destinations, {
       WatchKeys.totalBytes: payload.length,
       WatchKeys.chunkData: payload,
-    });
-  }
-
-  WatchMessage _themeMessage() {
-    return WatchMessage.command(WatchCommands.theme, {
-      WatchKeys.buttonId: themeMode.protocolValue,
     });
   }
 

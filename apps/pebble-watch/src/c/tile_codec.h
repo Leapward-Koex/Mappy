@@ -12,6 +12,38 @@ typedef struct {
   bool failed;
 } TileRleStreamDecoder;
 
+typedef enum {
+  TileCompressionRle = 1,
+  TileCompressionPacked = 2,
+  TileCompressionLz4Packed = 3,
+  TileCompressionLz4Rle = 4,
+} TileCompressionFormat;
+
+// An independent LZ4 block uses its output as history, without a dictionary
+// allocation. Tokens may be split at any AppMessage boundary.
+typedef struct {
+  uint32_t output_bytes;
+  uint32_t output_limit;
+  uint32_t length;
+  uint32_t last_match_start;
+  uint16_t offset;
+  uint8_t token;
+  uint8_t state;
+  bool had_match;
+  bool failed;
+} TileLz4StreamDecoder;
+
+typedef union {
+  TileRleStreamDecoder rle;
+  TileLz4StreamDecoder lz4;
+} TileStreamDecoder;
+
+void tile_lz4_stream_init(TileLz4StreamDecoder *decoder, uint32_t output_limit);
+bool tile_lz4_stream_feed(TileLz4StreamDecoder *decoder,
+                          const uint8_t *encoded, size_t encoded_len,
+                          uint8_t *output);
+bool tile_lz4_stream_finish(const TileLz4StreamDecoder *decoder);
+
 #define TILE_RLE_ROW_INDEX_BYTES 3
 #define TILE_RLE_INDEX_BLOCK_PIXELS 32
 #define TILE_RLE_INDEX_COLUMNS(width) \

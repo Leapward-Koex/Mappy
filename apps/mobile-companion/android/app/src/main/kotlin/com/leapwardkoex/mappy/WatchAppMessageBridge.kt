@@ -1,6 +1,7 @@
 package com.leapwardkoex.mappy
 
 import java.util.UUID
+import java.util.concurrent.atomic.AtomicLong
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -15,9 +16,11 @@ internal class WatchAppMessageBridge(
     private val eventSink: (Map<String, Any?>) -> Unit = {},
     private val inFlightTimeoutMillis: Long = DEFAULT_IN_FLIGHT_TIMEOUT_MILLIS,
     private val tileTransferPacingMillis: Long = DEFAULT_TILE_TRANSFER_PACING_MILLIS,
+    private val cancellableDispatcher: ((Map<*, *>, TileCancellationToken) -> List<Map<String, Any?>>)? = null,
     private val dispatcher: (Map<*, *>) -> List<Map<String, Any?>>
 ) : PebbleTransportReceiver {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO.limitedParallelism(4))
+    private val timerScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private val lock = Any()
     private val queue = ArrayDeque<QueuedMessage>()
     private var inFlight: QueuedMessage? = null
@@ -30,6 +33,7 @@ internal class WatchAppMessageBridge(
     private var activeTileTransferKey: String? = null
     private var nextTileTransferAtMillis = 0L
     private var tileWorkEpoch = 0L
+    private val tileWorkTokens = mutableMapOf<TileCancellationToken, Map<String, Any?>>()
     private val cancelledTileTransfers = mutableSetOf<String>()
     private val acknowledgedTileChunks = mutableMapOf<String, Int>()
 
@@ -46,9 +50,11 @@ internal class WatchAppMessageBridge(
     }
 
     fun stop() {
-        synchronized(lock) {
+        val dropped = synchronized(lock) {
             started = false
+            invalidateTileWorkLocked()
             watchReady = false
+            val dropped = cancelQueuedTileTransfersLocked("stopped")
             queue.clear()
             inFlight = null
             timeoutJob?.cancel()
@@ -59,9 +65,12 @@ internal class WatchAppMessageBridge(
             nextTileTransferAtMillis = 0L
             cancelledTileTransfers.clear()
             acknowledgedTileChunks.clear()
+            dropped
         }
+        dropped.forEach { emitQueueDrop(it.message, it.reason) }
         transport.unregister()
         scope.cancel()
+        timerScope.cancel()
         emitTransportChanged("stopped")
     }
 
@@ -152,6 +161,8 @@ internal class WatchAppMessageBridge(
                 "queueLength" to queue.size,
                 "inFlight" to (inFlight != null),
                 "watchLaunchPending" to watchLaunchPending,
+                "activeTileRequests" to tileWorkTokens.size,
+                "tileTransferPacingMillis" to tileTransferPacingMillis,
                 "tileWorkEpoch" to tileWorkEpoch
             )
         }
@@ -161,17 +172,25 @@ internal class WatchAppMessageBridge(
     }
 
     override fun onWatchData(transactionId: Int, fields: Map<String, Any?>) {
+        val receivedAtMillis = monotonicMillis()
         val command = intValue(fields[KEY_CMD])
+        val dispatchFields = if (command == CMD_TILE_REQUEST) fields + (TILE_WORK_ID to nextTileWorkId.incrementAndGet()) else fields
         val protocolMatches = command != CMD_INIT ||
             intValue(fields[KEY_PROTOCOL_VERSION]) == WATCH_PROTOCOL_VERSION
         val dropped = mutableListOf<DroppedMessage>()
+        var accepted = false
         val dispatchEpoch = synchronized(lock) {
-            watchReady = protocolMatches
+            if (command == CMD_INIT) {
+                invalidateTileWorkLocked()
+                dropped.addAll(cancelQueuedTileTransfersLocked("watchRestarted"))
+                watchReady = protocolMatches
+            }
             watchLaunchPending = false
-            if (isZoomNotification(fields)) {
-                tileWorkEpoch++
+            if (watchReady && isZoomNotification(fields)) {
+                invalidateTileWorkLocked()
                 dropped.addAll(cancelQueuedTileTransfersLocked(REASON_ZOOM_CHANGED))
             }
+            accepted = started && watchReady
             tileWorkEpoch
         }
         transport.sendAck(transactionId)
@@ -179,6 +198,9 @@ internal class WatchAppMessageBridge(
         eventSink(
             mapOf(
                 "event" to "watchCommand",
+                "accepted" to accepted,
+                TILE_WORK_ID to dispatchFields[TILE_WORK_ID],
+                "receivedAtMillis" to receivedAtMillis,
                 "transactionId" to transactionId,
                 "command" to command,
                 KEY_REQUEST_ID to fields[KEY_REQUEST_ID],
@@ -193,15 +215,36 @@ internal class WatchAppMessageBridge(
                 KEY_INSTRUCTION to fields[KEY_INSTRUCTION]
             )
         )
+        if (command != CMD_INIT && !accepted) {
+            if (command == CMD_TILE_REQUEST) emitStaleTileWorkDrop(dispatchFields, 0)
+            return
+        }
+        val cancellation = TileCancellationToken()
+        val tileRequest = command == CMD_TILE_REQUEST
+        if (tileRequest) synchronized(lock) {
+            if (dispatchEpoch != tileWorkEpoch || !started || !watchReady) cancellation.cancel()
+            else tileWorkTokens[cancellation] = dispatchFields
+        }
         scope.launch {
+            if (tileRequest) eventSink(mapOf(
+                "event" to "tileWorkStarted", KEY_REQUEST_ID to fields[KEY_REQUEST_ID],
+                TILE_WORK_ID to dispatchFields[TILE_WORK_ID],
+                "workerWaitMillis" to monotonicMillis() - receivedAtMillis
+            ))
             val responses = try {
-                dispatcher(fields)
+                cancellation.throwIfCancelled()
+                cancellableDispatcher?.invoke(dispatchFields, cancellation) ?: dispatcher(dispatchFields)
+            } catch (_: ProviderOperationCancelledException) {
+                cancellation.cancel()
+                emptyList()
             } catch (_: Exception) {
+                if (tileRequest) eventSink(mapOf("event" to "tilePreparationFailed", KEY_REQUEST_ID to fields[KEY_REQUEST_ID], TILE_WORK_ID to dispatchFields[TILE_WORK_ID]))
                 emptyList()
             }
             var staleTileWork = false
             val responseDrops = synchronized(lock) {
-                if (command == CMD_TILE_REQUEST && dispatchEpoch != tileWorkEpoch) {
+                tileWorkTokens.remove(cancellation)
+                if (tileRequest && (dispatchEpoch != tileWorkEpoch || cancellation.isCancelled)) {
                     staleTileWork = true
                     emptyList()
                 } else {
@@ -209,7 +252,7 @@ internal class WatchAppMessageBridge(
                 }
             }
             if (staleTileWork) {
-                emitStaleTileWorkDrop(fields, responses.size)
+                emitStaleTileWorkDrop(dispatchFields, responses.size)
             } else if (responses.isNotEmpty()) {
                 responseDrops.forEach { emitQueueDrop(it.message, it.reason) }
                 emitTransportChanged("queued")
@@ -249,13 +292,17 @@ internal class WatchAppMessageBridge(
     }
 
     override fun onWatchDisconnected() {
+        val drops = mutableListOf<DroppedMessage>()
         val expired = synchronized(lock) {
+            invalidateTileWorkLocked()
+            drops.addAll(cancelQueuedTileTransfersLocked("disconnected"))
             watchReady = false
             watchLaunchPending = false
             timeoutJob?.cancel()
             timeoutJob = null
             expireInFlightLocked(result = "disconnect")
         }
+        drops.forEach { emitQueueDrop(it.message, it.reason) }
         emitFailureOutcome(expired)
         emitTransportChanged("disconnected")
     }
@@ -278,7 +325,10 @@ internal class WatchAppMessageBridge(
         val dropped = mutableListOf<DroppedMessage>()
         when (message.command) {
             CMD_GPS -> queue.removeAll { it.command == CMD_GPS }
-            CMD_MAP_SETTINGS -> dropped.addAll(cancelQueuedTileTransfersLocked(REASON_MAP_SETTINGS_CHANGED))
+            CMD_MAP_SETTINGS -> {
+                invalidateTileWorkLocked()
+                dropped.addAll(cancelQueuedTileTransfersLocked(REASON_MAP_SETTINGS_CHANGED))
+            }
             CMD_ROUTE_CLEAR -> queue.removeAll { it.isRouteResponse }
             CMD_ROUTE_POINTS -> queue.removeAll { it.isRouteResponse }
         }
@@ -370,6 +420,16 @@ internal class WatchAppMessageBridge(
         return dropped
     }
 
+    private fun invalidateTileWorkLocked() {
+        tileWorkEpoch++
+        val obsolete = tileWorkTokens.toList()
+        tileWorkTokens.clear()
+        obsolete.forEach { (token, request) ->
+            token.cancel()
+            emitStaleTileWorkDrop(request, 0)
+        }
+    }
+
     private fun cancelQueuedTileTransfersLocked(reason: String): List<DroppedMessage> {
         val dropped = dropMatchingTilesLocked(reason) { it.command == CMD_TILE }.toMutableList()
         val current = inFlight
@@ -440,7 +500,8 @@ internal class WatchAppMessageBridge(
                 return
             }
             val withTransaction = message.copy(
-                transactionId = nextTransactionId
+                transactionId = nextTransactionId,
+                sentAtMillis = monotonicMillis()
             )
             nextTransactionId = (nextTransactionId + 1).let { if (it > 255) 1 else it }
             inFlight = withTransaction
@@ -461,7 +522,7 @@ internal class WatchAppMessageBridge(
             return
         }
         timeoutJob?.cancel()
-        timeoutJob = scope.launch {
+        timeoutJob = timerScope.launch {
             delay(inFlightTimeoutMillis)
             val expired = synchronized(lock) {
                 val current = inFlight
@@ -612,7 +673,7 @@ internal class WatchAppMessageBridge(
         }.minOrNull() ?: return
         val waitMillis = (nextAt - monotonicMillis()).coerceAtLeast(1L)
         pumpWakeJob?.cancel()
-        pumpWakeJob = scope.launch {
+        pumpWakeJob = timerScope.launch {
             delay(waitMillis)
             pump()
         }
@@ -716,7 +777,6 @@ internal class WatchAppMessageBridge(
             CMD_ERROR_STATE -> if (isRouteError(fields)) PRIORITY_ROUTE else PRIORITY_CONTROL
             CMD_ROUTE_CLEAR,
             CMD_PHONE_READY,
-            CMD_THEME,
             CMD_TRAVEL_MODE,
             CMD_UNITS,
             CMD_BACKLIGHT,
@@ -786,6 +846,9 @@ internal class WatchAppMessageBridge(
                 "transactionId" to transactionId,
                 "command" to message.command,
                 "result" to result,
+                "queueWaitMillis" to (message.sentAtMillis - message.queuedAtMillis).coerceAtLeast(0L),
+                "sendAckMillis" to (monotonicMillis() - message.sentAtMillis).coerceAtLeast(0L),
+                "finalChunk" to message.isFinalTileChunk,
                 "attempts" to message.attempts,
                 "status" to status()
             ) + tileEventFields(message)
@@ -831,6 +894,7 @@ internal class WatchAppMessageBridge(
         eventSink(
             mapOf(
                 "event" to "tileWorkDrop",
+                TILE_WORK_ID to request[TILE_WORK_ID],
                 "reason" to REASON_STALE_TILE_WORK,
                 KEY_WORLD_X to request[KEY_WORLD_X],
                 KEY_WORLD_Y to request[KEY_WORLD_Y],
@@ -853,6 +917,9 @@ internal class WatchAppMessageBridge(
             KEY_CHUNK_INDEX to message.fields[KEY_CHUNK_INDEX],
             KEY_CHUNK_OFFSET to message.fields[KEY_CHUNK_OFFSET],
             KEY_REQUEST_ID to message.fields[KEY_REQUEST_ID],
+            TILE_WORK_ID to message.fields[TILE_WORK_ID],
+            KEY_COMPRESSION_FORMAT to message.fields[KEY_COMPRESSION_FORMAT],
+            "chunkBytes" to (message.fields[KEY_CHUNK_DATA] as? ByteArray)?.size,
             "tileKey" to message.tileKey,
             "requestKey" to message.requestKey,
             "transferKey" to message.transferKey,
@@ -865,7 +932,9 @@ internal class WatchAppMessageBridge(
         val priority: Int,
         val attempts: Int = 0,
         val transactionId: Int = 0,
-        val availableAtMillis: Long = 0L
+        val availableAtMillis: Long = 0L,
+        val queuedAtMillis: Long = monotonicMillis(),
+        val sentAtMillis: Long = 0L
     ) {
         val command: Int? = (fields[KEY_CMD] as? Number)?.toInt()
         val failedCommand: Int? = (fields[KEY_CHUNK_INDEX] as? Number)?.toInt()
@@ -910,10 +979,11 @@ internal class WatchAppMessageBridge(
         val requestId: Int,
         val width: Int,
         val height: Int,
-        val totalBytes: Int
+        val totalBytes: Int,
+        val compressionFormat: Int
     ) {
         val requestKey: String = "$worldX:$worldY:$zoom"
-        val transferKey: String = "$requestKey:$requestId:$width:$height:$totalBytes"
+        val transferKey: String = "$requestKey:$requestId:$width:$height:$totalBytes:$compressionFormat"
     }
 
     private data class TileChunk(
@@ -936,7 +1006,8 @@ internal class WatchAppMessageBridge(
                     requestId = number(KEY_REQUEST_ID)?.takeIf { it > 0 } ?: return null,
                     width = number(KEY_WIDTH)?.takeIf { it > 0 } ?: return null,
                     height = number(KEY_HEIGHT)?.takeIf { it > 0 } ?: return null,
-                    totalBytes = number(KEY_TOTAL_BYTES)?.takeIf { it > 0 } ?: return null
+                    totalBytes = number(KEY_TOTAL_BYTES)?.takeIf { it > 0 } ?: return null,
+                    compressionFormat = number(KEY_COMPRESSION_FORMAT)?.takeIf { it in 1..4 } ?: return null
                 )
                 val index = number(KEY_CHUNK_INDEX)?.takeIf { it >= 0 } ?: return null
                 val offset = number(KEY_CHUNK_OFFSET)?.takeIf { it >= 0 } ?: return null
@@ -960,6 +1031,7 @@ internal class WatchAppMessageBridge(
     )
 
     private companion object {
+        private val nextTileWorkId = AtomicLong(0L)
         private const val MAX_QUEUE_LENGTH = 64
         private const val DEFAULT_IN_FLIGHT_TIMEOUT_MILLIS = 2_000L
         private const val DEFAULT_TILE_TRANSFER_PACING_MILLIS = 30L

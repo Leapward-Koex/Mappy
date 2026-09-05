@@ -2,6 +2,8 @@
 
 // Inbound tile payload streaming, validation, and compressed-at-rest storage.
 
+static int32_t s_tile_chunk_compression;
+
 bool decode_cached_tile_row(const TileCacheEntry *entry, int row,
                             uint8_t *packed_row, size_t packed_row_bytes) {
   if (!entry || !entry->valid || !packed_row || row < 0 ||
@@ -64,6 +66,12 @@ static bool tile_chunk_is_terminal(int32_t total_bytes, int32_t chunk_offset,
       (int64_t)chunk_offset + payload_len >= total_bytes;
 }
 
+static bool tile_i32_tuple(const Tuple *tuple) {
+  return tuple && tuple->length == sizeof(int32_t) &&
+      (tuple->type == TUPLE_INT ||
+       (tuple->type == TUPLE_UINT && tuple->value->uint32 <= INT32_MAX));
+}
+
 TileApplyResult apply_tile(DictionaryIterator *iter) {
   Tuple *x_tuple = dict_find(iter, MESSAGE_KEY_world_x);
   Tuple *y_tuple = dict_find(iter, MESSAGE_KEY_world_y);
@@ -74,27 +82,60 @@ TileApplyResult apply_tile(DictionaryIterator *iter) {
   Tuple *chunk_index_tuple = dict_find(iter, MESSAGE_KEY_chunk_index);
   Tuple *chunk_offset_tuple = dict_find(iter, MESSAGE_KEY_chunk_offset);
   Tuple *data_tuple = dict_find(iter, MESSAGE_KEY_chunk_data);
+  Tuple *format_tuple = dict_find(iter, MESSAGE_KEY_compression_format);
   Tuple *request_id_tuple = dict_find(iter, MESSAGE_KEY_request_id);
-  if (!x_tuple || !y_tuple || !zoom_tuple || !total_tuple || !data_tuple ||
-      !request_id_tuple) {
-    set_bottom_text("Tile missing data");
-    schedule_tile_redraw(true);
+  // Identify an active assembly by request ID before trusting its new metadata.
+  // This lets us reject a changed identity instead of treating it as a new tile.
+  TileFlight *flight = NULL;
+  if (tile_i32_tuple(request_id_tuple) && s_tile_chunk_active &&
+      s_tile_chunk_request_id == request_id_tuple->value->int32) {
+    flight = find_tile_flight(s_tile_chunk_world_x, s_tile_chunk_world_y,
+                              s_tile_chunk_zoom, s_tile_chunk_request_id);
+  }
+  bool valid_identity = tile_i32_tuple(x_tuple) && tile_i32_tuple(y_tuple) &&
+      tile_i32_tuple(zoom_tuple) && tile_i32_tuple(request_id_tuple) &&
+      zoom_tuple->value->int32 >= MIN_MAP_ZOOM &&
+      zoom_tuple->value->int32 <= MAX_MAP_ZOOM &&
+      request_id_tuple->value->int32 > 0;
+  if (!flight && valid_identity) {
+    flight = find_tile_flight(x_tuple->value->int32, y_tuple->value->int32,
+                              (int8_t)zoom_tuple->value->int32,
+                              request_id_tuple->value->int32);
+  }
+  if (!valid_identity || !tile_i32_tuple(width_tuple) ||
+      !tile_i32_tuple(height_tuple) || !tile_i32_tuple(total_tuple) ||
+      !tile_i32_tuple(chunk_index_tuple) || !tile_i32_tuple(chunk_offset_tuple) ||
+      !tile_i32_tuple(format_tuple) || !data_tuple ||
+      data_tuple->type != TUPLE_BYTE_ARRAY) {
+    if (flight) {
+      return reject_tile_chunk(flight, flight->request.zoom, 0,
+                               "tile missing data", false);
+    }
+    return TileApplyIgnored;
+  }
+  if (!flight) {
     return TileApplyIgnored;
   }
 
   int32_t world_x = x_tuple->value->int32;
   int32_t world_y = y_tuple->value->int32;
-  int8_t zoom = zoom_tuple->value->int32;
-  int width = width_tuple ? width_tuple->value->int32 : s_tile_width;
-  int height = height_tuple ? height_tuple->value->int32 : s_tile_height;
+  int8_t zoom = (int8_t)zoom_tuple->value->int32;
+  int width = width_tuple->value->int32;
+  int height = height_tuple->value->int32;
   int32_t total_bytes = total_tuple->value->int32;
-  int32_t chunk_index = chunk_index_tuple ? chunk_index_tuple->value->int32 : 0;
-  int32_t chunk_offset = chunk_offset_tuple ? chunk_offset_tuple->value->int32 : 0;
+  int32_t compression = format_tuple->value->int32;
+  int32_t chunk_index = chunk_index_tuple->value->int32;
+  int32_t chunk_offset = chunk_offset_tuple->value->int32;
   uint16_t payload_len = data_tuple->length;
   int32_t request_id = request_id_tuple->value->int32;
-  TileFlight *flight = find_tile_flight(world_x, world_y, zoom, request_id);
-  if (!flight || request_id <= 0) {
-    return TileApplyIgnored;
+
+  if (s_tile_chunk_active && s_tile_chunk_request_id == request_id &&
+      (s_tile_chunk_world_x != world_x || s_tile_chunk_world_y != world_y ||
+       s_tile_chunk_zoom != zoom || s_tile_chunk_width != width ||
+       s_tile_chunk_height != height || s_tile_chunk_total != total_bytes ||
+       s_tile_chunk_compression != compression)) {
+    return reject_tile_chunk(flight, flight->request.zoom, compression,
+                             "tile metadata changed", false);
   }
 
   if (!flight->discard_only &&
@@ -114,20 +155,16 @@ TileApplyResult apply_tile(DictionaryIterator *iter) {
   if (zoom < MIN_MAP_ZOOM || zoom > MAX_MAP_ZOOM ||
       width != s_tile_width || height != s_tile_height ||
       total_bytes <= 0 || total_bytes > s_tile_pixels ||
-      payload_len == 0 || payload_len > MAX_RLE_BYTES ||
+      payload_len == 0 || payload_len > MAX_TILE_ENCODED_BYTES ||
+      compression < TileCompressionRle || compression > TileCompressionLz4Rle ||
+      (compression == TileCompressionPacked && total_bytes != s_tile_bytes) ||
       chunk_index < 0 || chunk_offset < 0 ||
-      chunk_offset + payload_len > total_bytes) {
+      (int64_t)chunk_offset + payload_len > total_bytes) {
     return reject_tile_chunk(flight, zoom, payload_len, "tile rejected",
                              false);
   }
 
   bool starts_new_tile = !s_tile_chunk_active ||
-      s_tile_chunk_world_x != world_x ||
-      s_tile_chunk_world_y != world_y ||
-      s_tile_chunk_zoom != zoom ||
-      s_tile_chunk_width != width ||
-      s_tile_chunk_height != height ||
-      s_tile_chunk_total != total_bytes ||
       s_tile_chunk_request_id != request_id;
   if (starts_new_tile) {
     if (chunk_index != 0 || chunk_offset != 0) {
@@ -144,12 +181,22 @@ TileApplyResult apply_tile(DictionaryIterator *iter) {
     s_tile_chunk_height = height;
     s_tile_chunk_total = total_bytes;
     s_tile_chunk_request_id = request_id;
-    int32_t indexed_bytes = total_bytes +
-        TILE_RLE_INDEX_BYTES(s_tile_width, s_tile_height);
-    s_tile_chunk_store_packed = indexed_bytes >= s_tile_bytes;
-    if (s_tile_chunk_store_packed) {
-      tile_rle_stream_init(&s_tile_chunk_decoder, (uint32_t)s_tile_pixels,
-                           s_tile_decode_scratch, (uint32_t)s_tile_bytes);
+    s_tile_chunk_compression = compression;
+    tile_performance_begin();
+    int32_t index_bytes = TILE_RLE_INDEX_BYTES(s_tile_width, s_tile_height);
+    s_tile_chunk_store_packed = compression == TileCompressionPacked ||
+        compression == TileCompressionLz4Packed ||
+        (compression == TileCompressionRle &&
+         total_bytes + index_bytes >= s_tile_bytes);
+    if (compression == TileCompressionRle && s_tile_chunk_store_packed) {
+      tile_rle_stream_init(&s_tile_chunk_decoder.rle,
+                           (uint32_t)s_tile_pixels, s_tile_decode_scratch,
+                           (uint32_t)s_tile_bytes);
+    } else if (compression == TileCompressionLz4Packed ||
+               compression == TileCompressionLz4Rle) {
+      uint32_t limit = compression == TileCompressionLz4Packed ?
+          s_tile_bytes : s_tile_bytes - index_bytes - 1;
+      tile_lz4_stream_init(&s_tile_chunk_decoder.lz4, limit);
     }
   }
 
@@ -161,19 +208,22 @@ TileApplyResult apply_tile(DictionaryIterator *iter) {
   }
 
   const uint8_t *payload = data_tuple->value->data;
+  uint32_t decode_started_ms = tile_performance_clock();
   bool accepted_chunk = false;
-  if (s_tile_chunk_store_packed) {
-    accepted_chunk = tile_rle_stream_feed(&s_tile_chunk_decoder, payload,
+  if (compression == TileCompressionLz4Packed ||
+      compression == TileCompressionLz4Rle) {
+    accepted_chunk = tile_lz4_stream_feed(&s_tile_chunk_decoder.lz4,
+                                          payload, payload_len,
+                                          s_tile_decode_scratch);
+  } else if (compression == TileCompressionRle && s_tile_chunk_store_packed) {
+    accepted_chunk = tile_rle_stream_feed(&s_tile_chunk_decoder.rle, payload,
                                           payload_len,
                                           s_tile_decode_scratch);
-  } else {
-    int32_t indexed_bytes = total_bytes +
-        TILE_RLE_INDEX_BYTES(s_tile_width, s_tile_height);
-    if (indexed_bytes <= MAX_TILE_BYTES) {
-      memcpy(s_tile_decode_scratch + chunk_offset, payload, payload_len);
-      accepted_chunk = true;
-    }
+  } else if ((int64_t)chunk_offset + payload_len <= s_tile_bytes) {
+    memcpy(s_tile_decode_scratch + chunk_offset, payload, payload_len);
+    accepted_chunk = true;
   }
+  tile_performance_decode_end(decode_started_ms);
   if (!accepted_chunk) {
     APP_LOG(APP_LOG_LEVEL_WARNING, "Tile decode failed");
     return reject_tile_chunk(flight, zoom, payload_len,
@@ -186,29 +236,40 @@ TileApplyResult apply_tile(DictionaryIterator *iter) {
     return TileApplyIncomplete;
   }
 
+  decode_started_ms = tile_performance_clock();
   bool decoded_ok = false;
   int32_t stored_length = 0;
+  int32_t encoded_length = compression == TileCompressionLz4Rle ?
+      (int32_t)s_tile_chunk_decoder.lz4.output_bytes : total_bytes;
   TileStorageFormat storage_format = TileStorageNone;
   if (s_tile_chunk_store_packed) {
-    decoded_ok = tile_rle_stream_finish(&s_tile_chunk_decoder);
+    decoded_ok = compression == TileCompressionPacked ||
+        (compression == TileCompressionRle &&
+         tile_rle_stream_finish(&s_tile_chunk_decoder.rle)) ||
+        (compression == TileCompressionLz4Packed &&
+         tile_lz4_stream_finish(&s_tile_chunk_decoder.lz4) &&
+         s_tile_chunk_decoder.lz4.output_bytes == (uint32_t)s_tile_bytes);
     stored_length = s_tile_bytes;
     storage_format = TileStoragePacked;
   } else {
     size_t row_index_bytes = TILE_RLE_INDEX_BYTES(s_tile_width,
                                                   s_tile_height);
-    stored_length = total_bytes + (int32_t)row_index_bytes;
+    stored_length = encoded_length + (int32_t)row_index_bytes;
     uint8_t *row_index = stored_length <= MAX_TILE_BYTES ?
-        s_tile_decode_scratch + total_bytes : NULL;
+        s_tile_decode_scratch + encoded_length : NULL;
     // Building the index walks every run and verifies the exact decoded pixel
     // count, so a separate full decode into the shared scratch buffer would
     // only repeat the same validation work.
     decoded_ok = row_index &&
-        tile_rle_build_row_index(s_tile_decode_scratch, total_bytes,
+        (compression != TileCompressionLz4Rle ||
+         tile_lz4_stream_finish(&s_tile_chunk_decoder.lz4)) &&
+        tile_rle_build_row_index(s_tile_decode_scratch, encoded_length,
                                  (uint16_t)s_tile_width,
                                  (uint16_t)s_tile_height, row_index,
                                  row_index_bytes);
     storage_format = TileStorageIndexedRle;
   }
+  tile_performance_decode_end(decode_started_ms);
   if (!decoded_ok) {
     APP_LOG(APP_LOG_LEVEL_WARNING, "Tile decode failed");
     return reject_tile_chunk(flight, zoom, total_bytes,
@@ -250,8 +311,9 @@ TileApplyResult apply_tile(DictionaryIterator *iter) {
   entry->valid = true;
   entry->storage_suppressed = false;
   entry->encoded_length = storage_format == TileStoragePacked ?
-      0 : (uint16_t)total_bytes;
+      0 : (uint16_t)encoded_length;
   entry->last_used = ++s_access_counter;
+  tile_performance_accepted(flight, entry, compression, total_bytes);
   bool render_visible = tile_is_visible(entry);
   bool tile_animated = start_tile_animation(entry, true);
   reset_tile_chunk_assembly();

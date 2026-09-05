@@ -488,12 +488,12 @@ class GoogleMapTilesProviderTest {
 
         val results = arrayOfNulls<Map<String, Any?>>(20)
         val firstThread = thread {
-            results[0] = provider.watchTile(54, 63, 16, themeMode = 0)
+            results[0] = provider.watchTile(54, 63, 16)
         }
         Thread.sleep(25)
         val followers = (1 until results.size).map { index ->
             thread {
-                results[index] = provider.watchTile(54, 63, 16, themeMode = 0)
+                results[index] = provider.watchTile(54, 63, 16)
             }
         }
         firstThread.join()
@@ -606,12 +606,12 @@ class GoogleMapTilesProviderTest {
         provider.setMapTileSettings(GoogleMapTilesProvider.MapTileSettings())
         provider.validateProviderSetup()
 
-        val result = provider.watchTile(worldX, worldY, zoom, themeMode = 0)
+        val result = provider.watchTile(worldX, worldY, zoom)
         val payload = result["chunk_data"] as? ByteArray
 
         assertEquals(true, result["ok"])
         assertNotNull(payload)
-        assertEquals(expectedPaletteGrid(worldX, worldY, zoom), decodeRlePaletteIndexes(payload))
+        assertEquals(expectedPaletteGrid(worldX, worldY, zoom), decodeWatchPaletteIndexes(result))
     }
 
     private fun expectedPaletteGrid(worldX: Int, worldY: Int, zoom: Int): List<Int> {
@@ -627,15 +627,22 @@ class GoogleMapTilesProviderTest {
         }
     }
 
-    private fun decodeRlePaletteIndexes(payload: ByteArray): List<Int> {
-        val indexes = mutableListOf<Int>()
-        payload.forEach { byte ->
-            val value = byte.toInt() and 0xFF
-            val runLength = (value ushr 4) + 1
-            val paletteIndex = value and 0x0F
-            repeat(runLength) { indexes.add(paletteIndex) }
+    private fun decodeWatchPaletteIndexes(result: Map<String, Any?>): List<Int> {
+        val payload = result["chunk_data"] as ByteArray
+        val format = result["compression_format"] as Int
+        val pixels = (result["width"] as Int) * (result["height"] as Int)
+        val data = if (format >= 3) {
+            val output = ByteArray(pixels)
+            val size = net.jpountz.lz4.LZ4Factory.fastestJavaInstance().safeDecompressor()
+                .decompress(payload, 0, payload.size, output, 0, output.size)
+            output.copyOf(size)
+        } else payload
+        if (format == 2 || format == 3) return List(pixels) {
+            (data[it / 2].toInt() ushr ((it % 2) * 4)) and 15
         }
-        return indexes
+        return buildList {
+            data.forEach { byte -> repeat(((byte.toInt() and 255) ushr 4) + 1) { add(byte.toInt() and 15) } }
+        }
     }
 
     private fun fixturePaletteIndex(tileX: Int, tileY: Int): Int =

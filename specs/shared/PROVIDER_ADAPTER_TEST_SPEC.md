@@ -83,7 +83,7 @@ Golden fixtures:
 
 - 256x256 four-color source tile.
 - Four neighboring source tiles with unique quadrant colors.
-- Day and night palette expected outputs.
+- Day palette expected outputs.
 - 54x63 expected palette-index grid, plus at least one larger supported watch
   tile size.
 - RLE payload expected to decode losslessly.
@@ -109,13 +109,12 @@ Required cases:
   context.
 - Provider quota/API/billing/permission failure maps to category 2 or 5 with
   safe diagnostics.
-- Theme change invalidates encoded cache.
 - Map source or rendered tile size changes invalidate provider sessions, source
   tile cache, encoded tile cache, and visible watch tile cache through
   `CMD_MAP_SETTINGS`.
 - Centered map orientation changes do not invalidate provider sessions, source
   tile cache, or encoded tile cache; rotated GPS-follow coverage still uses
-  ordinary x/y/zoom/theme `CMD_TILE_REQUEST` messages.
+  ordinary x/y/zoom `CMD_TILE_REQUEST` messages.
 - Duplicate in-flight tile requests are deduped.
 - Worst-case encoded payload fits negotiated AppMessage dictionary limits.
 

@@ -724,7 +724,6 @@ void send_next_tile_request(void) {
     write_i32(iter, MESSAGE_KEY_world_x, request.world_x);
     write_i32(iter, MESSAGE_KEY_world_y, request.world_y);
     write_i32(iter, MESSAGE_KEY_tile_zoom, request.zoom);
-    write_i32(iter, MESSAGE_KEY_is_color, s_theme_mode);
     write_i32(iter, MESSAGE_KEY_request_id, request_id);
     result = app_message_outbox_send();
     if (result != APP_MSG_OK) {

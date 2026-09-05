@@ -55,10 +55,10 @@ internal class MappyWatchCommandDispatcher(
         destinations.sortBy { it.slot }
     }
 
-    fun dispatch(message: Map<*, *>): List<Map<String, Any?>> =
+    fun dispatch(message: Map<*, *>, cancellation: TileCancellationToken = TileCancellationToken()): List<Map<String, Any?>> =
         when (intValue(message, KEY_CMD)) {
             CMD_INIT -> handleInit(message)
-            CMD_TILE_REQUEST -> handleTileRequest(message)
+            CMD_TILE_REQUEST -> handleTileRequest(message, cancellation)
             CMD_ROUTE_REQUEST -> handleRouteRequest(message)
             CMD_ROUTE_WINDOW_REQUEST -> handleRouteWindowRequest(message)
             CMD_NAV_STEPS -> handleNavSteps(message)
@@ -69,7 +69,6 @@ internal class MappyWatchCommandDispatcher(
                 if (requestId != null) clearActiveRoute(requestId)
                 emptyList()
             }
-            CMD_THEME -> updateScalarSetting(CMD_THEME, intValue(message, KEY_BUTTON_ID))
             CMD_TRAVEL_MODE -> updateScalarSetting(CMD_TRAVEL_MODE, intValue(message, KEY_BUTTON_ID))
             CMD_UNITS -> updateScalarSetting(CMD_UNITS, intValue(message, KEY_BUTTON_ID))
             CMD_BACKLIGHT -> updateScalarSetting(CMD_BACKLIGHT, intValue(message, KEY_BUTTON_ID))
@@ -221,7 +220,6 @@ internal class MappyWatchCommandDispatcher(
         val messages = mutableListOf<Map<String, Any?>>()
         synchronized(lock) {
             var next = settings
-            intValue(raw, THEME_MODE_SETTING)?.let { next = next.copy(themeMode = themeProtocolValue(it)); messages.add(themeMessage(next)) }
             intValue(raw, TRAVEL_MODE_SETTING)?.let { next = next.copy(travelMode = travelProtocolValue(it)); messages.add(travelModeMessage(next)) }
             intValue(raw, UNITS_MODE_SETTING)?.let { next = next.copy(unitsMode = unitsProtocolValue(it)); messages.add(unitsMessage(next)) }
             intValue(raw, BACKLIGHT_MODE_SETTING)?.let { next = next.copy(backlightMode = backlightProtocolValue(it)); messages.add(backlightMessage(next)) }
@@ -263,7 +261,7 @@ internal class MappyWatchCommandDispatcher(
         val currentSettings = synchronized(lock) { settings }
         val responses = mutableListOf(
             watchMessage(CMD_PHONE_READY, mapOf(KEY_PROTOCOL_VERSION to WATCH_PROTOCOL_VERSION)),
-            themeMessage(currentSettings), travelModeMessage(currentSettings), unitsMessage(currentSettings),
+            travelModeMessage(currentSettings), unitsMessage(currentSettings),
             backlightMessage(currentSettings), hapticModeMessage(currentSettings), glanceModeMessage(currentSettings),
             mapSettingsMessage(0), mapOrientationMessage(currentSettings),
             tileAnimationMessage(currentSettings), destinationsMessage()
@@ -312,7 +310,7 @@ internal class MappyWatchCommandDispatcher(
         }
     }
 
-    private fun handleTileRequest(message: Map<*, *>): List<Map<String, Any?>> {
+    private fun handleTileRequest(message: Map<*, *>, cancellation: TileCancellationToken): List<Map<String, Any?>> {
         val worldX = intValue(message, KEY_WORLD_X)
         val worldY = intValue(message, KEY_WORLD_Y)
         val zoom = intValue(message, KEY_TILE_ZOOM)
@@ -320,25 +318,33 @@ internal class MappyWatchCommandDispatcher(
         if (worldX == null || worldY == null || zoom == null || requestId == null || requestId <= 0) {
             return listOf(errorMessage(ERROR_TILE_PROVIDER, CMD_TILE_REQUEST, "Invalid tile request.", extra = requestId?.let { mapOf(KEY_REQUEST_ID to it) }.orEmpty()))
         }
-        val theme = synchronized(lock) { settings.themeMode }
-        val tile = mapTilesProvider.watchTile(worldX, worldY, zoom, themeProtocolValue(intValue(message, KEY_IS_COLOR) ?: theme))
-        val bytes = byteArrayValue(tile[KEY_CHUNK_DATA])
-        if (tile["ok"] == true && bytes != null) {
-            val width = intValue(tile, KEY_WIDTH) ?: mapTilesProvider.currentMapTileSettings().watchTileWidth
-            val height = intValue(tile, KEY_HEIGHT) ?: mapTilesProvider.currentMapTileSettings().watchTileHeight
-            return bytes.asList().chunked(MAX_WATCH_TILE_CHUNK_BYTES).mapIndexed { index, chunk ->
+        val tile = mapTilesProvider.watchTilePreparation(worldX, worldY, zoom, cancellation)
+        val encoded = tile.encoded
+        eventSink(mapOf(
+            "event" to if (tile.ok) "tilePrepared" else "tilePreparationFailed", KEY_REQUEST_ID to requestId,
+            TILE_WORK_ID to message[TILE_WORK_ID],
+            "tileMetrics" to encoded?.preparationMetrics, "tile_source" to tile.source,
+            KEY_COMPRESSION_FORMAT to encoded?.format,
+            KEY_TOTAL_BYTES to encoded?.payload?.size
+        ))
+        if (encoded != null) {
+            val bytes = encoded.payload
+            return (bytes.indices step MAX_WATCH_TILE_CHUNK_BYTES).mapIndexed { index, offset ->
                 watchMessage(CMD_TILE, mapOf(
                     KEY_WORLD_X to worldX, KEY_WORLD_Y to worldY, KEY_TILE_ZOOM to zoom,
-                    KEY_WIDTH to width, KEY_HEIGHT to height, KEY_TOTAL_BYTES to bytes.size,
-                    KEY_CHUNK_INDEX to index, KEY_CHUNK_OFFSET to index * MAX_WATCH_TILE_CHUNK_BYTES,
-                    KEY_CHUNK_DATA to chunk.toByteArray(), KEY_REQUEST_ID to requestId
+                    KEY_WIDTH to encoded.width, KEY_HEIGHT to encoded.height, KEY_TOTAL_BYTES to bytes.size,
+                    KEY_CHUNK_INDEX to index, KEY_CHUNK_OFFSET to offset,
+                    KEY_CHUNK_DATA to bytes.copyOfRange(offset, minOf(offset + MAX_WATCH_TILE_CHUNK_BYTES, bytes.size)),
+                    TILE_WORK_ID to message[TILE_WORK_ID],
+                    KEY_COMPRESSION_FORMAT to encoded.format, KEY_REQUEST_ID to requestId
                 ))
             }
         }
+        val failure = tile.failure.orEmpty()
         return listOf(errorMessage(
-            intValue(tile, KEY_ERROR_CATEGORY) ?: ERROR_TILE_PROVIDER,
+            intValue(failure, KEY_ERROR_CATEGORY) ?: ERROR_TILE_PROVIDER,
             CMD_TILE_REQUEST,
-            tile["detail"] as? String ?: "Watch tile provider failed.",
+            failure["detail"] as? String ?: "Watch tile provider failed.",
             worldX = worldX, worldY = worldY, zoom = zoom,
             extra = mapOf(KEY_REQUEST_ID to requestId)
         ))
@@ -605,7 +611,6 @@ internal class MappyWatchCommandDispatcher(
     private fun updateScalarSetting(command: Int, value: Int?): List<Map<String, Any?>> {
         val (updatedSettings, responses) = synchronized(lock) {
             settings = when (command) {
-                CMD_THEME -> settings.copy(themeMode = themeProtocolValue(value))
                 CMD_TRAVEL_MODE -> settings.copy(travelMode = travelProtocolValue(value))
                 CMD_UNITS -> settings.copy(unitsMode = unitsProtocolValue(value))
                 CMD_BACKLIGHT -> settings.copy(backlightMode = backlightProtocolValue(value))
@@ -617,7 +622,6 @@ internal class MappyWatchCommandDispatcher(
             }
             saveNativeDisplaySettings(appContext, settings)
             val messages = when (command) {
-                CMD_THEME -> listOf(themeMessage(settings), mapSettingsMessage(4))
                 CMD_TRAVEL_MODE -> listOf(travelModeMessage(settings))
                 CMD_UNITS -> listOf(unitsMessage(settings))
                 CMD_BACKLIGHT -> listOf(backlightMessage(settings))
@@ -637,7 +641,6 @@ internal class MappyWatchCommandDispatcher(
         return responses
     }
 
-    private fun themeMessage(value: NativeDisplaySettings) = watchMessage(CMD_THEME, mapOf(KEY_BUTTON_ID to value.themeMode))
     private fun travelModeMessage(value: NativeDisplaySettings) = watchMessage(CMD_TRAVEL_MODE, mapOf(KEY_BUTTON_ID to value.travelMode))
     private fun unitsMessage(value: NativeDisplaySettings) = watchMessage(CMD_UNITS, mapOf(KEY_BUTTON_ID to value.unitsMode))
     private fun backlightMessage(value: NativeDisplaySettings) = watchMessage(CMD_BACKLIGHT, mapOf(KEY_BUTTON_ID to value.backlightMode))

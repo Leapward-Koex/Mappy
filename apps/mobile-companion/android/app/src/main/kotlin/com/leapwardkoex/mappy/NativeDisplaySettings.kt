@@ -3,7 +3,6 @@ package com.leapwardkoex.mappy
 import android.content.Context
 
 internal data class NativeDisplaySettings(
-    val themeMode: Int,
     val travelMode: Int,
     val unitsMode: Int,
     val backlightMode: Int,
@@ -16,7 +15,6 @@ internal data class NativeDisplaySettings(
 internal fun loadNativeDisplaySettings(context: Context): NativeDisplaySettings {
     val preferences = context.getSharedPreferences(DISPLAY_SETTINGS_PREFERENCES_NAME, Context.MODE_PRIVATE)
     return NativeDisplaySettings(
-        themeMode = themeProtocolValue(preferences.getInt(THEME_MODE_SETTING, DEFAULT_THEME_MODE)),
         travelMode = travelProtocolValue(preferences.getInt(TRAVEL_MODE_SETTING, DEFAULT_TRAVEL_PROTOCOL_MODE)),
         unitsMode = unitsProtocolValue(preferences.getInt(UNITS_MODE_SETTING, DEFAULT_UNITS_MODE)),
         backlightMode = backlightProtocolValue(preferences.getInt(BACKLIGHT_MODE_SETTING, DEFAULT_BACKLIGHT_MODE)),
@@ -41,7 +39,6 @@ internal fun saveNativeDisplaySettings(
 ) {
     context.getSharedPreferences(DISPLAY_SETTINGS_PREFERENCES_NAME, Context.MODE_PRIVATE)
         .edit()
-        .putInt(THEME_MODE_SETTING, themeProtocolValue(settings.themeMode))
         .putInt(TRAVEL_MODE_SETTING, travelProtocolValue(settings.travelMode))
         .putInt(UNITS_MODE_SETTING, unitsProtocolValue(settings.unitsMode))
         .putInt(BACKLIGHT_MODE_SETTING, backlightProtocolValue(settings.backlightMode))
@@ -54,7 +51,6 @@ internal fun saveNativeDisplaySettings(
 
 internal fun displaySettingsMap(settings: NativeDisplaySettings): Map<String, Any?> =
     mapOf(
-        THEME_MODE_SETTING to settings.themeMode,
         TRAVEL_MODE_SETTING to settings.travelMode,
         UNITS_MODE_SETTING to settings.unitsMode,
         BACKLIGHT_MODE_SETTING to settings.backlightMode,

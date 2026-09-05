@@ -106,6 +106,7 @@ def write_fixture_options(ctx):
         'tileHeight': fixture_int_env('MAPPY_FIXTURE_TILE_HEIGHT', 63, 63, 126),
         'tileChunkBytes': fixture_int_env('MAPPY_FIXTURE_TILE_CHUNK_BYTES', 3072, 128, 3072),
         'tileHighEntropy': fixture_bool_env('MAPPY_FIXTURE_TILE_HIGH_ENTROPY'),
+        'tileCodec': fixture_int_env('MAPPY_FIXTURE_TILE_CODEC', 0, 0, 4),
         'routePointCount': fixture_int_env('MAPPY_FIXTURE_ROUTE_POINT_COUNT', 3, 3, 128),
         'txSuccessDelayMs': fixture_int_env('MAPPY_FIXTURE_TX_SUCCESS_DELAY_MS', 45, 0, 5000),
         'txFailureDelayMs': fixture_int_env('MAPPY_FIXTURE_TX_FAILURE_DELAY_MS', 180, 0, 5000),

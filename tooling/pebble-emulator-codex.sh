@@ -91,12 +91,15 @@ Environment:
                            Fixture tile height: 63, 84, or 126.
   MAPPY_FIXTURE_TILE_CHUNK_BYTES
                            Maximum deterministic tile chunk size: 128..3072.
+  MAPPY_FIXTURE_TILE_CODEC Codec golden format1..4, or0 for map fixture.
+  MAPPY_WATCH_HARDWARE_PERF
+                           Build phone mode with local tile/render timing logs.
   MAPPY_FIXTURE_TILE_HIGH_ENTROPY
                            Periodically inject a multi-chunk stress tile.
   MAPPY_FIXTURE_ROUTE_POINT_COUNT
                            Deterministic fixture route points: 3..128.
   MAPPY_FIXTURE_PHONE_READY_DELAY_MS
-                           Delay version-2 phone-ready after INIT.
+                           Delay protocol-v4 phone-ready after INIT.
   MAPPY_FIXTURE_IGNORE_STARTUP_READY
                            Wait for INIT instead of pushing startup state.
   MAPPY_FIXTURE_IGNORE_FIRST_INIT
@@ -310,6 +313,7 @@ doctor() {
 test_tooling() {
   require_pebble
   "$(pebble_tool_python)" "$ROOT_DIR/tooling/test-pebble-development.py"
+  node "$ROOT_DIR/tooling/test-pebble-fixture-codecs.js"
   test_motion_host
   test_navigation_feedback_host
   test_pan_inertia_host
@@ -396,6 +400,7 @@ test_tile_cache_host() {
   "$output"
   rm -f "$output"
   trap - RETURN
+  python3 "$ROOT_DIR/tooling/test-tile-codec-vectors.py"
 }
 
 test_tile_scheduler_host() {
