@@ -182,6 +182,35 @@ bash tooling/pebble-emulator-codex.sh debug-facing 45
 bash tooling/pebble-emulator-codex.sh debug-tile 0
 ```
 
+### Face-forward frame-rate benchmark
+
+Run the same compass stream before and after a rendering or smoothing change:
+
+```powershell
+.\tooling\pebble-wsl.ps1 test-face-forward-cadence
+```
+
+From WSL, use `bash tooling/pebble-emulator-codex.sh test-face-forward-cadence`.
+The command builds a fixture with 128 route points and tile animation disabled,
+warms the 0–90° tile coverage, then replays thirty 3° compass updates at 100 ms
+intervals using a timer independent of rendering. It uses the normal bearing
+profile and measures through the final completed draw after smoothing settles.
+The command owns and stops its emulator, including on failure.
+
+`MAPPY_FPERF` reports completed frames (`n`), milliseconds to the first completed
+frame (`first`), and the first-to-last completion interval (`span`). Actual draw
+cadence is `(n - 1) * 1000 / span` FPS; total time to the final frame is
+`first + span`. The helper reports draw CPU time separately and saves
+`codex-emulator/face-forward-cadence.log` and `codex-emulator/facing-cadence.png`.
+Keep a copy of each run's log when comparing the old and new implementation.
+There is no minimum FPS gate, so the old approximately 10 FPS path can be
+measured with the same input; errors, missing frames, and draws above 50 ms fail.
+
+The command enables `MAPPY_FIXTURE_FRAME_PERF=1`, which adds fixture-only timing
+and replay code. Normal fixture builds and production phone builds have no added cadence
+instrumentation overhead. Emulator cadence measures completed app draws; it
+does not measure a physical watch display's refresh rate.
+
 ### Motion-assisted face-forward reacquisition
 
 During an active face-forward Walk route, the production watch app samples the

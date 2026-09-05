@@ -238,8 +238,8 @@ static int smoothing_ticks(int32_t start, int32_t target, bool fast) {
 }
 
 static void test_bearing_profiles(void) {
-  CHECK(bearing_smoothing_step_centi_degrees(100, false) == 400,
-        "normal profile must retain its four-degree minimum");
+  CHECK(bearing_smoothing_step_centi_degrees(100, false) == 25,
+        "normal profile must interpolate ordinary one-degree sensor updates");
   CHECK(bearing_smoothing_step_centi_degrees(30000, false) == 1200,
         "normal profile must retain its twelve-degree cap");
   CHECK(bearing_smoothing_step_centi_degrees(100, true) == 800,
@@ -280,8 +280,11 @@ static void test_bearing_profiles(void) {
         "four delayed virtual ticks must catch up without snapping");
   CHECK(bearing_smoothing_advance_ticks(0, 18000, true, 4) != 18000,
         "the four-tick catch-up cap must preserve two displayed fast frames");
-  CHECK(bearing_smoothing_advance_ticks(35900, 100, false, 4) == 100,
-        "elapsed catch-up must retain shortest-path wraparound");
+  int32_t wrapped = bearing_smoothing_advance_ticks(35900, 100, false, 4);
+  CHECK(wrapped != 100 &&
+            bearing_smoothing_shortest_delta(35900, wrapped) > 0 &&
+            bearing_smoothing_shortest_delta(wrapped, 100) > 0,
+        "elapsed catch-up must interpolate across zero by the shortest path");
 
   uint32_t elapsed_remainder = 0;
   CHECK(bearing_smoothing_consume_elapsed_ticks(
@@ -298,6 +301,85 @@ static void test_bearing_profiles(void) {
         "retained catch-up backlog must drain on the next displayed frame");
 }
 
+static void test_bearing_small_updates(void) {
+  const int32_t starts[] = {0, 35900, 100};
+  const int32_t targets[] = {200, 100, 35900};
+  for (unsigned i = 0; i < sizeof(starts) / sizeof(starts[0]); i++) {
+    int32_t current = starts[i];
+    int32_t remaining = bearing_smoothing_shortest_delta(current, targets[i]);
+    int ticks = 0;
+    while (remaining != 0 && ticks < 20) {
+      int32_t next = bearing_smoothing_advance(current, targets[i], false);
+      int32_t step = bearing_smoothing_shortest_delta(current, next);
+      CHECK((remaining > 0 && step > 0 && step <= remaining) ||
+                (remaining < 0 && step < 0 && step >= remaining),
+            "small compass updates must converge without overshoot or reversal");
+      CHECK(abs(step) <= 50,
+            "a two-degree sensor update must start with at most half a degree");
+      CHECK(next >= 0 && next < 36000,
+            "interpolated bearing must stay normalized through north");
+      current = next;
+      remaining = bearing_smoothing_shortest_delta(current, targets[i]);
+      ticks++;
+    }
+    CHECK(remaining == 0 && ticks >= 4 && ticks <= 8,
+          "two-degree updates must animate and settle within 240ms");
+  }
+
+  CHECK(bearing_smoothing_advance(0, 10, false) == 10 &&
+            bearing_smoothing_advance(10, 0, false) == 0,
+        "sub-quarter-degree tails must settle so an idle compass stops drawing");
+  CHECK(bearing_smoothing_advance_ticks(100, 35900, false, 0) == 100,
+        "no elapsed ticks must leave the displayed bearing unchanged");
+  int32_t sequential = 35900;
+  for (int i = 0; i < 4; i++) {
+    sequential = bearing_smoothing_advance(sequential, 100, false);
+  }
+  CHECK(bearing_smoothing_advance_ticks(35900, 100, false, 4) == sequential,
+        "delayed frames must match the same elapsed small-angle filter steps");
+}
+
+static void test_bearing_sensor_stream(void) {
+  // 30 degrees/second, with a quantized sensor event every 100ms and a 30ms
+  // render tick. Begin just west of north to also exercise a streamed wrap.
+  int32_t current = 35000;
+  int32_t target = current;
+  int changed_frames = 0;
+  int32_t max_lag = 0;
+  for (int tick = 0; tick < 100; tick++) {
+    int sensor_events = tick * 30 / 100 + 1;
+    target = (35000 + sensor_events * 300) % 36000;
+    int32_t next = bearing_smoothing_advance(current, target, false);
+    int32_t step = bearing_smoothing_shortest_delta(current, next);
+    CHECK(step > 0 && step < 200,
+          "streamed sensor motion must advance in small clockwise frames");
+    if (next != current) {
+      changed_frames++;
+    }
+    current = next;
+    int32_t lag = bearing_smoothing_shortest_delta(current, target);
+    if (lag > max_lag) {
+      max_lag = lag;
+    }
+  }
+  CHECK(changed_frames == 100,
+        "30 sensor events must keep all 100 render ticks visibly advancing");
+  CHECK(max_lag <= 400,
+        "ordinary turns must stay within four degrees of the latest sensor");
+  CHECK(smoothing_ticks(current, target, false) <= 8,
+        "the display must settle promptly after a streamed turn stops");
+
+  // Alternating one-degree noise at each tick should be attenuated around
+  // north instead of turning into a two-degree display jump on every sample.
+  current = 0;
+  for (int tick = 0; tick < 60; tick++) {
+    target = tick % 2 == 0 ? 100 : 35900;
+    current = bearing_smoothing_advance(current, target, false);
+    CHECK(abs(bearing_smoothing_shortest_delta(0, current)) <= 25,
+          "alternating compass jitter must remain within a quarter degree");
+  }
+}
+
 int main(void) {
   test_csv_fixtures();
   test_idle_and_false_raises();
@@ -305,6 +387,8 @@ int main(void) {
   test_short_walk_vibration_and_candidate_timeout();
   test_rearm_after_second_walk();
   test_bearing_profiles();
+  test_bearing_small_updates();
+  test_bearing_sensor_stream();
   if (s_failures != 0) {
     fprintf(stderr, "motion detector tests: %d failure(s)\n", s_failures);
     return 1;

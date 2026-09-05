@@ -1,6 +1,10 @@
 #include "bearing_smoothing.h"
 
-#define NORMAL_MIN_STEP_CENTI_DEGREES 400
+// Preserve sub-degree frames between compass events. A four-degree minimum
+// snapped ordinary sensor updates in one tick, tying visible motion to the
+// sensor cadence. Quarter-residual steps instead provide a cheap circular
+// low-pass response; the small floor finishes the tail and lets rendering idle.
+#define NORMAL_MIN_STEP_CENTI_DEGREES 25
 #define NORMAL_MAX_STEP_CENTI_DEGREES 1200
 #define NORMAL_STEP_DIVISOR 4
 #define FAST_MIN_STEP_CENTI_DEGREES 800

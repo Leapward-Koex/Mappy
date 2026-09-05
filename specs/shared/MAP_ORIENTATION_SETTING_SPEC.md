@@ -159,10 +159,22 @@ Bearing animation remains shortest-path and uses the shared 30 ms scheduler:
 
 | Profile | Base step per tick | Tail rule |
 | --- | --- | --- |
-| Normal | `clamp(abs_delta / 4, 4 deg, 12 deg)` | Complete when the remaining delta fits in one step. |
+| Normal | `clamp(abs_delta / 4, 0.25 deg, 12 deg)` | Complete when the remaining delta fits in one step. |
 | Fast reacquire | `clamp(abs_delta / 3, 8 deg, 24 deg)` | Split the final 24–48 degrees across two frames and complete the final at-most-24 degrees in one frame. |
 
-The fast profile therefore remains animated and settles a worst-case
+The normal profile interpolates even one-degree compass updates across several
+render ticks. Its quarter-residual low-pass response follows the shortest
+circular delta, reducing small-angle jitter while retaining the existing
+12-degree cap for larger changes. The 0.25-degree floor settles small tails so
+rendering can stop when the compass becomes idle. This adds modest display lag
+in exchange for continuous motion between sensor events; it does not increase
+the compass sensor event rate.
+
+Both profiles advance in elapsed 30 ms virtual ticks, consuming up to four per
+displayed frame. Fractional time and excess backlog are retained so delayed
+frames catch up without changing the smoothing response.
+
+The fast profile remains animated and settles a worst-case
 180-degree change within eight ticks/240 ms. Every accepted compass update in
 the window replaces the target. Invalid heading still falls back to north-up;
 it must never cause a stale or synthetic bearing to be animated.
@@ -473,9 +485,12 @@ Watch unit tests:
   and a stationary wrist raise do not emit a watch-look event.
 - Three cadence peaks followed by a stable raised pose emit exactly one
   watch-look event; a new walking cadence rearms the detector.
-- Normal bearing smoothing retains its existing 4–12 degree profile. Fast
-  reacquisition is visibly animated, follows the shortest wraparound path,
-  accepts a changed target, and completes 180 degrees within 240 ms.
+- Normal bearing smoothing interpolates small sensor changes in fractional
+  degrees, advances between streamed sensor events, attenuates jitter across
+  north, and settles without overshoot. Delayed frames produce the same result
+  as the corresponding number of 30 ms filter steps. Fast reacquisition is
+  visibly animated, follows the shortest wraparound path, accepts a changed
+  target, and completes 180 degrees within eight virtual ticks/240 ms.
 - Manual-browse bearing animation advances across multiple visual ticks without
   rotating the map, recomputing route projection, or rebuilding tile coverage.
 

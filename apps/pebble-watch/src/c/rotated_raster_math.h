@@ -122,18 +122,26 @@ static inline void rotated_raster_step_init(RotatedRasterStep *step,
   }
 }
 
+// When a normalized tile cursor already tracks the integer position, retain
+// only the fractional phase: no duplicate rounded coordinate in the hot loop.
+static inline int32_t rotated_raster_phase_advance(
+    uint16_t *current_phase, const RotatedRasterStep *step) {
+  uint32_t phase = (uint32_t)*current_phase + step->phase;
+  int32_t delta = step->whole;
+  if (phase >= ROTATED_RASTER_TRIG_RATIO) {
+    phase -= ROTATED_RASTER_TRIG_RATIO;
+    delta++;
+  }
+  *current_phase = (uint16_t)phase;
+  return delta;
+}
+
 static inline int32_t rotated_raster_accumulator_advance(
     RotatedRasterAccumulator *accumulator,
     const RotatedRasterStep *step) {
-  int32_t previous = accumulator->rounded;
-  uint32_t phase = (uint32_t)accumulator->phase + step->phase;
-  accumulator->rounded += step->whole;
-  if (phase >= ROTATED_RASTER_TRIG_RATIO) {
-    phase -= ROTATED_RASTER_TRIG_RATIO;
-    accumulator->rounded++;
-  }
-  accumulator->phase = (uint16_t)phase;
-  return accumulator->rounded - previous;
+  int32_t delta = rotated_raster_phase_advance(&accumulator->phase, step);
+  accumulator->rounded += delta;
+  return delta;
 }
 
 static inline void rotated_raster_point_advance(

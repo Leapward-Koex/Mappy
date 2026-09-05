@@ -809,6 +809,9 @@ void settle_pan_motion(void);
 void cancel_pan_motion_for_teardown(void);
 #ifdef MAPPY_WATCH_PHONE_MODE_FIXTURE
 void fixture_perf_begin(void);
+#ifdef MAPPY_FIXTURE_FRAME_PERF
+void fixture_perf_start_compass_replay(void);
+#endif
 void fixture_perf_bearing_immediate_step(void);
 void fixture_perf_scheduler_tick(bool bearing_active, bool gps_active,
                                  bool tile_active, bool menu_active,

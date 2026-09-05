@@ -211,7 +211,7 @@ static TestRleLookup make_rle_lookup(int width, int height,
 static bool sample_test_rle_cache(
     const TestRleLookup *lookup, const TestCoordinate *coordinate,
     TestRleCacheKey cache[TEST_ROTATED_RLE_BLOCK_CACHE_SIZE],
-    TestRleCacheStats *stats) {
+    TestRleCacheStats *stats, bool legacy_hash) {
   stats->samples++;
   int32_t dx = coordinate->x - lookup->min_x;
   int32_t dy = coordinate->y - lookup->min_y;
@@ -236,11 +236,13 @@ static bool sample_test_rle_cache(
   uint8_t cell_index = (uint8_t)cell;
   uint8_t block = (uint8_t)block_value;
 
-  // Keep this hash and key comparison byte-for-byte equivalent to the
-  // production 16-slot direct-mapped rotated RLE block cache.
-  uint8_t slot = (uint8_t)(((cell_index * 7) +
-                            (uint16_t)local_y * 5 + block * 11) &
-                           (TEST_ROTATED_RLE_BLOCK_CACHE_SIZE - 1));
+  // Retain the previous hash so identical 8x8 traversals can isolate cache
+  // collisions. The current hash keeps neighboring source rows distinct,
+  // including where an adjacent tile resets its local row to zero.
+  uint32_t hash = legacy_hash
+      ? (uint32_t)cell_index * 7 + (uint32_t)local_y * 5 + block * 11
+      : (uint32_t)coordinate->y + (uint32_t)block * 8;
+  uint8_t slot = (uint8_t)(hash & (TEST_ROTATED_RLE_BLOCK_CACHE_SIZE - 1));
   TestRleCacheKey *cached = &cache[slot];
   if (cached->cell_index == cell_index &&
       cached->row == (uint8_t)local_y && cached->block == block) {
@@ -263,7 +265,7 @@ static bool sample_test_rle_cache(
 
 static TestRleCacheStats simulate_rle_cache_order(
     const TestCoordinate *coordinates, int width, int height,
-    const TestRleLookup *lookup, bool block_order) {
+    const TestRleLookup *lookup, bool block_order, bool legacy_hash) {
   TestRleCacheStats stats = {0};
   TestRleCacheKey cache[TEST_ROTATED_RLE_BLOCK_CACHE_SIZE];
   memset(cache, 0xff, sizeof(cache));
@@ -272,7 +274,7 @@ static TestRleCacheStats simulate_rle_cache_order(
     for (int y = 0; y < height; y++) {
       for (int x = 0; x < width; x++) {
         sample_test_rle_cache(lookup, &coordinates[y * width + x],
-                              cache, &stats);
+                              cache, &stats, legacy_hash);
       }
     }
     return stats;
@@ -295,7 +297,7 @@ static TestRleCacheStats simulate_rle_cache_order(
           int x = block_x + block_col;
           int y = block_y + block_row;
           sample_test_rle_cache(lookup, &coordinates[y * width + x],
-                                cache, &stats);
+                                cache, &stats, legacy_hash);
         }
       }
     }
@@ -322,10 +324,12 @@ static void dda_coordinates(TestCoordinate *coordinates,
     if (block_h > ROTATED_RASTER_BLOCK_SIZE) {
       block_h = ROTATED_RASTER_BLOCK_SIZE;
     }
-    RotatedRasterPoint row_points[ROTATED_RASTER_BLOCK_SIZE];
+    uint16_t row_phase_x[ROTATED_RASTER_BLOCK_SIZE];
+    uint16_t row_phase_y[ROTATED_RASTER_BLOCK_SIZE];
     TestCoordinate row_coordinates[ROTATED_RASTER_BLOCK_SIZE];
     for (int block_row = 0; block_row < block_h; block_row++) {
-      row_points[block_row] = next_row;
+      row_phase_x[block_row] = next_row.x.phase;
+      row_phase_y[block_row] = next_row.y.phase;
       row_coordinates[block_row] = next_row_coordinate;
       if (block_y + block_row + 1 < height) {
         int32_t dx;
@@ -343,20 +347,20 @@ static void dda_coordinates(TestCoordinate *coordinates,
         block_w = ROTATED_RASTER_BLOCK_SIZE;
       }
       for (int block_row = 0; block_row < block_h; block_row++) {
+        uint16_t phase_x = row_phase_x[block_row];
+        uint16_t phase_y = row_phase_y[block_row];
+        TestCoordinate coordinate = row_coordinates[block_row];
         for (int block_col = 0; block_col < block_w; block_col++) {
           int x = block_x + block_col;
-          coordinates[(block_y + block_row) * width + x] =
-              row_coordinates[block_row];
+          coordinates[(block_y + block_row) * width + x] = coordinate;
           if (x + 1 < width) {
-            int32_t dx;
-            int32_t dy;
-            rotated_raster_point_advance(&row_points[block_row],
-                                         &dda.pixel_x, &dda.pixel_y,
-                                         &dx, &dy);
-            row_coordinates[block_row].x += dx;
-            row_coordinates[block_row].y += dy;
+            coordinate.x += rotated_raster_phase_advance(&phase_x, &dda.pixel_x);
+            coordinate.y += rotated_raster_phase_advance(&phase_y, &dda.pixel_y);
           }
         }
+        row_phase_x[block_row] = phase_x;
+        row_phase_y[block_row] = phase_y;
+        row_coordinates[block_row] = coordinate;
       }
     }
   }
@@ -396,14 +400,16 @@ static void cardinal_coordinates(TestCoordinate *coordinates,
         block_w = ROTATED_RASTER_BLOCK_SIZE;
       }
       for (int block_row = 0; block_row < block_h; block_row++) {
+        TestCoordinate coordinate = rows[block_row];
         for (int block_col = 0; block_col < block_w; block_col++) {
           int x = block_x + block_col;
-          coordinates[(block_y + block_row) * width + x] = rows[block_row];
+          coordinates[(block_y + block_row) * width + x] = coordinate;
           if (x + 1 < width) {
-            rows[block_row].x += cardinal->pixel_dx;
-            rows[block_row].y += cardinal->pixel_dy;
+            coordinate.x += cardinal->pixel_dx;
+            coordinate.y += cardinal->pixel_dy;
           }
         }
+        rows[block_row] = coordinate;
       }
     }
   }
@@ -534,10 +540,12 @@ static void render_optimized_dda(uint8_t *framebuffer, int stride,
     if (block_h > ROTATED_RASTER_BLOCK_SIZE) {
       block_h = ROTATED_RASTER_BLOCK_SIZE;
     }
-    RotatedRasterPoint row_points[ROTATED_RASTER_BLOCK_SIZE];
+    uint16_t row_phase_x[ROTATED_RASTER_BLOCK_SIZE];
+    uint16_t row_phase_y[ROTATED_RASTER_BLOCK_SIZE];
     TestCursor row_cursors[ROTATED_RASTER_BLOCK_SIZE];
     for (int row = 0; row < block_h; row++) {
-      row_points[row] = next_row_point;
+      row_phase_x[row] = next_row_point.x.phase;
+      row_phase_y[row] = next_row_point.y.phase;
       row_cursors[row] = next_row_cursor;
       if (block_y + row + 1 < height) {
         int32_t dx;
@@ -554,24 +562,26 @@ static void render_optimized_dda(uint8_t *framebuffer, int stride,
         block_w = ROTATED_RASTER_BLOCK_SIZE;
       }
       for (int row = 0; row < block_h; row++) {
+        uint16_t phase_x = row_phase_x[row];
+        uint16_t phase_y = row_phase_y[row];
+        TestCursor cursor = row_cursors[row];
         for (int col = 0; col < block_w; col++) {
           int x = block_x + col;
           uint8_t value;
-          if (synthetic_sample_cursor(&row_cursors[row], tile_w, tile_h,
-                                      &value)) {
+          if (synthetic_sample_cursor(&cursor, tile_w, tile_h, &value)) {
             framebuffer[(block_y + row) * stride + x] = value;
           } else if (fill_missing) {
             framebuffer[(block_y + row) * stride + x] = background;
           }
           if (x + 1 < width) {
-            int32_t dx;
-            int32_t dy;
-            rotated_raster_point_advance(&row_points[row],
-                                         &dda.pixel_x, &dda.pixel_y,
-                                         &dx, &dy);
-            cursor_advance_unit(&row_cursors[row], dx, dy, tile_w, tile_h);
+            int32_t dx = rotated_raster_phase_advance(&phase_x, &dda.pixel_x);
+            int32_t dy = rotated_raster_phase_advance(&phase_y, &dda.pixel_y);
+            cursor_advance_unit(&cursor, dx, dy, tile_w, tile_h);
           }
         }
+        row_phase_x[row] = phase_x;
+        row_phase_y[row] = phase_y;
+        row_cursors[row] = cursor;
       }
     }
   }
@@ -611,20 +621,22 @@ static void render_optimized_cardinal(
         block_w = ROTATED_RASTER_BLOCK_SIZE;
       }
       for (int row = 0; row < block_h; row++) {
+        TestCursor cursor = rows[row];
         for (int col = 0; col < block_w; col++) {
           int x = block_x + col;
           uint8_t value;
-          if (synthetic_sample_cursor(&rows[row], tile_w, tile_h, &value)) {
+          if (synthetic_sample_cursor(&cursor, tile_w, tile_h, &value)) {
             framebuffer[(block_y + row) * stride + x] = value;
           } else if (fill_missing) {
             framebuffer[(block_y + row) * stride + x] = background;
           }
           if (x + 1 < width) {
-            cursor_advance_unit(&rows[row],
+            cursor_advance_unit(&cursor,
                                 cardinal->pixel_dx, cardinal->pixel_dy,
                                 tile_w, tile_h);
           }
         }
+        rows[row] = cursor;
       }
     }
   }
@@ -891,12 +903,12 @@ static void test_rle_cache_locality(void) {
                           sine_ratio(degrees), cosine_ratio(degrees));
 
     // Feed the same precomputed, pixel-exact source coordinates to both
-    // simulations. Only the access order differs: legacy scanlines versus
+    // simulations. Compare legacy scanlines/hash against
     // the production persistent-row 8x8 traversal.
     TestRleCacheStats legacy = simulate_rle_cache_order(
-        coordinates, width, height, &lookup, false);
+        coordinates, width, height, &lookup, false, true);
     TestRleCacheStats blocked = simulate_rle_cache_order(
-        coordinates, width, height, &lookup, true);
+        coordinates, width, height, &lookup, true, false);
     uint64_t expected_samples = (uint64_t)width * (uint64_t)height;
 
     CHECK(legacy.samples == expected_samples &&
@@ -965,6 +977,68 @@ static void test_rle_cache_locality(void) {
   free(coordinates);
 }
 
+static void test_rle_hash_tile_boundaries(void) {
+  const int width = 200;
+  const int height = 228;
+  const int geometries[][2] = {{54, 63}, {72, 84}, {108, 126}};
+  const int bearings[] = {15, 30, 45, 60, 75, 90, 135, 180, 225, 270, 315, 345};
+  const int offsets[] = {0, 1, 4, 7, 10, 11};
+  const uint64_t expected_samples = (uint64_t)width * height;
+  TestCoordinate *coordinates = malloc(
+      (size_t)expected_samples * sizeof(*coordinates));
+  CHECK(coordinates != NULL, "RLE hash coordinates must allocate");
+  if (!coordinates) return;
+
+  for (size_t g = 0; g < sizeof(geometries) / sizeof(geometries[0]); g++) {
+    uint64_t old_misses = 0;
+    uint64_t new_misses = 0;
+    uint64_t old_decoded = 0;
+    uint64_t new_decoded = 0;
+    for (size_t o = 0; o < sizeof(offsets) / sizeof(offsets[0]); o++) {
+      int32_t viewport_x = INT32_C(8388608) + offsets[o] * 29;
+      int32_t viewport_y = INT32_C(4194304) + offsets[o] * 41;
+      TestRleLookup lookup = make_rle_lookup(
+          width, height, geometries[g][0], geometries[g][1],
+          viewport_x, viewport_y);
+      for (size_t b = 0; b < sizeof(bearings) / sizeof(bearings[0]); b++) {
+        reference_coordinates(coordinates, width, height, width / 2, height / 2,
+                              viewport_x, viewport_y,
+                              sine_ratio(bearings[b]), cosine_ratio(bearings[b]));
+        TestRleCacheStats old = simulate_rle_cache_order(
+            coordinates, width, height, &lookup, true, true);
+        TestRleCacheStats current = simulate_rle_cache_order(
+            coordinates, width, height, &lookup, true, false);
+        CHECK(old.samples == expected_samples &&
+                  current.samples == expected_samples &&
+                  old.invalid_samples == 0 && current.invalid_samples == 0 &&
+                  old.hits + old.misses == expected_samples &&
+                  current.hits + current.misses == expected_samples,
+              "RLE hash accounting geometry=%zu offset=%d bearing=%d",
+              g, offsets[o], bearings[b]);
+        old_misses += old.misses;
+        new_misses += current.misses;
+        old_decoded += old.decoded_pixels;
+        new_decoded += current.decoded_pixels;
+      }
+    }
+    // Individual bearings can trade collisions; every supported tile size
+    // must reduce total misses and decode work by at least 5% across all
+    // quadrants and these distinct tile-boundary alignments. Local-row-only
+    // hashes alias badly at 84-row tile boundaries, so cover that size too.
+    CHECK(new_misses * 100 <= old_misses * 95 &&
+              new_decoded * 100 <= old_decoded * 95,
+          "RLE hash tile %dx%d regressed: misses=%" PRIu64 "/%" PRIu64
+          " decoded=%" PRIu64 "/%" PRIu64,
+          geometries[g][0], geometries[g][1], new_misses, old_misses,
+          new_decoded, old_decoded);
+    printf("RLE hash tile=%dx%d old_misses=%" PRIu64
+           " new_misses=%" PRIu64 " old_decoded=%" PRIu64
+           " new_decoded=%" PRIu64 "\n",
+           geometries[g][0], geometries[g][1], old_misses, new_misses,
+           old_decoded, new_decoded);
+  }
+  free(coordinates);
+}
 static void test_framebuffer_equivalence(void) {
   const int geometries[][2] = {{54, 63}, {72, 84}, {108, 126}};
   const int bearings[] = {0, 1, 4, 37, 89, 90, 179, 180, 269, 270, 359};
@@ -1062,6 +1136,7 @@ int main(void) {
   test_coordinate_equivalence();
   test_cursor_equivalence();
   test_rle_cache_locality();
+  test_rle_hash_tile_boundaries();
   test_framebuffer_equivalence();
   if (s_failures != 0) {
     fprintf(stderr, "rotated raster tests: %d failures\n", s_failures);

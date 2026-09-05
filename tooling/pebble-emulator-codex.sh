@@ -26,6 +26,8 @@ Commands:
   test-face-forward-render-host
                            Run exact rotated-raster tests and the host benchmark.
   test-face-forward-angles Run 0/30/45/60/75/90-degree Emery render gates.
+  test-face-forward-cadence
+                           Measure completed-draw FPS during a 10 Hz compass replay.
   test-render-performance  Run fixture bearing and tile-animation matrix assertions.
   test-pan-under-load [prompt]
                            Run pan/load assertions, or only the prompt fade case.
@@ -95,6 +97,7 @@ Environment:
                            Periodically inject a multi-chunk stress tile.
   MAPPY_FIXTURE_ROUTE_POINT_COUNT
                            Deterministic fixture route points: 3..128.
+  MAPPY_FIXTURE_FRAME_PERF  Optional fixture completed-frame metrics and compass replay.
   MAPPY_FIXTURE_PHONE_READY_DELAY_MS
                            Delay version-2 phone-ready after INIT.
   MAPPY_FIXTURE_IGNORE_STARTUP_READY
@@ -907,8 +910,11 @@ test_render_performance() {
     echo "Mixed source-advance assertion failed: $mixed" >&2
     return 1
   fi
-  if [[ -z "$mixed_ticks" || -z "$mixed_draws" ]] || (( mixed_draws < mixed_ticks )); then
-    echo "Mixed redraw assertion failed: $mixed" >&2
+  # Quantized GPS/menu tails can advance without changing a pixel. Require
+  # coalesced redraws, not a redundant paint for every logical scheduler tick.
+  if [[ -z "$mixed_ticks" || -z "$mixed_draws" ]] ||
+      (( mixed_draws < 1 || mixed_draws > mixed_ticks + 1 )); then
+    echo "Mixed redraw coalescing assertion failed: $mixed" >&2
     return 1
   fi
   if [[ -z "$mixed_clipped" ]] || (( mixed_clipped < 1 )); then
@@ -1044,6 +1050,85 @@ test_render_performance() {
     "$(windows_path "$log_file")"
   pebble kill >/dev/null 2>&1 || true
 }
+
+test_face_forward_cadence() (
+  require_pebble
+  set_phone_mode fixture
+  export MAPPY_FIXTURE_FRAME_PERF=1
+  export MAPPY_FIXTURE_ROUTE_POINT_COUNT=128
+  export MAPPY_FIXTURE_TILE_ANIMATION_MODE=0
+  export MAPPY_FIXTURE_TILE_DELAY_MS=0
+  export MAPPY_FIXTURE_TILE_STAGGER_MS=0
+  export MAPPY_FIXTURE_TILE_WIDTH=54
+  export MAPPY_FIXTURE_TILE_HEIGHT=63
+  export MAPPY_FIXTURE_TILE_HIGH_ENTROPY=0
+  mkdir -p "$OUT_DIR"
+  local log_file="$OUT_DIR/face-forward-cadence.log"
+  local log_pid=""
+  # This command owns its emulator run. A subshell EXIT trap also runs after
+  # failed builds, transport failures, assertions, or screenshots.
+  trap 'if [[ -n "$log_pid" ]]; then
+          kill "$log_pid" >/dev/null 2>&1 || true
+          wait "$log_pid" 2>/dev/null || true
+        fi
+        pebble kill >/dev/null 2>&1 || true' EXIT
+  pebble kill >/dev/null 2>&1 || true
+  install_app
+  sleep 6
+
+  send_debug_facing 0
+  sleep 3
+  send_debug_compass 90
+  sleep 3
+  send_debug_compass 0
+  sleep 3
+
+  # Start logging after warmup so only the replay measurement is parsed.
+  cd "$WATCH_DIR"
+  PYTHONUNBUFFERED=1 pebble logs --emulator "$PLATFORM" >"$log_file" 2>&1 &
+  log_pid=$!
+  sleep 1
+  pebble send-app-message --emulator "$PLATFORM" --app-uuid "$(app_uuid)" \
+    --int 50=901 52=5 60=0
+  sleep 5
+  kill "$log_pid" >/dev/null 2>&1 || true
+  wait "$log_pid" 2>/dev/null || true
+  log_pid=""
+  capture_screenshot facing-cadence.png
+
+  local frame_summary perf_summary frames first_ms span_ms errors draws
+  local draw_total draw_max
+  frame_summary="$(grep 'MAPPY_FPERF' "$log_file" | tail -1 || true)"
+  perf_summary="$(grep 'MAPPY_PERF' "$log_file" | tail -1 || true)"
+  frames="$(perf_summary_value "$frame_summary" n)"
+  first_ms="$(perf_summary_value "$frame_summary" first)"
+  span_ms="$(perf_summary_value "$frame_summary" span)"
+  errors="$(perf_summary_value "$perf_summary" e)"
+  draws="$(perf_summary_value "$perf_summary" d)"
+  draw_total="$(perf_summary_pair_value "$perf_summary" q total)"
+  draw_max="$(perf_summary_pair_value "$perf_summary" q max)"
+  if [[ -z "$frames" || -z "$first_ms" || -z "$span_ms" ||
+        -z "$errors" || -z "$draws" || -z "$draw_total" ||
+        -z "$draw_max" ]]; then
+    echo "Missing compass replay timing summary: $(windows_path "$log_file")" >&2
+    return 1
+  fi
+  if (( errors != 0 || frames < 30 || span_ms <= 0 || draws != frames ||
+        draw_max > 50 )); then
+    echo "Compass replay assertion failed: $frame_summary / $perf_summary" >&2
+    return 1
+  fi
+  # No minimum FPS gate: this helper also measures the old sensor-bound path.
+  # Average draw CPU time is separate from the actual completed-draw cadence.
+  awk -v n="$frames" -v first="$first_ms" -v span="$span_ms" \
+      -v total="$draw_total" -v maximum="$draw_max" \
+      'BEGIN {
+        printf "Facing cadence: %.2f FPS (%d completed frames, %d ms span, %d ms to final frame)\n", (n - 1) * 1000 / span, n, span, first + span
+        printf "Draw time: %d ms total, %.2f ms mean, %d ms maximum\n", total, total / n, maximum
+      }'
+  printf '%s\n%s\nCadence log: %s\n' "$frame_summary" "$perf_summary" \
+    "$(windows_path "$log_file")"
+)
 
 test_face_forward_angles() {
   require_pebble
@@ -2072,6 +2157,9 @@ main() {
       ;;
     test-face-forward-angles)
       test_face_forward_angles
+      ;;
+    test-face-forward-cadence)
+      test_face_forward_cadence
       ;;
     test-render-performance)
       test_render_performance

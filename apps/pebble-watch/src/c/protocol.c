@@ -756,6 +756,12 @@ void apply_debug_compass(DictionaryIterator *iter) {
   Tuple *fixture_camera_tuple = dict_find(iter, MESSAGE_KEY_height);
   int fixture_camera_control = heading >= 0 && fixture_camera_tuple ?
       fixture_camera_tuple->value->int32 : 0;
+#ifdef MAPPY_FIXTURE_FRAME_PERF
+  if (fixture_camera_control == 5) {
+    fixture_perf_start_compass_replay();
+    return;
+  }
+#endif
   if (fixture_camera_control == 1) {
     fixture_perf_enter_manual_browse();
   } else if (fixture_camera_control == 2) {

@@ -263,6 +263,7 @@ class RepositoryWorkflowTest(unittest.TestCase):
             "test-tile-scheduler-host",
             "test-face-forward-render-host",
             "test-face-forward-angles",
+            "test-face-forward-cadence",
             "test-render-performance",
             "test-pan-under-load",
             "test-rapid-zoom-reversal",
