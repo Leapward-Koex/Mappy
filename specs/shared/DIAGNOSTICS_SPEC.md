@@ -252,3 +252,30 @@ Static tests:
 - Export contains no full key, access token, session token, credential-like
   secret, or default raw route/location payload.
 - User can clear diagnostics and caches separately from clearing the API key.
+
+## Native tile performance history (v4)
+
+The native watch runtime keeps a memory-only history of the latest 512 tile
+requests, including when Flutter is closed. Each arrival has a local work ID
+separate from the watch request ID, so watch restarts cannot merge histories.
+Diagnostic export includes this snapshot under `tile_performance`.
+
+Records allow only numeric stage durations, cache counts, source retries, codec,
+payload/transmitted byte counts, acknowledged chunks, send failures and terminal
+status. Credentials, session tokens, source URLs and tile payloads are excluded.
+Totals survive activity/runtime recreation within the same Android process;
+process death resets this in-memory history. No per-chunk disk writes occur.
+
+Worker wait, shared-source wait, fetch, decode, crop, colour conversion, encoding,
+queue wait and send-to-ACK use monotonic clocks. Shared source fetch/decode values
+are sums of source work and may exceed request wall time because sources run in
+parallel. Queue wait ends when sending begins; completion ends at final transport
+ACK, not when the watch displays a tile. Median/p95 summaries cover retained
+requests; each record carries its terminal status for filtering completed,
+cancelled and failed requests.
+
+Watch performance builds log decode CPU time and first completed render submission
+separately. These emulator/debug logs support rendering checks; Bluetooth pacing
+requires trials on the same physical phone/watch at 0, 10 and 30 ms. Keep 30 ms
+until reduced pacing improves completion without additional retries/failures or
+more than a 5% regression in p95 interaction latency.

@@ -154,7 +154,7 @@ Method channel requests:
 | `startNavigation` | Flutter -> native | origin policy/current-location or resolved explicit origin, resolved ad-hoc or saved-location target, travel mode | Starts route worker without requiring a saved-location record. |
 | `setDestinations` | Flutter -> native | normalized saved-location records up to the watch protocol payload count | Persisted and pushed when watch ready. |
 | `setDestination` | Flutter -> native | one normalized saved-location record or disabled slot | Persisted patch and pushed when watch ready. |
-| `setSettings` | Flutter -> native | units, theme, travel mode, backlight, centered map orientation, tile animation, haptic mode, glance mode | Persisted and pushed when applicable. |
+| `setSettings` | Flutter -> native | units, travel mode, backlight, centered map orientation, tile animation, haptic mode, glance mode | Persisted and pushed when applicable. |
 | `requestLocationPermissionState` | Flutter -> native | none | Permission state and whether prompt is needed. |
 | `clearCaches` | Flutter -> native | cache kinds: `tiles`, `routes`, `provider_validation` | Counts/status removed. |
 | `clearDiagnostics` | Flutter -> native | none | Local diagnostic events cleared. |
@@ -324,7 +324,7 @@ Priority order:
 Rules:
 
 - GPS updates supersede stale queued GPS updates.
-- Tile responses are deduped by `world_x, world_y, zoom, theme`.
+- Tile responses are deduped by `world_x, world_y, zoom`.
 - A tile response is dropped after three total failed send attempts.
 - Dropping a tile must produce a bounded diagnostic event and must not clear a
   valid prior tile on the watch.

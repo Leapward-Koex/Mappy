@@ -2,6 +2,114 @@
 
 #include <string.h>
 
+enum {
+  Lz4Token, Lz4LiteralLength, Lz4Literals, Lz4OffsetLow, Lz4OffsetHigh,
+  Lz4MatchLength,
+};
+
+void tile_lz4_stream_init(TileLz4StreamDecoder *decoder, uint32_t output_limit) {
+  if (decoder) {
+    memset(decoder, 0, sizeof(*decoder));
+    decoder->output_limit = output_limit;
+    decoder->failed = output_limit == 0;
+  }
+}
+
+static bool lz4_copy_match(TileLz4StreamDecoder *decoder, uint8_t *output) {
+  if (decoder->offset == 0 || decoder->offset > decoder->output_bytes ||
+      decoder->length > decoder->output_limit - decoder->output_bytes) {
+    return false;
+  }
+  decoder->last_match_start = decoder->output_bytes;
+  decoder->had_match = true;
+  // Forward copying intentionally supports matches longer than their offset.
+  while (decoder->length > 0) {
+    output[decoder->output_bytes] =
+        output[decoder->output_bytes - decoder->offset];
+    decoder->output_bytes++;
+    decoder->length--;
+  }
+  decoder->state = Lz4Token;
+  return true;
+}
+
+bool tile_lz4_stream_feed(TileLz4StreamDecoder *decoder,
+                          const uint8_t *encoded, size_t encoded_len,
+                          uint8_t *output) {
+  if (!decoder || decoder->failed || !encoded || !output || encoded_len == 0) {
+    if (decoder) {
+      decoder->failed = true;
+    }
+    return false;
+  }
+  for (size_t i = 0; i < encoded_len; i++) {
+    uint8_t byte = encoded[i];
+    switch (decoder->state) {
+      case Lz4Token:
+        decoder->token = byte;
+        decoder->length = byte >> 4;
+        decoder->state = decoder->length == 15 ? Lz4LiteralLength :
+            (decoder->length ? Lz4Literals : Lz4OffsetLow);
+        break;
+      case Lz4LiteralLength:
+      case Lz4MatchLength:
+        if (byte > decoder->output_limit ||
+            decoder->length > decoder->output_limit - byte) {
+          decoder->failed = true;
+          return false;
+        }
+        decoder->length += byte;
+        if (byte != 255) {
+          if (decoder->state == Lz4LiteralLength) {
+            decoder->state = Lz4Literals;
+          } else if (!lz4_copy_match(decoder, output)) {
+            decoder->failed = true;
+            return false;
+          }
+        }
+        break;
+      case Lz4Literals:
+        if (decoder->output_bytes >= decoder->output_limit) {
+          decoder->failed = true;
+          return false;
+        }
+        output[decoder->output_bytes++] = byte;
+        if (--decoder->length == 0) {
+          decoder->state = Lz4OffsetLow;
+        }
+        break;
+      case Lz4OffsetLow:
+        decoder->offset = byte;
+        decoder->state = Lz4OffsetHigh;
+        break;
+      case Lz4OffsetHigh:
+        decoder->offset |= (uint16_t)byte << 8;
+        decoder->length = (decoder->token & 0x0f) + 4;
+        if ((decoder->token & 0x0f) == 15) {
+          decoder->state = Lz4MatchLength;
+        } else if (!lz4_copy_match(decoder, output)) {
+          decoder->failed = true;
+          return false;
+        }
+        break;
+      default:
+        decoder->failed = true;
+        return false;
+    }
+  }
+  return true;
+}
+
+bool tile_lz4_stream_finish(const TileLz4StreamDecoder *decoder) {
+  // The last sequence is literals only, at least five after a match. The last
+  // match must start at least twelve output bytes before the end of the block.
+  return decoder && !decoder->failed && decoder->output_bytes > 0 &&
+      decoder->state == Lz4OffsetLow &&
+      (!decoder->had_match ||
+       ((decoder->token >> 4) >= 5 &&
+        decoder->output_bytes - decoder->last_match_start >= 12));
+}
+
 void tile_rle_stream_init(TileRleStreamDecoder *decoder, uint32_t pixel_count,
                           uint8_t *packed, uint32_t packed_bytes) {
   if (!decoder) {

@@ -50,6 +50,34 @@ dist/mappy-watch-<version>-fixture.pbw
 watch package. `make build`, `make build-phone`, and `make build-fixture` leave
 the raw Pebble output in `build/` without copying a release artifact.
 
+## VS Code release tasks (Windows + WSL)
+
+Run **Tasks: Run Task** from the repository workspace, then choose:
+
+- **Watch: Build release** to create the production PBW.
+- **Watch: Build and install release** to build and send it to the watch.
+
+The install task selects the one authorized physical Android phone visible to
+Windows ADB, ignoring emulators. Connect the phone by USB with USB debugging
+enabled, and connect the watch in the Pebble app. Phone and PC must also share a
+reachable local network: the task starts the Pebble developer connection over
+ADB, then installs through its LAN address from WSL. Open the Pebble app and
+enable its LAN developer connection manually if the automatic request fails.
+
+For multiple phones, or a manually enabled connection without USB:
+
+```powershell
+.\tooling\install-watch-release.ps1 -DeviceSerial <adb-serial>
+.\tooling\install-watch-release.ps1 -PhoneAddress <phone-IP:port>
+```
+
+Add `-CheckOnly` to build and ping the watch without installing. The task disables
+optional hardware-performance logging, stops on build/connection failure, and
+does not force unsupported platforms. The output is
+`dist/mappy-watch-<version>-phone.pbw`. Phone companion and watch must use matching
+protocol versions. The task leaves the phone's developer connection enabled for
+subsequent development commands.
+
 ## Emulator workflow for Codex
 
 Run the portable helper from Windows PowerShell:

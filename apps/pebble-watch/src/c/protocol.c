@@ -2,7 +2,6 @@
 
 // AppMessage send/receive flow, settings sync, GPS, destinations, and errors.
 
-#define PENDING_SETTING_THEME (1u << 0)
 #define PENDING_SETTING_TRAVEL_MODE (1u << 1)
 #define PENDING_SETTING_UNITS (1u << 2)
 #define PENDING_SETTING_BACKLIGHT (1u << 3)
@@ -87,8 +86,6 @@ void cancel_init_retry(void) {
 
 static uint32_t pending_setting_mask_for_cmd(int32_t cmd) {
   switch (cmd) {
-    case CMD_THEME:
-      return PENDING_SETTING_THEME;
     case CMD_TRAVEL_MODE:
       return PENDING_SETTING_TRAVEL_MODE;
     case CMD_UNITS:
@@ -120,10 +117,6 @@ static bool send_pending_scalar_setting(void) {
     return false;
   }
 
-  if (s_pending_setting_mask & PENDING_SETTING_THEME) {
-    s_pending_setting_mask &= ~PENDING_SETTING_THEME;
-    return send_scalar_setting(CMD_THEME, s_theme_mode);
-  }
   if (s_pending_setting_mask & PENDING_SETTING_TRAVEL_MODE) {
     s_pending_setting_mask &= ~PENDING_SETTING_TRAVEL_MODE;
     return send_scalar_setting(CMD_TRAVEL_MODE, s_travel_mode);
@@ -260,7 +253,6 @@ void send_init(void) {
     return;
   }
 
-  write_i32(iter, MESSAGE_KEY_tile_zoom, s_theme_mode);
   write_i32(iter, MESSAGE_KEY_button_id, s_travel_mode);
   write_i32(iter, MESSAGE_KEY_total_bytes, s_backlight_mode);
   write_i32(iter, MESSAGE_KEY_chunk_offset, s_map_orientation);
@@ -337,7 +329,6 @@ static bool send_pending_zoom_notification(void) {
 
   int8_t delta = s_zoom_notification_delta >= 0 ? 1 : -1;
   write_i32(iter, MESSAGE_KEY_button_id, delta);
-  write_i32(iter, MESSAGE_KEY_is_color, s_theme_mode);
   result = app_message_outbox_send();
   if (result != APP_MSG_OK) {
     s_outbox_busy = false;
@@ -476,10 +467,6 @@ static bool send_scalar_setting(int32_t cmd, int32_t value) {
     return false;
   }
   return true;
-}
-
-void send_theme(void) {
-  send_scalar_setting(CMD_THEME, s_theme_mode);
 }
 
 void send_travel_mode(void) {
@@ -1109,9 +1096,6 @@ void inbox_received(DictionaryIterator *iter, void *context) {
     case CMD_TILE:
       apply_tile(iter);
       mark_dirty_after_dispatch = false;
-      break;
-    case CMD_THEME:
-      apply_theme(iter);
       break;
     case CMD_MAP_SETTINGS:
       apply_map_settings(iter);

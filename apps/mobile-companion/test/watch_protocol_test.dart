@@ -17,7 +17,6 @@ void main() {
         WatchCommands.tile,
         WatchCommands.button,
         WatchCommands.gps,
-        WatchCommands.theme,
         WatchCommands.tileRequest,
         WatchCommands.destinations,
         WatchCommands.routeRequest,
@@ -44,20 +43,18 @@ void main() {
         WatchCommands.debugRouteProgress,
       };
 
-      expect(commandIds, hasLength(30));
+      expect(commandIds, hasLength(29));
       expect(commandIds, everyElement(isPositive));
     });
 
     test('encodes watch-originated command dictionaries exactly', () {
       expect(
         WatchMessage.command(WatchCommands.init, const {
-          WatchKeys.tileZoom: 0,
           WatchKeys.buttonId: 2,
           WatchKeys.totalBytes: 0,
           WatchKeys.protocolVersion: watchProtocolVersion,
         }).fields,
         equals(const {
-          WatchKeys.tileZoom: 0,
           WatchKeys.buttonId: 2,
           WatchKeys.totalBytes: 0,
           WatchKeys.protocolVersion: watchProtocolVersion,
@@ -69,14 +66,12 @@ void main() {
           WatchKeys.worldX: 123,
           WatchKeys.worldY: 456,
           WatchKeys.tileZoom: 16,
-          WatchKeys.isColor: 1,
           WatchKeys.requestId: 1,
         }).fields,
         equals(const {
           WatchKeys.worldX: 123,
           WatchKeys.worldY: 456,
           WatchKeys.tileZoom: 16,
-          WatchKeys.isColor: 1,
           WatchKeys.requestId: 1,
           WatchKeys.cmd: WatchCommands.tileRequest,
         }),
@@ -149,7 +144,7 @@ void main() {
     });
 
     test('navigation feedback modes normalize and serialize', () {
-      expect(watchProtocolVersion, 3);
+      expect(watchProtocolVersion, 4);
       expect(WatchNavigationFeedbackMode.values, const [
         WatchNavigationFeedbackMode.all,
         WatchNavigationFeedbackMode.turns,
@@ -207,6 +202,32 @@ void main() {
       );
     });
 
+    test('ignores obsolete theme values while retaining other preferences', () {
+      final settings = WatchDisplaySettings.fromChannelMap(const {
+        'themeMode': 2,
+        'travelMode': 1,
+        'unitsMode': 0,
+        'backlightMode': 1,
+        'hapticMode': 0,
+        'glanceMode': 2,
+        'mapOrientation': 1,
+        'tileAnimationMode': 2,
+      });
+      expect(settings.toChannelMap(), {
+        'travelMode': 1,
+        'unitsMode': 0,
+        'backlightMode': 1,
+        'hapticMode': 0,
+        'glanceMode': 2,
+        'mapOrientation': 1,
+        'tileAnimationMode': 2,
+      });
+      expect(
+        settings.toMessages().map((message) => message.command),
+        isNot(contains(401)),
+      );
+    });
+
     test('tile animation modes normalize protocol values', () {
       expect(
         WatchTileAnimationMode.fromProtocol(0),
@@ -245,6 +266,9 @@ void main() {
           WatchKeys.worldX: 100,
           WatchKeys.worldY: 200,
           WatchKeys.tileZoom: 16,
+          WatchKeys.width: watchTileWidth,
+          WatchKeys.height: watchTileHeight,
+          WatchKeys.compressionFormat: WatchTileCompression.rle,
           WatchKeys.totalBytes: tilePayload.length,
           WatchKeys.chunkData: tilePayload,
         }),
@@ -376,6 +400,92 @@ void main() {
   });
 
   group('watch phone worker', () {
+    test('tile dispatch carries codec geometry and request identity', () async {
+      final provider = CountingProviderRepository();
+      final worker = WatchPhoneWorker(
+        locationRepository: const FakeLocationRepository(),
+        providerRepository: provider,
+        destinations: const [],
+      );
+      final responses = await worker.handleWatchMessage(
+        WatchMessage.command(WatchCommands.tileRequest, const {
+          WatchKeys.worldX: 123,
+          WatchKeys.worldY: 456,
+          WatchKeys.tileZoom: 16,
+          WatchKeys.requestId: 42,
+        }),
+      );
+      final tile = responses.single;
+      expect(tile.command, WatchCommands.tile);
+      expect(
+        tile.fields[WatchKeys.compressionFormat],
+        WatchTileCompression.rle,
+      );
+      expect(tile.fields[WatchKeys.width], watchTileWidth);
+      expect(tile.fields[WatchKeys.height], watchTileHeight);
+      expect(tile.fields[WatchKeys.requestId], 42);
+      expect(decodeWatchTile(tile).paletteIndexes, hasLength(watchTilePixels));
+    });
+
+    test('tile dispatch rejects absent or invalid v4 metadata', () async {
+      final payload = encodeRlePaletteIndexes(List.filled(watchTilePixels, 0));
+      final valid = <String, Object?>{
+        'ok': true,
+        'providerStatus': {'configured': true, 'validationState': 'valid'},
+        'world_x': 123,
+        'world_y': 456,
+        'tile_zoom': 16,
+        'width': watchTileWidth,
+        'height': watchTileHeight,
+        'compression_format': WatchTileCompression.rle,
+        'total_bytes': payload.length,
+        'chunk_data': payload,
+      };
+      for (final invalid in <Map<String, Object?>>[
+        {...valid}..remove('compression_format'),
+        {...valid, 'compression_format': 0},
+        {...valid, 'compression_format': 5},
+        {...valid}..remove('width'),
+        {...valid, 'height': 1000000000},
+        {...valid, 'total_bytes': payload.length + 1},
+        {...valid, 'chunk_data': Uint8List(0), 'total_bytes': 0},
+      ]) {
+        final worker = WatchPhoneWorker(
+          locationRepository: const FakeLocationRepository(),
+          providerRepository: FixedTileProviderRepository(
+            WatchTileResult.fromMethodChannel(invalid),
+          ),
+          destinations: const [],
+        );
+        final responses = await worker.handleWatchMessage(
+          WatchMessage.command(WatchCommands.tileRequest, const {
+            WatchKeys.worldX: 123,
+            WatchKeys.worldY: 456,
+            WatchKeys.tileZoom: 16,
+            WatchKeys.requestId: 42,
+          }),
+        );
+        expect(responses.single.command, WatchCommands.errorState);
+        expect(responses.single.fields[WatchKeys.requestId], 42);
+      }
+    });
+
+    test('v3 init is rejected with the required v4 version', () async {
+      final worker = WatchPhoneWorker(
+        locationRepository: const FakeLocationRepository(),
+        providerRepository: CountingProviderRepository(),
+        destinations: const [],
+      );
+      final responses = await worker.handleWatchMessage(
+        WatchMessage.command(WatchCommands.init, const {
+          WatchKeys.protocolVersion: 3,
+        }),
+      );
+      expect(responses.single.command, WatchCommands.errorState);
+      expect(responses.single.fields[WatchKeys.protocolVersion], 4);
+      expect(responses.single.fields[WatchKeys.buttonId], 9);
+    });
+
     test('synchronizes independent haptic and glance settings', () async {
       final worker = WatchPhoneWorker(
         locationRepository: const FakeLocationRepository(),
@@ -1020,7 +1130,6 @@ class CountingProviderRepository implements ProviderRepository {
     required int worldX,
     required int worldY,
     required int zoom,
-    int themeMode = 0,
   }) async {
     watchTileRequests.add(WorldPoint(worldX: worldX, worldY: worldY));
     final pixels = List<int>.generate(watchTilePixels, (index) {
@@ -1035,6 +1144,9 @@ class CountingProviderRepository implements ProviderRepository {
       worldX: worldX,
       worldY: worldY,
       zoom: zoom,
+      width: watchTileWidth,
+      height: watchTileHeight,
+      compressionFormat: 1,
       totalBytes: payload.length,
       chunkData: payload,
     );
@@ -1100,7 +1212,6 @@ class MissingKeyProviderRepository extends CountingProviderRepository {
     required int worldX,
     required int worldY,
     required int zoom,
-    int themeMode = 0,
   }) async {
     watchTileRequests.add(WorldPoint(worldX: worldX, worldY: worldY));
     return const WatchTileResult(
@@ -1159,7 +1270,6 @@ class NetworkFailureProviderRepository extends CountingProviderRepository {
     required int worldX,
     required int worldY,
     required int zoom,
-    int themeMode = 0,
   }) async {
     watchTileRequests.add(WorldPoint(worldX: worldX, worldY: worldY));
     return const WatchTileResult(
@@ -1169,4 +1279,17 @@ class NetworkFailureProviderRepository extends CountingProviderRepository {
       errorCategory: 4,
     );
   }
+}
+
+class FixedTileProviderRepository extends CountingProviderRepository {
+  FixedTileProviderRepository(this.tile);
+
+  final WatchTileResult tile;
+
+  @override
+  Future<WatchTileResult> getWatchTile({
+    required int worldX,
+    required int worldY,
+    required int zoom,
+  }) async => tile;
 }

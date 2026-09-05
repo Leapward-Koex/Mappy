@@ -47,7 +47,9 @@ internal class MappyWatchRuntime private constructor(context: Context) {
         bridge = WatchAppMessageBridge(
             uuid = WATCH_APP_UUID,
             transport = PebbleKit2Transport(appContext),
-            dispatcher = dispatcher::dispatch,
+            tileTransferPacingMillis = BuildConfig.MAPPY_TILE_TRANSFER_PACING_MILLIS.toLong(),
+            dispatcher = { dispatcher.dispatch(it) },
+            cancellableDispatcher = dispatcher::dispatch,
             eventSink = ::handleBridgeEvent
         ).also { it.start() }
         WatchLocationStreamer.attach(
@@ -105,6 +107,8 @@ internal class MappyWatchRuntime private constructor(context: Context) {
         }
     }
 
+    fun tilePerformanceSnapshot(): Map<String, Any?> = tilePerformance.snapshot()
+
     fun activeRoute(): Map<String, Any?>? = dispatcher.currentActiveRoute()
 
     fun clearActiveRoute(): Map<String, Any?> {
@@ -152,12 +156,14 @@ internal class MappyWatchRuntime private constructor(context: Context) {
             !MappyWatchSessionHub.isWatchAppActive(WATCH_APP_UUID) &&
             !WatchLocationStreamer.isRequested() &&
             (bridgeStatus["queueLength"] as? Number)?.toInt() == 0 &&
-            bridgeStatus["inFlight"] != true
+            bridgeStatus["inFlight"] != true &&
+            (bridgeStatus["activeTileRequests"] as? Number)?.toInt() == 0
     }
 
     private fun shutdown() {
         WatchLocationStreamer.detachBridge(bridge)
         bridge.stop()
+        mapTilesProvider.close()
         routeConfirmations.values.forEach { it.cancel() }
         routeConfirmations.clear()
         scope.cancel()
@@ -217,9 +223,10 @@ internal class MappyWatchRuntime private constructor(context: Context) {
     }
 
     private fun handleBridgeEvent(event: Map<String, Any?>) {
+        tilePerformance.record(event)
         when (event["event"] as? String) {
             "sendResult" -> if (event["result"] == "ack") MappyWatchSessionHub.noteSuccessfulActivity(appContext)
-            "watchCommand" -> {
+            "watchCommand" -> if (event["accepted"] == true) {
                 val command = (event["command"] as? Number)?.toInt()
                 val requestId = (event[KEY_REQUEST_ID] as? Number)?.toInt()
                 if (command == CMD_ROUTE_APPLIED && requestId != null) {
@@ -236,7 +243,7 @@ internal class MappyWatchRuntime private constructor(context: Context) {
                     routeConfirmations.remove(requestId)?.complete("launchFailed")
                 }
             }
-            "deliveryFailure" -> emitEvent(mapOf(
+            "deliveryFailure" -> if (event["command"] != CMD_TILE) emitEvent(mapOf(
                 "event" to "navigationDeliveryFailure",
                 "command" to event["command"],
                 KEY_REQUEST_ID to event[KEY_REQUEST_ID],
@@ -252,6 +259,7 @@ internal class MappyWatchRuntime private constructor(context: Context) {
     }
 
     private fun handleDispatcherEvent(event: Map<String, Any?>) {
+        tilePerformance.record(event)
         if (event["event"] == "protocolMismatch") {
             Log.e(
                 LOG_TAG,
@@ -296,6 +304,7 @@ internal class MappyWatchRuntime private constructor(context: Context) {
     }
 
     companion object {
+        private val tilePerformance = TilePerformanceMetrics()
         private const val LOG_TAG = "MappyWatchRuntime"
         private const val NAVIGATION_CONFIRMATION_TIMEOUT_MILLIS = 15_000L
         @Volatile private var instance: MappyWatchRuntime? = null

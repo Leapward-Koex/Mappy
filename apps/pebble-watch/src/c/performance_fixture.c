@@ -513,7 +513,7 @@ void fixture_perf_pan_under_load(int action) {
     fixture_perf_begin();
     s_fixture_pan_active = s_has_gps && s_map_layer;
     s_fixture_pan_input_pending = false;
-    invalidate_tiles_with_reason(TileInvalidateTheme);
+    invalidate_tiles_with_reason(TileInvalidateMapSettings);
     change_zoom(s_viewport_zoom < MAX_MAP_ZOOM ? 1 : -1);
     begin_pan_interaction(screen_x, screen_y);
     update_pan_interaction(screen_x + 16, screen_y + 6);

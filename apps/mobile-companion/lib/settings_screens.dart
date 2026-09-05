@@ -503,7 +503,7 @@ class SettingsHubScreen extends StatelessWidget {
         _SettingsLinkTile(
           icon: Icons.palette_outlined,
           title: 'Appearance',
-          subtitle: 'Theme and backlight',
+          subtitle: 'Backlight',
           onTap: onOpenAppearancePreferences,
         ),
         _SettingsLinkTile(
@@ -1149,14 +1149,6 @@ class _AppearancePreferencesScreenState
     appBar: AppBar(title: const Text('Appearance')),
     body: ListView(
       children: [
-        _PreferenceChoiceTile<WatchThemeMode>(
-          icon: Icons.brightness_6_outlined,
-          title: 'Theme',
-          value: _settings.themeMode,
-          values: WatchThemeMode.values,
-          labelFor: (value) => value.label,
-          onChanged: (value) => _save(_settings.copyWith(themeMode: value)),
-        ),
         _PreferenceChoiceTile<WatchBacklightMode>(
           icon: Icons.light_mode_outlined,
           title: 'Backlight',

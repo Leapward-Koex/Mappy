@@ -74,7 +74,7 @@ A tile animation may start only after all of these are true:
    validation.
 2. The payload has decoded into the cache entry's 54x63 nibble buffer.
 3. The cache entry's `world_x`, `world_y`, and `zoom` match the current tile
-   request generation for the active viewport/theme.
+   request generation for the active viewport.
 4. The tile is visible in the current north-up or active facing-up GPS-follow
    tile coverage.
 5. The map or navigation surface is visible and no modal/menu fully owns the
@@ -84,7 +84,7 @@ Do not animate:
 
 - Cache hits that become visible because the user pans back over already decoded
   tiles.
-- Tiles that arrive after the viewport, zoom, theme, orientation, or map-source
+- Tiles that arrive after the viewport, zoom, orientation, or map-source
   generation made them stale.
 - Tiles that arrive while the app is backgrounded.
 - Tiles decoded while an active touch drag or pinch gesture is in progress. Draw
@@ -185,7 +185,6 @@ Complete active animations immediately when:
 
 - The user changes zoom; this settles animations belonging to the previous zoom
   generation before the viewport changes.
-- Theme changes.
 - `CMD_MAP_SETTINGS` invalidates the tile cache.
 - Centered map orientation changes while GPS-follow is active.
 - Recenter reapplies a facing-up centered-map orientation after manual browse.
@@ -272,6 +271,6 @@ Emulator/screenshot tests on `emery`:
 - Final animation frames are pixel-identical to no-animation tile rendering.
 - Route, marker, heading cone, text bands, and menus remain stable over animated
   tiles.
-- Active animations are cancelled or completed cleanly across zoom, theme, map
+- Active animations are cancelled or completed cleanly across zoom, map
   settings, orientation, cache eviction, app backgrounding, and modal/menu state
   changes.

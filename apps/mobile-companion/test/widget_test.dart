@@ -1032,11 +1032,15 @@ void main() {
     await tester.pumpAndSettle();
     await tester.tap(find.widgetWithText(ListTile, 'Appearance'));
     await tester.pumpAndSettle();
-    await tester.tap(find.widgetWithText(ListTile, 'Theme'));
+    expect(find.widgetWithText(ListTile, 'Theme'), findsNothing);
+    expect(find.text('Auto'), findsNothing);
+    expect(find.text('Day'), findsNothing);
+    expect(find.text('Night'), findsNothing);
+    await tester.tap(find.widgetWithText(ListTile, 'Backlight'));
     await tester.pumpAndSettle();
-    await tester.tap(find.widgetWithText(ListTile, 'Night'));
+    await tester.tap(find.widgetWithText(ListTile, 'Keep on'));
     await tester.pumpAndSettle();
-    expect(dispatcher.themeMode, WatchThemeMode.night);
+    expect(dispatcher.backlightMode, WatchBacklightMode.keepOn);
 
     await tester.pageBack();
     await tester.pumpAndSettle();
@@ -2005,7 +2009,6 @@ class TestProviderRepository implements ProviderRepository {
     required int worldX,
     required int worldY,
     required int zoom,
-    int themeMode = 0,
   }) async => WatchTileResult(
     ok: false,
     status: status,
@@ -2103,7 +2106,6 @@ class TestWatchDispatcher implements WatchMessageDispatcher {
   WatchActiveRoute? activeRoute;
   final String? replaceDestinationFailure;
   WatchNavigationRequest? lastNavigationRequest;
-  WatchThemeMode themeMode = WatchThemeMode.auto;
   WatchTravelMode travelMode = WatchTravelMode.drive;
   WatchUnitsMode unitsMode = WatchUnitsMode.metric;
   WatchBacklightMode backlightMode = WatchBacklightMode.system;
@@ -2137,7 +2139,6 @@ class TestWatchDispatcher implements WatchMessageDispatcher {
   @override
   Future<WatchDisplaySettings> getDisplaySettings() async =>
       WatchDisplaySettings(
-        themeMode: themeMode,
         travelMode: travelMode,
         unitsMode: unitsMode,
         backlightMode: backlightMode,
@@ -2200,7 +2201,6 @@ class TestWatchDispatcher implements WatchMessageDispatcher {
   Future<List<WatchMessage>> setDisplaySettings(
     WatchDisplaySettings settings,
   ) async {
-    themeMode = settings.themeMode;
     travelMode = settings.travelMode;
     unitsMode = settings.unitsMode;
     backlightMode = settings.backlightMode;

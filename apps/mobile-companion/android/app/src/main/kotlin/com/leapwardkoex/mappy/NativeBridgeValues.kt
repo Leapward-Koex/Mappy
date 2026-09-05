@@ -109,13 +109,6 @@ internal fun listOfMaps(value: Any?): List<Map<*, *>> =
 internal fun isSavedDestinationId(value: Int): Boolean =
     value in 0..MAX_SAVED_DESTINATION_ID
 
-internal fun themeProtocolValue(value: Int?): Int =
-    when (value) {
-        1 -> 1
-        2 -> 2
-        else -> DEFAULT_THEME_MODE
-    }
-
 internal fun travelProtocolValue(value: Int?): Int =
     when (value) {
         0 -> 0

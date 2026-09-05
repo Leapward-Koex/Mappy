@@ -153,7 +153,6 @@ manual release checks before the corresponding milestone is considered done.
 - Opening a menu, manually panning, switching north-up, clearing/finishing the
   route, or leaving the app unsubscribes motion sensing and cancels fast
   reacquisition.
-- Theme change clears visible tile cache and queues fresh tile requests.
 - Walking and bicycling active routes display the provider warning.
 - Walking active routes render as spaced blue dots with a white halo, including
   phone-started Navigate Now routes that did not originate from
@@ -239,8 +238,7 @@ manual release checks before the corresponding milestone is considered done.
 - Crop crossing a 256x256 logical source-tile boundary composites from the
   correct provider source tiles.
 - Worst-case tile payload fits negotiated AppMessage dictionary limits.
-- Tile worker deduplicates in-flight requests by x/y/zoom/theme.
-- Theme changes invalidate encoded tile cache entries.
+- Tile worker deduplicates in-flight requests by x/y/zoom.
 - Map source and rendered tile size changes invalidate provider sessions, source
   tile cache, encoded tile cache, and watch visible tile cache through
   `CMD_MAP_SETTINGS`.

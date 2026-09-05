@@ -49,3 +49,7 @@ apps/mobile-companion/ios/Flutter/flutter_export_environment.sh
 # Local editor and OS files
 .DS_Store
 Thumbs.db
+
+# Local tile benchmark output
+artifacts/tile-performance/
+apps/mobile-companion/android/app/build/

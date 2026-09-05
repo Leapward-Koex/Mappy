@@ -111,6 +111,7 @@ android {
 
     defaultConfig {
         applicationId = "com.leapwardkoex.mappy"
+        buildConfigField("int", "MAPPY_TILE_TRANSFER_PACING_MILLIS", "30")
         // You can update the following values to match your application needs.
         // For more information, see: https://flutter.dev/to/review-gradle-config.
         minSdk = maxOf(24, flutter.minSdkVersion)
@@ -138,7 +139,19 @@ android {
     }
 
     buildTypes {
+        debug {
+            val tilePacing = providers.gradleProperty("mappyTilePacingMillis").orNull?.toInt() ?: 30
+            require(tilePacing in listOf(0, 10, 30)) { "Tile pacing trial must be 0, 10, or 30 ms." }
+            buildConfigField("int", "MAPPY_TILE_TRANSFER_PACING_MILLIS", tilePacing.toString())
+            // Install offline benchmarks beside the user's app and keep its data intact.
+            if (providers.gradleProperty("mappyTileBenchmark").orNull == "true") {
+                applicationIdSuffix = ".tilebench"
+                buildConfigField("String", "MAPPY_DEV_GOOGLE_API_KEY", "\"\"")
+                manifestPlaceholders["mappyGoogleMapsApiKey"] = ""
+            }
+        }
         release {
+            proguardFiles("proguard-rules.pro")
             if (releaseSigningConfigured) {
                 signingConfig = signingConfigs.getByName("release")
             }
@@ -236,6 +249,7 @@ flutter {
 }
 
 dependencies {
+    implementation("at.yawk.lz4:lz4-java:1.11.2")
     implementation("io.rebble.pebblekit2:client:1.1.0")
     implementation("com.google.android.gms:play-services-location:21.3.0")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.10.2")

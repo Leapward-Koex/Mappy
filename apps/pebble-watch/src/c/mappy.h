@@ -36,7 +36,6 @@
 #define CMD_ROUTE_WINDOW_POINTS 307
 #define CMD_ROUTE_APPLIED 308
 #define CMD_ROUTE_COMPLETE 309
-#define CMD_THEME 401
 #define CMD_TRAVEL_MODE 402
 #define CMD_UNITS 403
 #define CMD_BACKLIGHT 404
@@ -72,7 +71,7 @@
 #define MESSAGE_KEY_protocol_version 71
 #endif
 
-#define WATCH_PROTOCOL_VERSION 3
+#define WATCH_PROTOCOL_VERSION 4
 
 #define DEFAULT_TILE_W 54
 #define DEFAULT_TILE_H 63
@@ -84,7 +83,7 @@
 #define GRID_ROWS 6
 #define TILE_CACHE_SIZE (GRID_COLS * GRID_ROWS)
 #define TILE_STORAGE_ARENA_BYTES (46 * 1024)
-#define MAX_RLE_BYTES MAX_TILE_PIXELS
+#define MAX_TILE_ENCODED_BYTES MAX_TILE_PIXELS
 #define MAX_ROUTE_POINTS 128
 #define MAX_INSTRUCTION_BYTES 47
 #define MAX_DESTINATION_RECORDS 127
@@ -133,7 +132,6 @@
 #define MAPPY_TOUCH_PINCH_SUPPORTED 0
 #endif
 
-#define PERSIST_THEME 1
 #define PERSIST_TRAVEL_MODE 2
 #define PERSIST_BACKLIGHT 3
 #define PERSIST_ZOOM 4
@@ -256,7 +254,6 @@ typedef enum {
 
 typedef enum {
   TileInvalidateUnknown,
-  TileInvalidateTheme,
   TileInvalidateMapSettings,
   TileInvalidateZoom,
 } TileInvalidationReason;
@@ -357,8 +354,13 @@ extern uint32_t s_access_counter;
 extern AppTimer *s_visual_animation_timer;
 extern AppTimer *s_tile_request_watchdog_timer;
 
+#ifdef MAPPY_WATCH_PHONE_MODE_FIXTURE
+extern RoutePoint *s_route_points;
+extern RoutePoint *s_route_detail_points;
+#else
 extern RoutePoint s_route_points[MAX_ROUTE_POINTS];
 extern RoutePoint s_route_detail_points[MAX_ROUTE_POINTS];
+#endif
 extern uint16_t s_route_point_count;
 extern uint16_t s_route_detail_point_count;
 extern int8_t s_route_zoom;
@@ -450,7 +452,6 @@ extern time_t s_gps_smoothing_started_s;
 extern uint16_t s_gps_smoothing_started_ms;
 extern uint16_t s_gps_smoothing_duration_ms;
 extern bool s_manual_pan;
-extern int s_theme_mode;
 extern int s_travel_mode;
 extern int s_pending_route_mode;
 extern int s_active_route_mode;
@@ -475,7 +476,7 @@ extern int32_t s_tile_chunk_next_index;
 extern int32_t s_tile_chunk_request_id;
 extern bool s_tile_chunk_active;
 extern bool s_tile_chunk_store_packed;
-extern TileRleStreamDecoder s_tile_chunk_decoder;
+extern TileStreamDecoder s_tile_chunk_decoder;
 extern int s_selected_slot;
 extern int s_pending_route_slot;
 extern int s_active_route_slot;
@@ -506,7 +507,6 @@ extern bool s_pinch_unavailable_logged;
 #endif
 
 extern const GColor s_day_palette[16];
-extern const GColor s_night_palette[16];
 
 #if defined(PBL_COMPASS)
 int32_t compass_heading_to_degrees(CompassHeading heading);
@@ -590,6 +590,20 @@ int ceil_div_i32(int value, int divisor);
 bool is_supported_tile_geometry(int width, int height);
 int active_tile_cache_size(void);
 void reset_tile_chunk_assembly(void);
+#if defined(MAPPY_WATCH_PHONE_MODE_FIXTURE) || defined(MAPPY_WATCH_HARDWARE_PERF)
+uint32_t tile_performance_clock(void);
+void tile_performance_begin(void);
+void tile_performance_decode_end(uint32_t started_ms);
+void tile_performance_accepted(const TileFlight *flight, TileCacheEntry *entry,
+                                int32_t format, int32_t bytes);
+void tile_performance_rendered(TileCacheEntry **entries, int count);
+#else
+#define tile_performance_clock() 0u
+#define tile_performance_begin() ((void)0)
+#define tile_performance_decode_end(started_ms) ((void)(started_ms))
+#define tile_performance_accepted(flight, entry, format, bytes) ((void)0)
+#define tile_performance_rendered(entries, count) ((void)0)
+#endif
 bool configure_tile_geometry(int width, int height);
 bool any_pending_tile_requests(void);
 int active_tile_flight_count(void);
@@ -672,7 +686,6 @@ void send_next_tile_request(void);
 bool decode_cached_tile_row(const TileCacheEntry *entry, int row,
                             uint8_t *packed_row, size_t packed_row_bytes);
 TileApplyResult apply_tile(DictionaryIterator *iter);
-void apply_theme(DictionaryIterator *iter);
 void apply_map_settings(DictionaryIterator *iter);
 void apply_map_orientation(DictionaryIterator *iter);
 void apply_tile_animation(DictionaryIterator *iter);
@@ -715,7 +728,6 @@ void send_zoom_button(int delta);
 void send_route_request(void);
 void send_route_clear(void);
 bool send_deferred_route_action(void);
-void send_theme(void);
 void send_travel_mode(void);
 void send_units(void);
 void send_backlight(void);
@@ -753,7 +765,6 @@ bool advance_menu_highlight_animation(void);
 bool menu_highlight_rect(GRect *rect_out);
 int menu_highlight_text_index(GRect highlight_rect, int first);
 const char *travel_mode_label(int mode);
-const char *theme_label(int mode);
 const char *orientation_label(void);
 const char *tile_animation_label(void);
 const char *menu_title(void);

@@ -27,10 +27,6 @@ void window_unload(Window *window) {
 }
 
 void load_settings(void) {
-  s_theme_mode = persist_exists(PERSIST_THEME) ? persist_read_int(PERSIST_THEME) : 0;
-  if (s_theme_mode < 0 || s_theme_mode > 2) {
-    s_theme_mode = 0;
-  }
   s_travel_mode = persist_exists(PERSIST_TRAVEL_MODE) ? persist_read_int(PERSIST_TRAVEL_MODE) : 2;
   if (s_travel_mode < 0 || s_travel_mode > 2) {
     s_travel_mode = 2;
@@ -66,6 +62,17 @@ void load_settings(void) {
 }
 
 void init(void) {
+#ifdef MAPPY_WATCH_PHONE_MODE_FIXTURE
+  // The instrumented image has a uint16 size limit, independently of Emery's
+  // 128 KiB RAM. Relocate the same fixed route buffers to heap in fixtures;
+  // production storage, route capacity and compiler settings stay unchanged.
+  s_route_points = calloc(2 * MAX_ROUTE_POINTS, sizeof(RoutePoint));
+  if (!s_route_points) {
+    APP_LOG(APP_LOG_LEVEL_ERROR, "Fixture route storage unavailable");
+    return;
+  }
+  s_route_detail_points = s_route_points + MAX_ROUTE_POINTS;
+#endif
   APP_LOG(APP_LOG_LEVEL_INFO, "Mappy watch init mode=%s", MAPPY_PHONE_MODE_LABEL);
   load_settings();
   app_message_register_inbox_received(inbox_received);
@@ -167,6 +174,11 @@ void deinit(void) {
     s_destinations = NULL;
     s_destination_count = 0;
   }
+#ifdef MAPPY_WATCH_PHONE_MODE_FIXTURE
+  free(s_route_points);
+  s_route_points = NULL;
+  s_route_detail_points = NULL;
+#endif
 }
 
 int main(void) {
