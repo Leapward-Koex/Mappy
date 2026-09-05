@@ -12,9 +12,8 @@ dependencies:
   flutter:
     sdk: flutter
   google_maps_flutter: ^2.17.1
-  introduction_screen: ^4.0.0
-  shared_preferences: ^2.5.5
-  showcaseview: ^5.1.0
+  package_info_plus: ^8.3.1
+  url_launcher: ^6.3.2
 
 dev_dependencies:
   flutter_launcher_icons: ^0.14.4
@@ -24,3 +23,5 @@ dev_dependencies:
 
 flutter:
   uses-material-design: true
+  assets:
+    - icon/icon_1024_1024.png

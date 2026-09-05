@@ -2,13 +2,178 @@ package com.leapwardkoex.mappy
 
 import org.json.JSONArray
 import org.json.JSONObject
+import java.io.IOException
+import java.net.HttpURLConnection
+import java.net.URL
 import kotlin.concurrent.thread
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicReference
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
+import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 class GoogleMapTilesProviderTest {
+    @Test
+    fun replacementDuringReadinessValidationCannotReauthorizeOuterKey() {
+        val outerOperationPaused = CountDownLatch(1)
+        val releaseOuterOperation = CountDownLatch(1)
+        val identityCalls = AtomicInteger(0)
+        val identityProvider = FakeIdentityProvider {
+            if (identityCalls.incrementAndGet() == 1) {
+                outerOperationPaused.countDown()
+                check(releaseOuterOperation.await(5, TimeUnit.SECONDS))
+            }
+        }
+        val store = FakeCredentialStore(initialKey = OLD_GOOGLE_KEY)
+        val http = FakeGoogleHttpClient()
+        val provider = GoogleMapTilesProvider(
+            store,
+            identityProvider,
+            http,
+            FakeBinaryStringEncoder()
+        )
+        val operationFailure = AtomicReference<Throwable?>()
+
+        val operationWorker = thread(start = true) {
+            operationFailure.set(
+                runCatching {
+                    provider.geocodeDestination(
+                        addressText = "Googleplex",
+                        language = "en",
+                        region = "US"
+                    )
+                }.exceptionOrNull()
+            )
+        }
+
+        assertTrue(outerOperationPaused.await(5, TimeUnit.SECONDS))
+        try {
+            provider.mutateCredentialState {
+                store.storeApiKey(NEW_GOOGLE_KEY)
+            }
+        } finally {
+            releaseOuterOperation.countDown()
+        }
+        operationWorker.join(5_000)
+
+        assertFalse(operationWorker.isAlive)
+        assertTrue(operationFailure.get() is ProviderOperationCancelledException)
+        assertTrue(
+            http.requests.none { request ->
+                request.url.contains(OLD_GOOGLE_KEY) ||
+                    request.headers.values.any { value -> value.contains(OLD_GOOGLE_KEY) }
+            },
+            "A credentialed request reused the retired outer-operation key."
+        )
+    }
+
+    @Test
+    fun credentialMutationBlocksNewOperationsUntilTheOldKeyIsGone() {
+        val keyRead = CountDownLatch(1)
+        val store = FakeCredentialStore(onGetPlaintextKey = { keyRead.countDown() })
+        val http = FakeGoogleHttpClient()
+        val provider = GoogleMapTilesProvider(
+            store,
+            FakeIdentityProvider(),
+            http,
+            FakeBinaryStringEncoder()
+        )
+        val mutationEntered = CountDownLatch(1)
+        val releaseMutation = CountDownLatch(1)
+        val mutationFailure = AtomicReference<Throwable?>()
+        val operationFailure = AtomicReference<Throwable?>()
+
+        val mutationWorker = thread(start = true) {
+            mutationFailure.set(
+                runCatching {
+                    provider.mutateCredentialState {
+                        mutationEntered.countDown()
+                        check(releaseMutation.await(5, TimeUnit.SECONDS))
+                        store.clearApiKey()
+                    }
+                }.exceptionOrNull()
+            )
+        }
+        assertTrue(mutationEntered.await(5, TimeUnit.SECONDS))
+
+        val operationWorker = thread(start = true) {
+            operationFailure.set(
+                runCatching { provider.validateProviderSetup() }.exceptionOrNull()
+            )
+        }
+
+        assertFalse(
+            keyRead.await(500, TimeUnit.MILLISECONDS),
+            "A provider operation read the old key during credential mutation."
+        )
+        releaseMutation.countDown()
+        mutationWorker.join(5_000)
+        operationWorker.join(5_000)
+
+        assertFalse(mutationWorker.isAlive)
+        assertFalse(operationWorker.isAlive)
+        assertNull(mutationFailure.get())
+        assertNull(operationFailure.get())
+        assertTrue(http.requests.isEmpty())
+        assertEquals(ApiKeyStore.STATE_NOT_CONFIGURED, store.getStatus()["validationState"])
+    }
+
+    @Test
+    fun urlClientConvertsDisconnectIoFailureToProviderCancellation() {
+        val connection = DisconnectingHttpURLConnection()
+        val client = UrlGoogleHttpClient { connection }
+        val cancelled = AtomicBoolean(false)
+        val failure = AtomicReference<Throwable?>()
+        val worker = thread(start = true) {
+            failure.set(
+                runCatching {
+                    client.execute(GoogleHttpRequest("https://example.test")) {
+                        cancelled.get()
+                    }
+                }.exceptionOrNull()
+            )
+        }
+
+        assertTrue(connection.responseRequested.await(5, TimeUnit.SECONDS))
+        cancelled.set(true)
+        client.cancelAll()
+        worker.join(5_000)
+
+        assertFalse(worker.isAlive)
+        assertTrue(failure.get() is ProviderOperationCancelledException)
+    }
+
+    @Test
+    fun clearingProviderSessionsCancelsAndInvalidatesInFlightCredentialedRequest() {
+        val http = CancellingGoogleHttpClient()
+        val store = FakeCredentialStore()
+        val provider = GoogleMapTilesProvider(
+            store,
+            FakeIdentityProvider(),
+            http,
+            FakeBinaryStringEncoder()
+        )
+        val failure = AtomicReference<Throwable?>()
+        val worker = thread(start = true) {
+            failure.set(runCatching { provider.validateProviderSetup() }.exceptionOrNull())
+        }
+
+        assertTrue(http.requestStarted.await(5, TimeUnit.SECONDS))
+        provider.clearProviderSessions()
+        worker.join(5_000)
+
+        assertTrue(!worker.isAlive, "Cancelled provider work did not finish.")
+        assertTrue(failure.get() is ProviderOperationCancelledException)
+        assertEquals(1, http.cancelAllCalls.get())
+        assertEquals(ApiKeyStore.STATE_NOT_VALIDATED, store.getStatus()["validationState"])
+    }
+
     @Test
     fun validateProviderSetupAttachesAndroidHeadersAndChecksWrongPackages() {
         val http = FakeGoogleHttpClient()
@@ -668,8 +833,11 @@ class GoogleMapTilesProviderTest {
                 ((green and 0xFF) shl 8) or (blue and 0xFF)
     }
 
-    private class FakeCredentialStore : GoogleCredentialStore {
-        private var key: String? = "test-google-key"
+    private class FakeCredentialStore(
+        private val onGetPlaintextKey: (() -> Unit)? = null,
+        initialKey: String? = "test-google-key"
+    ) : GoogleCredentialStore {
+        private var key: String? = initialKey
         private var status: Map<String, Any?> = mapOf(
             "configured" to true,
             "validationState" to ApiKeyStore.STATE_NOT_VALIDATED,
@@ -692,7 +860,10 @@ class GoogleMapTilesProviderTest {
             return getStatus()
         }
 
-        override fun getPlaintextKey(): String? = key
+        override fun getPlaintextKey(): String? {
+            onGetPlaintextKey?.invoke()
+            return key
+        }
 
         override fun getStatus(): Map<String, Any?> = status
 
@@ -733,9 +904,13 @@ class GoogleMapTilesProviderTest {
         }
     }
 
-    private class FakeIdentityProvider : AndroidIdentityProvider {
-        override fun currentIdentity(): AndroidIdentity =
-            AndroidIdentity(PACKAGE_NAME, CERT_SHA1)
+    private class FakeIdentityProvider(
+        private val onCurrentIdentity: (() -> Unit)? = null
+    ) : AndroidIdentityProvider {
+        override fun currentIdentity(): AndroidIdentity {
+            onCurrentIdentity?.invoke()
+            return AndroidIdentity(PACKAGE_NAME, CERT_SHA1)
+        }
     }
 
     private class FakeBinaryStringEncoder : BinaryStringEncoder {
@@ -902,9 +1077,52 @@ class GoogleMapTilesProviderTest {
         }
     }
 
+    private class CancellingGoogleHttpClient : GoogleHttpClient {
+        val requestStarted = CountDownLatch(1)
+        val cancelAllCalls = AtomicInteger(0)
+        private val releaseRequest = CountDownLatch(1)
+
+        override fun execute(request: GoogleHttpRequest): GoogleHttpResponse {
+            requestStarted.countDown()
+            assertTrue(releaseRequest.await(5, TimeUnit.SECONDS))
+            return GoogleHttpResponse(
+                httpStatus = 200,
+                bodyText = """{"tileWidth":256,"tileHeight":256,"session":"session-token"}""",
+                bodyBytes = ByteArray(0)
+            )
+        }
+
+        override fun cancelAll() {
+            cancelAllCalls.incrementAndGet()
+            releaseRequest.countDown()
+        }
+    }
+
+    private class DisconnectingHttpURLConnection :
+        HttpURLConnection(URL("https://example.test")) {
+        val responseRequested = CountDownLatch(1)
+        private val disconnected = CountDownLatch(1)
+
+        override fun getResponseCode(): Int {
+            responseRequested.countDown()
+            check(disconnected.await(5, TimeUnit.SECONDS))
+            throw IOException("Connection was disconnected.")
+        }
+
+        override fun disconnect() {
+            disconnected.countDown()
+        }
+
+        override fun usingProxy(): Boolean = false
+
+        override fun connect() = Unit
+    }
+
     private companion object {
         private const val PACKAGE_NAME = "com.leapwardkoex.mappy"
         private const val CERT_SHA1 = "0123456789ABCDEF0123456789ABCDEF01234567"
+        private const val OLD_GOOGLE_KEY = "AIzaOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOO"
+        private const val NEW_GOOGLE_KEY = "AIzaNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNN"
         private val DAY_PALETTE_RGB = intArrayOf(
             0xFFFFFFFF.toInt(),
             0xFFFFAAFF.toInt(),

@@ -21,11 +21,15 @@ abstract class WatchMessageDispatcher {
 
   Future<List<WatchMessage>> replaceDestination(WatchDestinationConfig config);
 
-  Future<WatchNavigationDispatchResult> startNavigation(WatchNavigationRequest request);
+  Future<WatchNavigationDispatchResult> startNavigation(
+    WatchNavigationRequest request,
+  );
 
   Future<WatchNavigationDispatchResult> rerouteActiveRoute();
 
   Future<WatchNavigationDispatchResult> clearActiveRoute();
+
+  Future<WatchActiveRoute?> getActiveRoute();
 
   Future<WatchMapOrientation> getMapOrientation();
 
@@ -147,6 +151,15 @@ class NativeWatchMessageDispatcher implements WatchMessageDispatcher {
       await _refreshProviderStatus();
     }
     return _dispatchResultFromChannel(result);
+  }
+
+  @override
+  Future<WatchActiveRoute?> getActiveRoute() async {
+    final result = await _channel.invokeMethod<Object?>('getActiveRoute');
+    if (result == null) {
+      return null;
+    }
+    return WatchActiveRoute.fromChannelMap(result);
   }
 
   Future<void> _sendReturnedPhoneMessages(List<WatchMessage> messages) async {
@@ -289,14 +302,15 @@ enum WatchNavigationDeliveryState {
   timedOut,
   protocolMismatch;
 
-  static WatchNavigationDeliveryState fromChannel(String? value) => switch (value) {
-    'applied' => applied,
-    'queued' => queued,
-    'launchFailed' => launchFailed,
-    'timedOut' => timedOut,
-    'protocolMismatch' => protocolMismatch,
-    _ => deliveryFailed,
-  };
+  static WatchNavigationDeliveryState fromChannel(String? value) =>
+      switch (value) {
+        'applied' => applied,
+        'queued' => queued,
+        'launchFailed' => launchFailed,
+        'timedOut' => timedOut,
+        'protocolMismatch' => protocolMismatch,
+        _ => deliveryFailed,
+      };
 }
 
 class WatchNavigationDispatchResult extends ListBase<WatchMessage> {
@@ -316,7 +330,8 @@ class WatchNavigationDispatchResult extends ListBase<WatchMessage> {
   int get length => responses.length;
 
   @override
-  set length(int value) => throw UnsupportedError('Navigation results are immutable.');
+  set length(int value) =>
+      throw UnsupportedError('Navigation results are immutable.');
 
   @override
   WatchMessage operator [](int index) => responses[index];
@@ -623,6 +638,121 @@ class WatchRouteEndpoint {
       'placeId': placeId,
     };
   }
+
+  static WatchRouteEndpoint fromChannelMap(Object? value) {
+    if (value is! Map) {
+      throw const FormatException('Route endpoint must be a map.');
+    }
+    final rawLabel = value['label'];
+    final rawAddress = value['address'];
+    final label = rawLabel is String ? rawLabel.trim() : '';
+    final address = rawAddress is String ? rawAddress.trim() : '';
+    final latitude = _asDouble(value['latitude']);
+    final longitude = _asDouble(value['longitude']);
+    final rawPlaceId = value['placeId'];
+    if (label.isEmpty ||
+        address.isEmpty ||
+        latitude == null ||
+        latitude < -90 ||
+        latitude > 90 ||
+        longitude == null ||
+        longitude < -180 ||
+        longitude > 180 ||
+        rawLabel is! String ||
+        rawAddress is! String ||
+        (rawPlaceId != null && rawPlaceId is! String)) {
+      throw const FormatException('Route endpoint is malformed.');
+    }
+    final placeId = (rawPlaceId as String?)?.trim();
+    return WatchRouteEndpoint(
+      label: label,
+      address: address,
+      latitude: latitude,
+      longitude: longitude,
+      placeId: placeId == null || placeId.isEmpty ? null : placeId,
+    );
+  }
+}
+
+class WatchActiveRoute {
+  const WatchActiveRoute({
+    required this.requestId,
+    required this.originPolicy,
+    required this.destination,
+    required this.travelMode,
+    required this.updatedAtMillis,
+    this.origin,
+    this.savedSlot,
+  });
+
+  final int requestId;
+  final WatchRouteOriginPolicy originPolicy;
+  final WatchRouteEndpoint? origin;
+  final WatchRouteEndpoint destination;
+  final WatchTravelMode travelMode;
+  final int? savedSlot;
+  final int updatedAtMillis;
+
+  DateTime get updatedAt =>
+      DateTime.fromMillisecondsSinceEpoch(updatedAtMillis, isUtc: true);
+
+  Map<String, Object?> toChannelMap() {
+    return <String, Object?>{
+      'requestId': requestId,
+      'originPolicy': originPolicy.channelName,
+      'origin': origin?.toChannelMap(),
+      'destination': destination.toChannelMap(),
+      'travelMode': travelMode.protocolValue,
+      'savedSlot': savedSlot,
+      'updatedAtMillis': updatedAtMillis,
+    };
+  }
+
+  static WatchActiveRoute fromChannelMap(Object? value) {
+    if (value is! Map) {
+      throw const FormatException('Active route must be a map.');
+    }
+    final requestId = asInt(value['requestId']);
+    final updatedAtMillis = asInt(value['updatedAtMillis']);
+    final travelModeValue = asInt(value['travelMode']);
+    final savedSlot = value['savedSlot'] == null
+        ? null
+        : asInt(value['savedSlot']);
+    final originPolicy = switch (value['originPolicy']) {
+      'current_location' => WatchRouteOriginPolicy.currentLocation,
+      'explicit_place' => WatchRouteOriginPolicy.explicitPlace,
+      _ => null,
+    };
+    if (requestId == null ||
+        requestId <= 0 ||
+        updatedAtMillis == null ||
+        updatedAtMillis <= 0 ||
+        updatedAtMillis > 8640000000000000 ||
+        travelModeValue == null ||
+        travelModeValue < WatchTravelMode.walk.protocolValue ||
+        travelModeValue > WatchTravelMode.drive.protocolValue ||
+        originPolicy == null ||
+        (value['savedSlot'] != null &&
+            (savedSlot == null || !isSavedLocationId(savedSlot)))) {
+      throw const FormatException('Active route metadata is malformed.');
+    }
+    final origin = value['origin'] == null
+        ? null
+        : WatchRouteEndpoint.fromChannelMap(value['origin']);
+    if (originPolicy == WatchRouteOriginPolicy.explicitPlace &&
+        origin == null) {
+      throw const FormatException('An explicit route origin is required.');
+    }
+    return WatchActiveRoute(
+      requestId: requestId,
+      originPolicy: originPolicy,
+      origin: origin,
+      destination: WatchRouteEndpoint.fromChannelMap(value['destination']),
+      travelMode: WatchTravelMode.fromProtocol(travelModeValue),
+      savedSlot: savedSlot,
+      updatedAtMillis: updatedAtMillis,
+    );
+  }
 }
 
 class WatchNavigationRequest {
@@ -678,6 +808,7 @@ class WatchPhoneWorker implements WatchMessageDispatcher {
   List<WatchNavStep> _routeSteps = const [];
   int _routeGeneration = 0;
   int _routeRequestId = 0;
+  int? _activeRouteRequestId;
   WatchRouteOriginPolicy _activeRouteOriginPolicy =
       WatchRouteOriginPolicy.currentLocation;
   WatchRouteEndpoint? _activeRouteOrigin;
@@ -728,13 +859,13 @@ class WatchPhoneWorker implements WatchMessageDispatcher {
       return WatchNavigationDispatchResult(
         deliveryState: WatchNavigationDeliveryState.deliveryFailed,
         responses: [
-        _errorMessage(
-          category: missingExplicitOrigin ? 8 : 3,
-          failedCommand: WatchCommands.routeRequest,
-          text: missingExplicitOrigin
-              ? 'Route origin is missing.'
-              : 'Waiting for GPS.',
-        ),
+          _errorMessage(
+            category: missingExplicitOrigin ? 8 : 3,
+            failedCommand: WatchCommands.routeRequest,
+            text: missingExplicitOrigin
+                ? 'Route origin is missing.'
+                : 'Waiting for GPS.',
+          ),
         ],
       );
     }
@@ -753,7 +884,10 @@ class WatchPhoneWorker implements WatchMessageDispatcher {
     );
     return WatchNavigationDispatchResult(
       responses: responses,
-      deliveryState: responses.any((message) => message.command == WatchCommands.routePoints)
+      deliveryState:
+          responses.any(
+            (message) => message.command == WatchCommands.routePoints,
+          )
           ? WatchNavigationDeliveryState.applied
           : WatchNavigationDeliveryState.deliveryFailed,
     );
@@ -767,7 +901,10 @@ class WatchPhoneWorker implements WatchMessageDispatcher {
     );
     return WatchNavigationDispatchResult(
       responses: responses,
-      deliveryState: responses.any((message) => message.command == WatchCommands.routePoints)
+      deliveryState:
+          responses.any(
+            (message) => message.command == WatchCommands.routePoints,
+          )
           ? WatchNavigationDeliveryState.applied
           : WatchNavigationDeliveryState.deliveryFailed,
     );
@@ -779,6 +916,30 @@ class WatchPhoneWorker implements WatchMessageDispatcher {
     return WatchNavigationDispatchResult(
       responses: [WatchMessage.command(WatchCommands.routeClear)],
       deliveryState: WatchNavigationDeliveryState.applied,
+    );
+  }
+
+  @override
+  Future<WatchActiveRoute?> getActiveRoute() async {
+    final target = _activeRouteTarget;
+    final mode = _activeRouteMode;
+    final requestedAt = _lastRouteRequestedAt;
+    final requestId = _activeRouteRequestId;
+    if (_routePoints.length < 2 ||
+        requestId == null ||
+        target == null ||
+        mode == null ||
+        requestedAt == null) {
+      return null;
+    }
+    return WatchActiveRoute(
+      requestId: requestId,
+      originPolicy: _activeRouteOriginPolicy,
+      origin: _activeRouteOrigin,
+      destination: target,
+      travelMode: mode,
+      savedSlot: _activeRouteSlot,
+      updatedAtMillis: requestedAt.millisecondsSinceEpoch,
     );
   }
 
@@ -803,7 +964,8 @@ class WatchPhoneWorker implements WatchMessageDispatcher {
       case WatchCommands.routeApplied:
         return const [];
       case WatchCommands.routeComplete:
-        if (asInt(message.fields[WatchKeys.requestId]) == _routeRequestId) {
+        if (asInt(message.fields[WatchKeys.requestId]) ==
+            _activeRouteRequestId) {
           _clearActiveRoute();
         }
         return const [];
@@ -918,7 +1080,8 @@ class WatchPhoneWorker implements WatchMessageDispatcher {
   }
 
   Future<List<WatchMessage>> _handleInit(WatchMessage message) async {
-    if (asInt(message.fields[WatchKeys.protocolVersion]) != watchProtocolVersion) {
+    if (asInt(message.fields[WatchKeys.protocolVersion]) !=
+        watchProtocolVersion) {
       return [
         _errorMessage(
           category: 9,
@@ -1181,13 +1344,7 @@ class WatchPhoneWorker implements WatchMessageDispatcher {
     required WatchRouteOriginPolicy originPolicy,
     required WatchRouteEndpoint? cachedOrigin,
   }) async {
-    _beginActiveRouteRequest(
-      requestedMode: requestedMode,
-      originPolicy: originPolicy,
-      cachedOrigin: cachedOrigin,
-      targetEndpoint: targetEndpoint,
-      activeRouteSlot: activeRouteSlot,
-    );
+    _beginActiveRouteRequest(requestedMode: requestedMode);
     final route = await providerRepository.computeRoute(
       originLatitude: originLatitude,
       originLongitude: originLongitude,
@@ -1257,6 +1414,7 @@ class WatchPhoneWorker implements WatchMessageDispatcher {
 
     _routePoints = points;
     _fullRoutePoints = fullPoints.length >= 2 ? fullPoints : points;
+    _activeRouteRequestId = _routeRequestId;
     _activeRouteSlot = activeRouteSlot;
     _activeRouteOriginPolicy = originPolicy;
     _activeRouteOrigin = originPolicy == WatchRouteOriginPolicy.explicitPlace
@@ -1301,23 +1459,10 @@ class WatchPhoneWorker implements WatchMessageDispatcher {
     return responses;
   }
 
-  void _beginActiveRouteRequest({
-    required WatchTravelMode requestedMode,
-    required WatchRouteOriginPolicy originPolicy,
-    required WatchRouteEndpoint? cachedOrigin,
-    required WatchRouteEndpoint targetEndpoint,
-    required int? activeRouteSlot,
-  }) {
+  void _beginActiveRouteRequest({required WatchTravelMode requestedMode}) {
     travelMode = requestedMode;
     _routeGeneration++;
     _routeRequestId = (_routeRequestId % 0x7ffffffe) + 1;
-    _activeRouteSlot = activeRouteSlot;
-    _activeRouteOriginPolicy = originPolicy;
-    _activeRouteOrigin = originPolicy == WatchRouteOriginPolicy.explicitPlace
-        ? cachedOrigin
-        : null;
-    _activeRouteTarget = targetEndpoint;
-    _lastRouteRequestedAt = DateTime.now();
     _lastRouteError = null;
   }
 
@@ -1344,7 +1489,8 @@ class WatchPhoneWorker implements WatchMessageDispatcher {
   }
 
   List<WatchMessage> _activeRouteMessages() {
-    if (_routePoints.length < 2) {
+    final requestId = _activeRouteRequestId;
+    if (_routePoints.length < 2 || requestId == null) {
       return const [];
     }
     final responses = <WatchMessage>[
@@ -1352,7 +1498,7 @@ class WatchPhoneWorker implements WatchMessageDispatcher {
         WatchKeys.buttonId: 1,
         WatchKeys.isColor: (_activeRouteMode ?? travelMode).protocolValue,
         WatchKeys.totalBytes: _routeGeneration,
-        WatchKeys.requestId: _routeRequestId,
+        WatchKeys.requestId: requestId,
         WatchKeys.chunkIndex: _routeSteps.isNotEmpty ? 1 : 0,
         WatchKeys.chunkData: encodeRoutePoints(_routePoints),
       }),
@@ -1361,7 +1507,7 @@ class WatchPhoneWorker implements WatchMessageDispatcher {
       responses.add(
         WatchMessage.command(WatchCommands.navSteps, {
           WatchKeys.chunkData: encodeNavSteps(_routeSteps, 0),
-          WatchKeys.requestId: _routeRequestId,
+          WatchKeys.requestId: requestId,
           WatchKeys.totalBytes: _routeGeneration,
         }),
       );
@@ -1376,6 +1522,7 @@ class WatchPhoneWorker implements WatchMessageDispatcher {
     _routePoints = const [];
     _fullRoutePoints = const [];
     _routeSteps = const [];
+    _activeRouteRequestId = null;
     _activeRouteOriginPolicy = WatchRouteOriginPolicy.currentLocation;
     _activeRouteOrigin = null;
     _activeRouteTarget = null;

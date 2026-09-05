@@ -487,6 +487,10 @@ void main() {
         (message) => message.command == WatchCommands.routePoints,
       );
       expect(routeResponse.fields[WatchKeys.isColor], 0);
+      final activeRoute = await worker.getActiveRoute();
+      expect(activeRoute?.destination.label, 'Auckland Museum');
+      expect(activeRoute?.travelMode, WatchTravelMode.walk);
+      expect(activeRoute?.originPolicy, WatchRouteOriginPolicy.currentLocation);
 
       final initResponses = await worker.handleWatchMessage(
         WatchMessage.command(WatchCommands.init, const {
@@ -580,6 +584,7 @@ void main() {
           WatchMessage.command(WatchCommands.routeClear),
         );
         expect(worker.activeRouteTarget, isNull);
+        expect(await worker.getActiveRoute(), isNull);
 
         final navResponses = await worker.handleWatchMessage(
           WatchMessage.command(WatchCommands.navSteps),
@@ -588,6 +593,36 @@ void main() {
         expect(navResponses.single.fields[WatchKeys.buttonId], 6);
       },
     );
+
+    test('transient reroute failures preserve the active snapshot', () async {
+      final provider = FailableProviderRepository();
+      final worker = WatchPhoneWorker(
+        locationRepository: const FakeLocationRepository(),
+        providerRepository: provider,
+      );
+      await worker.startNavigation(
+        const WatchNavigationRequest(
+          destination: WatchRouteEndpoint(
+            label: 'Auckland Museum',
+            address: 'Auckland Domain, Parnell, Auckland',
+            latitude: -36.86097,
+            longitude: 174.77774,
+          ),
+          travelMode: WatchTravelMode.drive,
+        ),
+      );
+      final before = await worker.getActiveRoute();
+
+      provider.failRoutes = true;
+      final result = await worker.rerouteActiveRoute();
+      final after = await worker.getActiveRoute();
+
+      expect(result.deliveryState, WatchNavigationDeliveryState.deliveryFailed);
+      expect(after?.requestId, before?.requestId);
+      expect(after?.updatedAtMillis, before?.updatedAtMillis);
+      expect(after?.destination.label, before?.destination.label);
+      expect(after?.travelMode, before?.travelMode);
+    });
 
     test('current-location navigation rejects stale route origins', () async {
       final provider = CountingProviderRepository();
@@ -686,7 +721,7 @@ Uint8List _onePointRoutePayload() {
   return data.buffer.asUint8List();
 }
 
-class FakeLocationRepository implements LocationRepository {
+class FakeLocationRepository extends LocationRepository {
   const FakeLocationRepository({
     this.location,
     this.hasLocation = true,
@@ -717,7 +752,7 @@ class FakeLocationRepository implements LocationRepository {
       permissionState;
 }
 
-class StaleLocationRepository implements LocationRepository {
+class StaleLocationRepository extends LocationRepository {
   @override
   Future<LocationSnapshot?> getCurrentLocation({Duration? timeout}) async =>
       LocationSnapshot(

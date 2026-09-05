@@ -5,9 +5,11 @@ import android.content.pm.PackageManager
 import android.os.Build
 import android.util.Base64
 import java.io.ByteArrayOutputStream
+import java.io.IOException
 import java.net.HttpURLConnection
 import java.net.URL
 import java.security.MessageDigest
+import java.util.concurrent.ConcurrentHashMap
 
 interface GoogleCredentialStore {
     fun storeApiKey(plaintext: String): Map<String, Any?>
@@ -80,6 +82,26 @@ data class GoogleHttpResponse(
 
 interface GoogleHttpClient {
     fun execute(request: GoogleHttpRequest): GoogleHttpResponse
+
+    fun execute(
+        request: GoogleHttpRequest,
+        isCancelled: () -> Boolean
+    ): GoogleHttpResponse {
+        throwIfProviderOperationCancelled(isCancelled)
+        return execute(request).also {
+            throwIfProviderOperationCancelled(isCancelled)
+        }
+    }
+
+    fun cancelAll() = Unit
+}
+
+internal class ProviderOperationCancelledException : IOException("Provider operation cancelled.")
+
+private fun throwIfProviderOperationCancelled(isCancelled: () -> Boolean) {
+    if (isCancelled()) {
+        throw ProviderOperationCancelledException()
+    }
 }
 
 interface BinaryStringEncoder {
@@ -91,9 +113,22 @@ class AndroidBase64StringEncoder : BinaryStringEncoder {
         Base64.encodeToString(bytes, Base64.NO_WRAP)
 }
 
-class UrlGoogleHttpClient : GoogleHttpClient {
-    override fun execute(request: GoogleHttpRequest): GoogleHttpResponse {
-        val connection = (URL(request.url).openConnection() as HttpURLConnection).apply {
+class UrlGoogleHttpClient(
+    private val connectionFactory: (URL) -> HttpURLConnection = { url ->
+        url.openConnection() as HttpURLConnection
+    }
+) : GoogleHttpClient {
+    private val activeConnections = ConcurrentHashMap.newKeySet<HttpURLConnection>()
+
+    override fun execute(request: GoogleHttpRequest): GoogleHttpResponse =
+        execute(request) { false }
+
+    override fun execute(
+        request: GoogleHttpRequest,
+        isCancelled: () -> Boolean
+    ): GoogleHttpResponse {
+        throwIfProviderOperationCancelled(isCancelled)
+        val connection = connectionFactory(URL(request.url)).apply {
             connectTimeout = NETWORK_TIMEOUT_MILLIS
             readTimeout = NETWORK_TIMEOUT_MILLIS
             requestMethod = request.method
@@ -104,11 +139,14 @@ class UrlGoogleHttpClient : GoogleHttpClient {
                 doOutput = true
             }
         }
+        activeConnections.add(connection)
 
         return try {
+            throwIfProviderOperationCancelled(isCancelled)
             request.body?.let { body ->
                 connection.outputStream.use { it.write(body) }
             }
+            throwIfProviderOperationCancelled(isCancelled)
             val httpStatus = connection.responseCode
             val stream = if (httpStatus in 200..299) {
                 connection.inputStream
@@ -124,10 +162,23 @@ class UrlGoogleHttpClient : GoogleHttpClient {
                 httpStatus = httpStatus,
                 bodyText = bytes.toString(Charsets.UTF_8),
                 bodyBytes = bytes
-            )
+            ).also {
+                throwIfProviderOperationCancelled(isCancelled)
+            }
+        } catch (exception: Exception) {
+            // disconnect() commonly surfaces as a transport IOException. Preserve the
+            // stronger cancellation signal so stale work cannot publish a failure after
+            // the credential has been removed or replaced.
+            throwIfProviderOperationCancelled(isCancelled)
+            throw exception
         } finally {
+            activeConnections.remove(connection)
             connection.disconnect()
         }
+    }
+
+    override fun cancelAll() {
+        activeConnections.toList().forEach(HttpURLConnection::disconnect)
     }
 
     private companion object {
