@@ -51,7 +51,6 @@ class MainActivity : FlutterActivity() {
     private var nativeLastRouteError: Map<String, Any?>? = null
     private val nativeDiagnosticEvents = ArrayDeque<Map<String, Any?>>()
     private var nextDiagnosticEventId = 1
-    private var nativeThemeMode = DEFAULT_THEME_MODE
     private var nativeTravelMode = DEFAULT_TRAVEL_PROTOCOL_MODE
     private var nativeUnitsMode = DEFAULT_UNITS_MODE
     private var nativeBacklightMode = 0
@@ -391,12 +390,11 @@ class MainActivity : FlutterActivity() {
                     val worldX = call.argument<Int>("worldX")
                     val worldY = call.argument<Int>("worldY")
                     val zoom = call.argument<Int>("zoom") ?: DEFAULT_PREVIEW_ZOOM
-                    val themeMode = call.argument<Int>("themeMode") ?: DEFAULT_THEME_MODE
                     if (worldX == null || worldY == null) {
                         result.error("missing_tile_origin", "Watch tile world x and y are required.", null)
                     } else {
                         runProviderTask(result) {
-                            mapTilesProvider.watchTile(worldX, worldY, zoom, themeMode)
+                            mapTilesProvider.watchTile(worldX, worldY, zoom)
                         }
                     }
                 }
@@ -1873,7 +1871,8 @@ class MainActivity : FlutterActivity() {
                     "location" to "default"
                 ),
                 "status" to diagnosticsStatusSnapshot(),
-                "events" to events
+                "events" to events,
+                "tile_performance" to watchRuntime.tilePerformanceSnapshot()
             )
         )
     }
@@ -2194,14 +2193,6 @@ class MainActivity : FlutterActivity() {
                 clearNativeRouteCache(recordDiagnostic = true, source = "android_bridge")
                 listOf(watchMessage(CMD_ROUTE_CLEAR))
             }
-            CMD_THEME -> {
-                nativeThemeMode = themeProtocolValue(intValue(message, KEY_BUTTON_ID))
-                saveDisplaySettings()
-                listOf(
-                    watchMessage(CMD_THEME, mapOf(KEY_BUTTON_ID to nativeThemeMode)),
-                    mapSettingsMessage(reason = 4)
-                )
-            }
             CMD_TRAVEL_MODE -> {
                 nativeTravelMode = travelProtocolValue(intValue(message, KEY_BUTTON_ID))
                 saveDisplaySettings()
@@ -2364,7 +2355,6 @@ class MainActivity : FlutterActivity() {
         requestGpsStreaming()
 
         val responses = mutableListOf(
-            themeMessage(),
             travelModeMessage(),
             unitsMessage(),
             backlightMessage(),
@@ -2407,7 +2397,6 @@ class MainActivity : FlutterActivity() {
         val worldX = intValue(message, KEY_WORLD_X)
         val worldY = intValue(message, KEY_WORLD_Y)
         val zoom = intValue(message, KEY_TILE_ZOOM)
-        val themeMode = themeProtocolValue(intValue(message, KEY_IS_COLOR) ?: nativeThemeMode)
         if (worldX == null || worldY == null || zoom == null) {
             recordTileFailureDiagnostic(
                 source = "tile_worker",
@@ -2430,7 +2419,7 @@ class MainActivity : FlutterActivity() {
             )
         }
 
-        val tile = mapTilesProvider.watchTile(worldX, worldY, zoom, themeMode)
+        val tile = mapTilesProvider.watchTile(worldX, worldY, zoom)
         if (tile["ok"] == true) {
             val chunkData = byteArrayValue(tile[KEY_CHUNK_DATA])
             if (chunkData != null) {
@@ -2453,9 +2442,8 @@ class MainActivity : FlutterActivity() {
                     tileTotalBytes = totalBytes,
                     tileSource = tileSource
                 )
-                return chunkData.asList()
-                    .chunked(MAX_WATCH_TILE_CHUNK_BYTES)
-                    .mapIndexed { chunkIndex, chunk ->
+                return (chunkData.indices step MAX_WATCH_TILE_CHUNK_BYTES)
+                    .mapIndexed { chunkIndex, offset ->
                         val chunkOffset = chunkIndex * MAX_WATCH_TILE_CHUNK_BYTES
                         watchMessage(
                             CMD_TILE,
@@ -2468,7 +2456,9 @@ class MainActivity : FlutterActivity() {
                                 KEY_TOTAL_BYTES to totalBytes,
                                 KEY_CHUNK_INDEX to chunkIndex,
                                 KEY_CHUNK_OFFSET to chunkOffset,
-                                KEY_CHUNK_DATA to chunk.toByteArray()
+                                KEY_COMPRESSION_FORMAT to requireNotNull(intValue(tile, KEY_COMPRESSION_FORMAT)),
+                                KEY_REQUEST_ID to intValue(message, KEY_REQUEST_ID),
+                                KEY_CHUNK_DATA to chunkData.copyOfRange(offset, minOf(offset + MAX_WATCH_TILE_CHUNK_BYTES, chunkData.size))
                             )
                         )
                     }
@@ -3266,17 +3256,7 @@ class MainActivity : FlutterActivity() {
     private fun setNativeSettings(settings: Map<*, *>): List<Map<String, Any?>> {
         val messages = mutableListOf<Map<String, Any?>>()
         var changed = false
-        var themeChanged = false
 
-        intValue(settings, THEME_MODE_SETTING)?.let { value ->
-            val next = themeProtocolValue(value)
-            if (nativeThemeMode != next) {
-                themeChanged = true
-            }
-            nativeThemeMode = next
-            messages.add(themeMessage())
-            changed = true
-        }
         intValue(settings, TRAVEL_MODE_SETTING)?.let { value ->
             nativeTravelMode = travelProtocolValue(value)
             messages.add(travelModeMessage())
@@ -3320,10 +3300,6 @@ class MainActivity : FlutterActivity() {
         if (changed) {
             saveDisplaySettings()
         }
-        if (themeChanged) {
-            mapTilesProvider.clearProviderSessions()
-            messages.add(mapSettingsMessage(reason = 4))
-        }
         return messages
     }
 
@@ -3331,7 +3307,6 @@ class MainActivity : FlutterActivity() {
         synchronized(this) {
             displaySettingsMap(
                 NativeDisplaySettings(
-                    themeMode = nativeThemeMode,
                     travelMode = nativeTravelMode,
                     unitsMode = nativeUnitsMode,
                     backlightMode = nativeBacklightMode,
@@ -3345,7 +3320,6 @@ class MainActivity : FlutterActivity() {
 
     private fun loadDisplaySettings() {
         val settings = loadNativeDisplaySettings(this)
-        nativeThemeMode = settings.themeMode
         nativeTravelMode = settings.travelMode
         nativeUnitsMode = settings.unitsMode
         nativeBacklightMode = settings.backlightMode
@@ -3359,7 +3333,6 @@ class MainActivity : FlutterActivity() {
         saveNativeDisplaySettings(
             this,
             NativeDisplaySettings(
-                themeMode = nativeThemeMode,
                 travelMode = nativeTravelMode,
                 unitsMode = nativeUnitsMode,
                 backlightMode = nativeBacklightMode,
@@ -3465,9 +3438,6 @@ class MainActivity : FlutterActivity() {
                 )
             )
         }
-
-    private fun themeMessage(): Map<String, Any?> =
-        watchMessage(CMD_THEME, mapOf(KEY_BUTTON_ID to synchronized(this) { nativeThemeMode }))
 
     private fun travelModeMessage(): Map<String, Any?> =
         watchMessage(CMD_TRAVEL_MODE, mapOf(KEY_BUTTON_ID to synchronized(this) { nativeTravelMode }))

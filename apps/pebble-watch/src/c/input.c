@@ -3,7 +3,6 @@
 // Touch, button, menu, zoom, route action, and recenter input handling.
 
 typedef enum {
-  SettingsRowTheme,
   SettingsRowUnits,
   SettingsRowBacklight,
   SettingsRowHaptics,
@@ -495,17 +494,6 @@ const char *travel_mode_label(int mode) {
   }
 }
 
-const char *theme_label(int mode) {
-  switch (mode) {
-    case 1:
-      return "Day";
-    case 2:
-      return "Night";
-    default:
-      return "Auto";
-  }
-}
-
 const char *orientation_label(void) {
   return s_map_orientation == 1 ? "facing" : "north";
 }
@@ -571,9 +559,7 @@ void menu_item_label(int index, char *buffer, size_t buffer_size) {
       break;
     }
     case MenuSettings:
-      if (index == SettingsRowTheme) {
-        snprintf(buffer, buffer_size, "Theme %s", theme_label(s_theme_mode));
-      } else if (index == SettingsRowUnits) {
+      if (index == SettingsRowUnits) {
         snprintf(buffer, buffer_size, "Units %s", s_units_mode == 1 ? "metric" : "imperial");
       } else if (index == SettingsRowBacklight) {
         snprintf(buffer, buffer_size, "Backlight %s", s_backlight_mode ? "on" : "auto");
@@ -661,13 +647,7 @@ void select_menu_item(void) {
       break;
     }
     case MenuSettings:
-      if (s_menu_selection == SettingsRowTheme) {
-        s_theme_mode = (s_theme_mode + 1) % 3;
-        persist_write_int(PERSIST_THEME, s_theme_mode);
-        invalidate_tiles_with_reason(TileInvalidateTheme);
-        queue_visible_tiles();
-        send_theme();
-      } else if (s_menu_selection == SettingsRowUnits) {
+      if (s_menu_selection == SettingsRowUnits) {
         s_units_mode = s_units_mode == 1 ? 0 : 1;
         persist_write_int(PERSIST_UNITS, s_units_mode);
         send_units();

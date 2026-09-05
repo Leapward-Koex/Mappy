@@ -11,9 +11,10 @@ small raster crops and sends compact palette-index payloads to the watch.
 MVP uses these wire and rendering choices:
 
 - 54x63 as the default watch tile crop size.
-- 16-entry day/night palettes.
+- 16-entry day palette.
 - 4-bit palette indexes packed two pixels per decoded byte.
-- RLE tile payloads with high-nibble run length and low-nibble palette index.
+- Adaptive RLE, packed4, LZ4-packed4 and LZ4-RLE payloads.
+- RLE uses high-nibble run length and low-nibble palette index.
 
 Provider constraints:
 
@@ -294,8 +295,8 @@ x/y/zoom no longer matches the visible grid.
 
 For each `CMD_TILE_REQUEST`:
 
-1. Build a request key from `world_x,world_y,zoom,theme,watch_tile_width,watch_tile_height`.
-2. Drop duplicate in-flight work for the same key.
+1. Build a request key from `world_x,world_y,zoom,watch_tile_width,watch_tile_height`.
+2. Share duplicate in-flight work using generation-aware consumer leases.
 3. Compute the source tile containing the crop's top-left pixel:
 
 ```text
@@ -312,20 +313,18 @@ crosses_x = offset_x + watch_tile_width > 256
 crosses_y = offset_y + watch_tile_height > 256
 ```
 
-5. Load one, two, or four source tiles through the provider adapter using the
-   current map source settings.
+5. Submit all required source tiles to a dedicated four-worker executor before
+   waiting. Share download, one session renewal/retry, and decode jobs across
+   crops using captured credential generation and map settings.
 6. Composite the source tiles into a `watch_tile_width x watch_tile_height`
   pixel buffer so `(offset_x,offset_y)` maps to crop pixel `(0,0)`.
 7. Resample from the returned source pixel dimensions when high-DPI tiles are
    in use.
-8. Apply the Mappy watch-palette preprocessing pipeline:
-   day mode darkens slightly, boosts saturation, applies gamma, converts to a
-   Pebble 2-bit-per-channel color, then maps to the active palette; night mode
-   buckets bright and blueish source pixels, inverts HSL lightness, converts to
-   Pebble color, then maps to the active palette.
-9. If the encoded payload exceeds the negotiated limit, report tile failure
-   without corrupting watch cache state.
-10. RLE-pack the `watch_tile_width * watch_tile_height` palette indexes.
+8. Apply the fixed day preprocessing with exact lookup tables: slight darkening,
+   saturation boost, gamma, Pebble 2-bit channels, and nearest day-palette entry.
+9. Generate RLE and packed4 representations. Choose the watch storage layout
+   first, then the smallest compatible wire encoding described below.
+10. Reject output exceeding the bounded protocol limits.
 11. Queue one logical `CMD_TILE` response, split into ordered chunks when the
   encoded tile does not fit in one AppMessage.
 
@@ -340,9 +339,10 @@ The phone should maintain:
 - a Map Tiles session cache keyed by API key hash, language, region, map source,
   layer types, overlay flag, scale, and high-DPI flag,
 - a source tile cache keyed by provider, zoom, source tile x/y, and map source,
-- an encoded watch tile cache keyed by world x/y/zoom/theme, map source, and
+- an encoded watch tile cache keyed by world x/y/zoom, map source, and
   rendered tile width/height,
-- an in-flight request map to avoid duplicate work,
+- an 8 MiB LRU of immutable decoded IntArray pixels, charged by array bytes,
+- shared in-flight source and encoded jobs with cancellation leases,
 - bounded cache sizes to avoid unbounded memory in the phone worker.
 
 Changing map source or rendered tile size must:
@@ -353,42 +353,48 @@ Changing map source or rendered tile size must:
 - notify the watch to invalidate visible tile cache entries and request fresh
   visible crops as specified in `PROTOCOL_MVP.md`.
 
-## Theme And Palette
+## Fixed Day Palette
 
-MVP theme modes:
-
-| Value | Mode |
-| ---: | --- |
-| 0 | Auto |
-| 1 | Day |
-| 2 | Night |
-
-Auto mode switches to night styling before 06:00 and at or after 20:00 local
-time. These fixed cutoffs keep phone and watch behavior deterministic and can be
-made configurable in a later spec.
-
-MVP palette entries use this fixed wire ordering:
+Phone and watch use one fixed 16-entry palette, with this wire ordering:
 
 ```text
-DAY:
-  FF FB EB EA E6 D5 C0 DF CB C7 EE DE FE FC F8 E9
-
-NIGHT:
-  C0 C4 C1 D5 C5 EA FF C6 C7 CB C8 CC D8 E8 C9 D9
+FF FB EB EA E6 D5 C0 DF CB C7 EE DE FE FC F8 E9
 ```
 
-The fixed Mappy tile path is:
+Night/auto modes, theme settings and theme protocol messages do not exist in v4.
+Unused stored theme values are ignored. Day conversion lookup tables reproduce
+all original RGB rounding and nearest-palette tie-breaking exactly.
 
-1. preprocess source RGB into a Pebble `GColor8`-style 2-bit-per-channel color,
-2. convert that Pebble color back into RGB channel values `0/85/170/255`,
-3. choose the nearest entry from the active 16-color palette,
-4. RLE-pack the resulting palette indexes.
+## Adaptive Wire Compression
 
-The watch must use the same palette ordering when drawing decoded tile buffers.
+Each tile chunk carries mandatory `compression_format`:
+
+| Value | Payload |
+| ---: | --- |
+| 1 | Nibble RLE |
+| 2 | Packed4, even pixel in low nibble |
+| 3 | Raw LZ4 block of packed4 |
+| 4 | Raw LZ4 block of nibble RLE |
+
+The Android encoder uses `at.yawk.lz4:lz4-java:1.11.2`,
+`LZ4Factory.safeInstance().fastCompressor()`, with no JNI or LZ4 frame wrapper.
+If RLE bytes plus the current row/checkpoint index are smaller than packed4,
+compare formats 1 and 4. Otherwise compare 1, 2 and 3. Choose the shortest;
+prefer raw over LZ4, then packed4 over RLE on ties. This preserves cache layout
+and never transmits more payload bytes than the original RLE encoding.
+
+The watch incrementally decodes into its existing 6,804-byte maximum scratch.
+LZ4 references earlier output, including overlapping copies. Format 3 must
+produce exactly the geometry's packed byte count. Format 4 is bounded by
+`packedBytes - indexBytes - 1`; its index builder verifies the exact pixel
+count and appends the current index to the scratch buffer. No second tile
+buffer, external LZ4 dictionary, or decompressed-size wire key is used.
+Missing/unknown/changing formats, invalid offsets, truncated tokens and output
+overflow are rejected before tile cache allocation.
 
 ## RLE Payload
 
-Each `CMD_TILE.chunk_data` byte stores:
+For format 1 (and the decompressed body of format 4), each byte stores:
 
 ```text
 packed_byte = ((run_length - 1) << 4) | palette_index
@@ -438,7 +444,6 @@ CMD_TILE_REQUEST
   world_x = world_x
   world_y = world_y
   tile_zoom       = zoom
-  is_color        = optional current theme mode
 ```
 
 Viewport changes may come from GPS-follow, button zoom, touch panning, pinch
@@ -455,8 +460,12 @@ CMD_TILE
   world_x = world_x
   world_y = world_y
   tile_zoom       = zoom
-  total_bytes     = packed byte count
-  chunk_data      = complete RLE payload
+  compression_format = 1 | 2 | 3 | 4
+  total_bytes     = full transmitted payload byte count
+  chunk_data      = contiguous payload chunk
+  chunk_index     = zero-based chunk number
+  chunk_offset    = byte offset in transmitted payload
+  request_id      = echoed positive request ID
 ```
 
 Failure response:
@@ -480,7 +489,7 @@ per visible-grid refresh unless the error category changes.
 
 The watch renderer:
 
-1. Selects active day/night palette.
+1. Uses the fixed day palette.
 2. Iterates valid cache entries.
 3. Computes screen-space bounds from cache x/y/zoom and viewport state.
 4. Clips rows/columns to SDK layer/framebuffer bounds.
@@ -530,6 +539,22 @@ The watch must support:
 - A full visible `emery` tile grid, derived from the active rendered tile size,
   can be requested, delivered, decoded, and drawn after valid setup. The
   default `54x63` preset still yields an initial `5x5` grid.
-- Theme changes invalidate affected encoded tile cache entries and produce
-  visibly different day/night tile colors.
 - The phone operates with no project-hosted backend endpoints configured.
+
+## Cancellation and measurement
+
+Each crop captures credentials, credential generation, identity and settings.
+Shared jobs are removed by identity; old completions cannot remove replacement
+jobs or publish into a new generation. Consumers cancel independently. Only the
+last consumer cancels a shared HTTP request; credential changes cancel all.
+Cancellation is checked before scheduling, between stages, per crop row and
+before publication, and never changes provider validation into a failure.
+
+The native runtime retains at most 512 performance records without requiring
+Flutter to be open. Diagnostic export includes worker/source waits, fetch,
+decode, crop, colour/encode time, queue wait, transport ACK time, cache counts,
+codec/bytes and cancellations. These are phone timings, not watch display time.
+Watch performance builds log decode/receive and first-frame timings separately.
+The 30 ms tile-to-tile pause remains the production default until real-device
+0/10/30 ms trials demonstrate improvement without reliability or p95 input
+latency regression. Chunk capacity remains 3,072 bytes.

@@ -82,15 +82,15 @@ static int rotated_tile_geometry_code(void) {
 #endif
 
 GColor chrome_bg(void) {
-  return s_theme_mode == 2 ? GColorFromHEX(0x12181E) : GColorWhite;
+  return GColorWhite;
 }
 
 GColor chrome_fg(void) {
-  return s_theme_mode == 2 ? GColorWhite : GColorFromHEX(0x182321);
+  return GColorFromHEX(0x182321);
 }
 
 GColor chrome_border(void) {
-  return s_theme_mode == 2 ? GColorFromHEX(0x5A6A70) : GColorFromHEX(0xB6C1BC);
+  return GColorFromHEX(0xB6C1BC);
 }
 
 GColor chrome_accent(void) {
@@ -140,9 +140,7 @@ void draw_tile_placeholders(GContext *ctx) {
     GPoint top_left = screen_point_from_viewport_world(world_x, world_y);
     GRect rect = GRect(top_left.x, top_left.y,
                        scaled_length(s_tile_width), scaled_length(s_tile_height));
-    graphics_context_set_fill_color(ctx, s_theme_mode == 2 ?
-                                    GColorFromHEX(0x202A33) :
-                                    GColorFromHEX(0xE8EEE8));
+    graphics_context_set_fill_color(ctx, GColorFromHEX(0xE8EEE8));
     graphics_fill_rect(ctx, rect, 0, GCornerNone);
   }
 }
@@ -1229,7 +1227,7 @@ void draw_tiles(GContext *ctx, GColor background, bool fill_background) {
     }
     return;
   }
-  const GColor *palette = s_theme_mode == 2 ? s_night_palette : s_day_palette;
+  const GColor *palette = s_day_palette;
   bool render_full_cache = s_gps_smoothing_active &&
       s_gps_smoothing_mode == GPS_SMOOTHING_MAP;
   int origin_count = render_full_cache ? active_tile_cache_size() :
@@ -1272,6 +1270,7 @@ void draw_tiles(GContext *ctx, GColor background, bool fill_background) {
 
   if (draw_tiles_framebuffer_fast(ctx, palette, s_render_tile_entries,
                                   origin_count, background.argb)) {
+    tile_performance_rendered(s_render_tile_entries, origin_count);
     return;
   }
 
@@ -1285,6 +1284,7 @@ void draw_tiles(GContext *ctx, GColor background, bool fill_background) {
     }
     draw_tile_entry_slow(ctx, entry, palette);
   }
+  tile_performance_rendered(s_render_tile_entries, origin_count);
 }
 
 static int32_t render_trig_ratio_to_int(int64_t value) {
@@ -1792,7 +1792,7 @@ void draw_current_location(GContext *ctx,
 }
 
 void draw_card(GContext *ctx, GRect rect, GColor fill, GColor border) {
-  graphics_context_set_fill_color(ctx, s_theme_mode == 2 ? GColorBlack : GColorFromHEX(0x7D8982));
+  graphics_context_set_fill_color(ctx, GColorFromHEX(0x7D8982));
   graphics_fill_rect(ctx, GRect(rect.origin.x + 1, rect.origin.y + 1, rect.size.w, rect.size.h),
                      4, GCornersAll);
   graphics_context_set_fill_color(ctx, fill);
@@ -2018,7 +2018,7 @@ void map_layer_update(Layer *layer, GContext *ctx) {
 #ifdef MAPPY_WATCH_PHONE_MODE_FIXTURE
   fixture_perf_map_draw();
 #endif
-  GColor background = s_theme_mode == 2 ? GColorFromHEX(0x101418) : GColorFromHEX(0xE8EEE8);
+  GColor background = GColorFromHEX(0xE8EEE8);
   bool fill_background_in_tiles = map_orientation_active();
   if (!fill_background_in_tiles) {
     fill_map_background(ctx, background);

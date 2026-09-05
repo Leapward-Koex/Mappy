@@ -28,8 +28,13 @@ uint32_t s_access_counter;
 AppTimer *s_visual_animation_timer;
 AppTimer *s_tile_request_watchdog_timer;
 
+#ifdef MAPPY_WATCH_PHONE_MODE_FIXTURE
+RoutePoint *s_route_points;
+RoutePoint *s_route_detail_points;
+#else
 RoutePoint s_route_points[MAX_ROUTE_POINTS];
 RoutePoint s_route_detail_points[MAX_ROUTE_POINTS];
+#endif
 uint16_t s_route_point_count;
 uint16_t s_route_detail_point_count;
 int8_t s_route_zoom = ROUTE_WORLD_ZOOM;
@@ -121,7 +126,6 @@ time_t s_gps_smoothing_started_s;
 uint16_t s_gps_smoothing_started_ms;
 uint16_t s_gps_smoothing_duration_ms;
 bool s_manual_pan;
-int s_theme_mode;
 int s_travel_mode = 2;
 int s_pending_route_mode = 2;
 int s_active_route_mode = 2;
@@ -146,7 +150,7 @@ int32_t s_tile_chunk_next_index;
 int32_t s_tile_chunk_request_id;
 bool s_tile_chunk_active;
 bool s_tile_chunk_store_packed;
-TileRleStreamDecoder s_tile_chunk_decoder;
+TileStreamDecoder s_tile_chunk_decoder;
 int s_selected_slot = -1;
 int s_pending_route_slot = -1;
 int s_active_route_slot = -1;
@@ -185,15 +189,4 @@ const GColor s_day_palette[16] = {
   GColorFromHEX(0xAAFFAA), GColorFromHEX(0x55FFAA),
   GColorFromHEX(0xFFFFAA), GColorFromHEX(0xFFFF00),
   GColorFromHEX(0xFFAA00), GColorFromHEX(0xAAAA55),
-};
-
-const GColor s_night_palette[16] = {
-  GColorFromHEX(0x000000), GColorFromHEX(0x005500),
-  GColorFromHEX(0x000055), GColorFromHEX(0x555555),
-  GColorFromHEX(0x005555), GColorFromHEX(0xAAAAAA),
-  GColorFromHEX(0xFFFFFF), GColorFromHEX(0x0055AA),
-  GColorFromHEX(0x0055FF), GColorFromHEX(0x00AAFF),
-  GColorFromHEX(0x00AA00), GColorFromHEX(0x00FF00),
-  GColorFromHEX(0x55AA00), GColorFromHEX(0xAAAA00),
-  GColorFromHEX(0x00AA55), GColorFromHEX(0x55AA55),
 };

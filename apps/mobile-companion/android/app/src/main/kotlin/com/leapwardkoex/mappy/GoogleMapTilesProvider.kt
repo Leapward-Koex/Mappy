@@ -5,19 +5,17 @@ import android.graphics.BitmapFactory
 import android.content.Context
 import org.json.JSONArray
 import org.json.JSONObject
-import java.io.ByteArrayOutputStream
 import java.net.SocketTimeoutException
 import java.net.URLEncoder
 import java.util.LinkedHashMap
-import java.util.concurrent.TimeUnit
+import java.util.concurrent.ExecutorService
+import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicLong
-import java.util.concurrent.locks.ReentrantLock
 import kotlin.math.PI
 import kotlin.math.atan2
 import kotlin.math.cos
 import kotlin.math.floor
 import kotlin.math.ln
-import kotlin.math.pow
 import kotlin.math.roundToInt
 import kotlin.math.sin
 import kotlin.math.sqrt
@@ -27,6 +25,7 @@ interface SourceTileRaster {
     val width: Int
     val height: Int
     fun getPixel(x: Int, y: Int): Int
+    fun readPixels(): IntArray = IntArray(width * height) { getPixel(it % width, it / width) }
     fun recycle() {}
 }
 
@@ -50,6 +49,9 @@ private class AndroidBitmapSourceTileRaster(
         get() = bitmap.height
 
     override fun getPixel(x: Int, y: Int): Int = bitmap.getPixel(x, y)
+    override fun readPixels(): IntArray = IntArray(width * height).also {
+        bitmap.getPixels(it, 0, width, 0, 0, width, height)
+    }
 
     override fun recycle() {
         if (!bitmap.isRecycled) {
@@ -64,7 +66,10 @@ class GoogleMapTilesProvider(
     private val httpClient: GoogleHttpClient = UrlGoogleHttpClient(),
     private val binaryStringEncoder: BinaryStringEncoder = AndroidBase64StringEncoder(),
     private val sourceTileDecoder: SourceTileDecoder = AndroidSourceTileDecoder(),
-    private val allowUnrestrictedDevelopmentKey: () -> Boolean = { false }
+    private val allowUnrestrictedDevelopmentKey: () -> Boolean = { false },
+    private val sourceExecutor: ExecutorService = Executors.newFixedThreadPool(4) { task ->
+        Thread(task, "mappy-source-tile").apply { isDaemon = true }
+    }
 ) {
     constructor(
         context: Context,
@@ -104,11 +109,13 @@ class GoogleMapTilesProvider(
     private var cachedSession: TileSession? = null
     private val sessionLock = Any()
     private val sourceTileCache = boundedCache<String, ByteArray>(MAX_SOURCE_TILE_CACHE_ENTRIES)
-    private val encodedWatchTileCache = boundedCache<String, ByteArray>(MAX_WATCH_TILE_CACHE_ENTRIES)
-    private val inFlightWatchTilesLock = ReentrantLock()
-    private val inFlightWatchTilesChanged = inFlightWatchTilesLock.newCondition()
-    private val inFlightWatchTiles = mutableSetOf<String>()
+    private val encodedWatchTileCache = boundedCache<String, EncodedWatchTile>(MAX_WATCH_TILE_CACHE_ENTRIES)
+    private val sourcePixelCache = SourcePixelCache()
+    private val sourceJobs = SharedTileJobs<String, LoadedSource>()
+    private val renderJobs = SharedTileJobs<String, PreparedWatchTile>()
+    private val sessionJobs = SharedTileJobs<String, TileSession>()
     private val providerOperationGeneration = AtomicLong(0L)
+    @Volatile private var closed = false
     private val threadOperationGeneration = ThreadLocal<Long>()
     @Volatile
     private var mapTileSettings = MapTileSettings()
@@ -129,17 +136,39 @@ class GoogleMapTilesProvider(
         synchronized(sessionLock) { cachedSession = null }
         synchronized(sourceTileCache) { sourceTileCache.clear() }
         synchronized(encodedWatchTileCache) { encodedWatchTileCache.clear() }
-        inFlightWatchTilesLock.lock()
-        try {
-            inFlightWatchTiles.clear()
-            inFlightWatchTilesChanged.signalAll()
+        sourcePixelCache.clear()
+        cancelTileWork()
+    }
+
+    fun cancelTileWork() {
+        renderJobs.cancelAll()
+        sourceJobs.cancelAll()
+        sessionJobs.cancelAll()
+    }
+
+    fun close() {
+        synchronized(credentialLifecycleLock) {
+            if (closed) return
+            closed = true
+            invalidateProviderOperationsAndClearSessions()
+        }
+        sourceExecutor.shutdownNow()
+    }
+
+    private fun <T> withOperationGeneration(generation: Long, action: () -> T): T {
+        val previous = threadOperationGeneration.get()
+        threadOperationGeneration.set(generation)
+        return try {
+            ensureProviderOperationCurrent()
+            action()
         } finally {
-            inFlightWatchTilesLock.unlock()
+            if (previous == null) threadOperationGeneration.remove() else threadOperationGeneration.set(previous)
         }
     }
 
     private fun keyForProviderOperation(): String? =
         synchronized(credentialLifecycleLock) {
+            if (closed) throw ProviderOperationCancelledException()
             val generation = providerOperationGeneration.get()
             threadOperationGeneration.set(generation)
             val key = keyStore.getPlaintextKey()
@@ -150,7 +179,7 @@ class GoogleMapTilesProvider(
     private fun ensureProviderOperationCurrent() {
         val generation = threadOperationGeneration.get()
             ?: throw ProviderOperationCancelledException()
-        if (generation != providerOperationGeneration.get()) {
+        if (closed || generation != providerOperationGeneration.get()) {
             throw ProviderOperationCancelledException()
         }
     }
@@ -173,12 +202,15 @@ class GoogleMapTilesProvider(
         }
     }
 
-    private fun executeProviderRequest(request: GoogleHttpRequest): GoogleHttpResponse {
+    private fun executeProviderRequest(
+        request: GoogleHttpRequest,
+        cancellation: TileCancellationToken? = null
+    ): GoogleHttpResponse {
         val generation = threadOperationGeneration.get()
             ?: throw ProviderOperationCancelledException()
-        return httpClient.execute(request) {
+        return httpClient.execute(request, {
             generation != providerOperationGeneration.get()
-        }
+        }, cancellation)
     }
 
     fun clearProviderValidationCache(): Map<String, Any?> {
@@ -219,14 +251,13 @@ class GoogleMapTilesProvider(
         )
     }
 
-    fun setMapTileSettings(settings: MapTileSettings, clearCaches: Boolean = true): Boolean {
-        val changed = mapTileSettings != settings
-        mapTileSettings = settings
-        if (changed && clearCaches) {
-            clearProviderSessions()
+    fun setMapTileSettings(settings: MapTileSettings, clearCaches: Boolean = true): Boolean =
+        synchronized(credentialLifecycleLock) {
+            val changed = mapTileSettings != settings
+            mapTileSettings = settings
+            if (changed && clearCaches) invalidateProviderOperationsAndClearSessions()
+            changed
         }
-        return changed
-    }
 
     fun validateProviderSetup(): Map<String, Any?> {
         val key = keyForProviderOperation()
@@ -349,291 +380,298 @@ class GoogleMapTilesProvider(
         )
     }
 
-    fun watchTile(worldX: Int, worldY: Int, zoom: Int, themeMode: Int): Map<String, Any?> {
+    private data class WatchOperation(
+        val generation: Long,
+        val key: String,
+        val identity: AndroidIdentity,
+        val settings: MapTileSettings
+    )
+
+    private data class LoadedSource(
+        val pixels: SourceTilePixels,
+        val fetchMillis: Double = 0.0,
+        val decodeMillis: Double = 0.0,
+        val sourceByteCacheHits: Int = 0,
+        val sourcePixelCacheHits: Int = 0,
+        val sourceRetries: Int = 0
+    )
+
+    private data class PreparedWatchTile(
+        val encoded: EncodedWatchTile,
+        val metrics: Map<String, Any>
+    )
+
+    private class SourcePreparationException(
+        val response: ProviderResponse,
+        val changesProviderStatus: Boolean = true
+    ) : Exception(response.safeDetail)
+
+    fun watchTile(
+        worldX: Int,
+        worldY: Int,
+        zoom: Int,
+        cancellation: TileCancellationToken = TileCancellationToken()
+    ): Map<String, Any?> = watchTilePreparation(worldX, worldY, zoom, cancellation).toMap()
+
+    internal fun watchTilePreparation(
+        worldX: Int,
+        worldY: Int,
+        zoom: Int,
+        cancellation: TileCancellationToken = TileCancellationToken()
+    ): WatchTilePreparation {
+        val started = System.nanoTime()
+        cancellation.throwIfCancelled()
         val key = keyForProviderOperation()
         val identity = identityProvider.currentIdentity()
         if (key.isNullOrBlank()) {
             return watchTileFailure(
-                status = keyStore.markValidationResult(
-                    ApiKeyStore.STATE_NOT_CONFIGURED,
-                    "No Google API key is stored.",
-                    null,
-                    identity.packageName,
-                    identity.certSha1
-                ),
-                detail = "No Google API key is stored.",
-                errorCategory = ERROR_MISSING_KEY,
-                worldX = worldX,
-                worldY = worldY,
-                zoom = zoom
+                keyStore.markValidationResult(ApiKeyStore.STATE_NOT_CONFIGURED, "No Google API key is stored.",
+                    null, identity.packageName, identity.certSha1),
+                "No Google API key is stored.", ERROR_MISSING_KEY, worldX, worldY, zoom
             )
         }
-
+        val operation = synchronized(credentialLifecycleLock) {
+            ensureProviderOperationCurrent()
+            WatchOperation(threadOperationGeneration.get()!!, key, identity, mapTileSettings)
+        }
         val status = keyStore.getStatus()
-        val validationState = status["validationState"] as? String
-        val settings = mapTileSettings
-        if (validationState != ApiKeyStore.STATE_VALID) {
-            return watchTileFailure(
-                    status = status,
-                    detail = status["validationDetail"] as? String ?: "Provider setup is not valid.",
-                    errorCategory = providerStateToCategory(validationState),
-                    worldX = worldX,
-                    worldY = worldY,
-                    zoom = zoom,
-                    httpStatus = status["validationHttpStatus"] as? Int
-                )
+        if (status["validationState"] != ApiKeyStore.STATE_VALID) {
+            return watchTileFailure(status, status["validationDetail"] as? String ?: "Provider setup is not valid.",
+                providerStateToCategory(status["validationState"] as? String), worldX, worldY, zoom,
+                status["validationHttpStatus"] as? Int)
         }
-
-        ensureTileSession(key, identity)?.let { failure ->
-            return watchTileFailure(
-                status = failure["providerStatus"] as? Map<String, Any?> ?: status,
-                detail = failure["detail"] as? String ?: "No Map Tiles session is available.",
-                errorCategory = intValue(failure, "errorCategory") ?: ERROR_NETWORK,
-                worldX = worldX,
-                worldY = worldY,
-                zoom = zoom,
-                httpStatus = intValue(failure, "httpStatus")
-            )
-        }
-
-        var session = cachedSession ?: return watchTileFailure(
-            status = keyStore.getStatus(),
-            detail = "No Map Tiles session is available.",
-            errorCategory = ERROR_NETWORK,
-            worldX = worldX,
-            worldY = worldY,
-            zoom = zoom
-        )
-
-        val watchTileWidth = settings.watchTileWidth
-        val watchTileHeight = settings.watchTileHeight
+        val settings = operation.settings
         val safeZoom = zoom.coerceIn(0, MAX_WATCH_TILE_ZOOM)
         val worldSize = (1 shl safeZoom) * SOURCE_TILE_SIZE_INT
-        val cropWorldX = worldX.floorMod(worldSize)
-        val cropWorldY = worldY.coerceIn(0, worldSize - watchTileHeight)
-        val watchCacheKey = "${settings.cacheKey}:$cropWorldX:$cropWorldY:$safeZoom:$themeMode"
-        synchronized(encodedWatchTileCache) {
-            encodedWatchTileCache[watchCacheKey]?.let { cached ->
-                return watchTileSuccess(
-                    cropWorldX,
-                    cropWorldY,
-                    safeZoom,
-                    watchTileWidth,
-                    watchTileHeight,
-                    cached,
-                    source = "encodedCache"
-                )
-            }
+        val cropX = worldX.floorMod(worldSize)
+        val cropY = worldY.coerceIn(0, worldSize - settings.watchTileHeight)
+        val cacheKey = "${operation.generation}:${settings.cacheKey}:$cropX:$cropY:$safeZoom"
+        synchronized(encodedWatchTileCache) { encodedWatchTileCache[cacheKey] }?.let {
+            cancellation.throwIfCancelled()
+            ensureProviderOperationCurrent()
+            return watchTileSuccess(cropX, cropY, safeZoom, settings.watchTileWidth, settings.watchTileHeight,
+                it, "encodedCache", mapOf("encodedCacheHits" to 1, "preparationMillis" to elapsedMillis(started)))
         }
-        if (!markWatchTileInFlight(watchCacheKey)) {
-            waitForEncodedWatchTile(watchCacheKey)?.let { cached ->
-                return watchTileSuccess(
-                    cropWorldX,
-                    cropWorldY,
-                    safeZoom,
-                    watchTileWidth,
-                    watchTileHeight,
-                    cached,
-                    source = "duplicateInFlight"
-                )
-            }
-            return watchTileFailure(
-                status = keyStore.getStatus(),
-                detail = "Timed out waiting for duplicate watch tile request.",
-                errorCategory = ERROR_NETWORK,
-                worldX = cropWorldX,
-                worldY = cropWorldY,
-                zoom = safeZoom
-            )
-        }
-        val sourceTileKeys = sourceTilesForCrop(
-            cropWorldX,
-            cropWorldY,
-            safeZoom,
-            worldSize,
-            watchTileWidth,
-            watchTileHeight
-        )
-        val rasters = mutableMapOf<Pair<Int, Int>, SourceTileRaster>()
-
+        val lease = renderJobs.acquire(cacheKey, cancellation)
         try {
-            for ((tileX, tileY) in sourceTileKeys) {
-                var response = fetchSourceTileBytes(
-                    key = key,
-                    identity = identity,
-                    sessionToken = session.sessionToken,
-                    settingsKey = settings.cacheKey,
-                    coordinate = TileCoordinate(
-                        tileX = tileX,
-                        tileY = tileY,
-                        zoom = safeZoom,
-                        offsetX = 0.0,
-                        offsetY = 0.0
-                    )
-                )
-                if (!response.success && response.httpStatus in setOf(400, 401, 403, 404)) {
-                    synchronized(sessionLock) {
-                        if (cachedSession?.sessionToken == session.sessionToken) cachedSession = null
+            lease.runIfOwner { sharedCancellation ->
+                withOperationGeneration(operation.generation) {
+                    synchronized(encodedWatchTileCache) { encodedWatchTileCache[cacheKey] }?.let {
+                        return@withOperationGeneration PreparedWatchTile(it, mapOf("encodedCacheHits" to 1))
                     }
-                    if (ensureTileSession(key, identity) == null) {
-                        cachedSession?.let { replacement ->
-                            session = replacement
-                            response = fetchSourceTileBytes(
-                                key = key,
-                                identity = identity,
-                                sessionToken = replacement.sessionToken,
-                                settingsKey = settings.cacheKey,
-                                coordinate = TileCoordinate(
-                                    tileX = tileX,
-                                    tileY = tileY,
-                                    zoom = safeZoom,
-                                    offsetX = 0.0,
-                                    offsetY = 0.0
-                                )
-                            )
+                    sharedCancellation.throwIfCancelled()
+                    val sessionStarted = System.nanoTime()
+                    val session = watchTileSession(operation, sharedCancellation)
+                    val sessionMillis = elapsedMillis(sessionStarted)
+                    prepareWatchTile(operation, session, cropX, cropY, safeZoom, worldSize, sharedCancellation)
+                        .let { it.copy(metrics = it.metrics + ("sessionMillis" to sessionMillis)) }
+                        .also { prepared ->
+                            synchronized(credentialLifecycleLock) {
+                                ensureProviderOperationCurrent()
+                                sharedCancellation.throwIfCancelled()
+                                synchronized(encodedWatchTileCache) { encodedWatchTileCache[cacheKey] = prepared.encoded }
+                            }
+                        }
+                }
+            }
+            val prepared = lease.await()
+            ensureProviderOperationCurrent()
+            return watchTileSuccess(cropX, cropY, safeZoom, settings.watchTileWidth, settings.watchTileHeight,
+                prepared.encoded, if (lease.isOwner) "rendered" else "duplicateInFlight",
+                prepared.metrics + mapOf("preparationMillis" to elapsedMillis(started),
+                    "sharedRenderHits" to if (lease.isOwner) 0 else 1))
+        } catch (failure: SourcePreparationException) {
+            cancellation.throwIfCancelled()
+            ensureProviderOperationCurrent()
+            val response = failure.response
+            val failureStatus = if (failure.changesProviderStatus) {
+                keyStore.markValidationResult(mapHttpStatusToState(response.httpStatus), response.safeDetail,
+                    response.httpStatus, identity.packageName, identity.certSha1)
+            } else keyStore.getStatus()
+            return watchTileFailure(failureStatus, response.safeDetail, ERROR_TILE_PROVIDER,
+                cropX, cropY, safeZoom, response.httpStatus)
+        } finally {
+            lease.close()
+        }
+    }
+
+    private fun prepareWatchTile(
+        operation: WatchOperation,
+        session: TileSession,
+        cropX: Int,
+        cropY: Int,
+        zoom: Int,
+        worldSize: Int,
+        cancellation: TileCancellationToken
+    ): PreparedWatchTile {
+        val width = operation.settings.watchTileWidth
+        val height = operation.settings.watchTileHeight
+        val keys = sourceTilesForCrop(cropX, cropY, zoom, worldSize, width, height).toList()
+        val leases = ArrayList<SharedTileJobs<String, LoadedSource>.Lease>(keys.size)
+        val waitingStarted = System.nanoTime()
+        try {
+            for ((x, y) in keys) {
+                cancellation.throwIfCancelled()
+                ensureProviderOperationCurrent()
+                val cacheKey = "${operation.generation}:${operation.settings.cacheKey}:$zoom:$x:$y"
+                val lease = sourceJobs.acquire(cacheKey, cancellation)
+                leases.add(lease)
+                lease.submitIfOwner(sourceExecutor) { sourceCancellation ->
+                    withOperationGeneration(operation.generation) {
+                        loadSourceTile(operation, session, TileCoordinate(x, y, zoom, 0.0, 0.0),
+                            cacheKey, sourceCancellation)
+                    }
+                }
+            }
+            val sources = leases.map { it.await() }
+            val waitMillis = elapsedMillis(waitingStarted)
+            cancellation.throwIfCancelled()
+            val cropStarted = System.nanoTime()
+            val colors = IntArray(width * height)
+            val sourceXs = IntArray(width) { (cropX + it).floorMod(worldSize) / SOURCE_TILE_SIZE_INT }
+            val logicalXs = IntArray(width) { (cropX + it).floorMod(worldSize) % SOURCE_TILE_SIZE_INT }
+            val sampledXs = sources.map { source ->
+                IntArray(width) { scaledSourcePixel(logicalXs[it], source.pixels.width) }
+            }
+            for (y in 0 until height) {
+                cancellation.throwIfCancelled()
+                val sourceWorldY = (cropY + y).coerceIn(0, worldSize - 1)
+                val sourceY = sourceWorldY / SOURCE_TILE_SIZE_INT
+                val logicalY = sourceWorldY % SOURCE_TILE_SIZE_INT
+                for (sourceIndex in keys.indices) {
+                    if (keys[sourceIndex].second != sourceY) continue
+                    val pixels = sources[sourceIndex].pixels
+                    val row = scaledSourcePixel(logicalY, pixels.height) * pixels.width
+                    val tileX = keys[sourceIndex].first
+                    for (x in 0 until width) {
+                        if (sourceXs[x] == tileX) {
+                            colors[y * width + x] = pixels.pixels[row + sampledXs[sourceIndex][x]]
                         }
                     }
                 }
-                val bytes = response.bytes
-                if (!response.success || bytes == null) {
-                    return watchTileFailure(
-                        status = keyStore.markValidationResult(
-                            mapHttpStatusToState(response.httpStatus),
-                            response.safeDetail,
-                            response.httpStatus,
-                            identity.packageName,
-                            identity.certSha1
-                        ),
-                        detail = response.safeDetail,
-                        errorCategory = ERROR_TILE_PROVIDER,
-                        worldX = cropWorldX,
-                        worldY = cropWorldY,
-                        zoom = safeZoom,
-                        httpStatus = response.httpStatus
-                    )
-                }
-                val raster = sourceTileDecoder.decode(bytes)
-                    ?: return watchTileFailure(
-                        status = keyStore.getStatus(),
-                        detail = "Map tile image could not be decoded.",
-                        errorCategory = ERROR_TILE_PROVIDER,
-                        worldX = cropWorldX,
-                        worldY = cropWorldY,
-                        zoom = safeZoom
-                    )
-                rasters[tileX to tileY] = raster
             }
-
-            val isNight = themeMode == THEME_NIGHT
-            val palette = if (isNight) WATCH_NIGHT_RGB else WATCH_DAY_RGB
-            val sourceColors = IntArray(watchTileWidth * watchTileHeight)
-            var outputIndex = 0
-            for (pixelY in 0 until watchTileHeight) {
-                val sourceWorldY = (cropWorldY + pixelY).coerceIn(0, worldSize - 1)
-                val sourceTileY = (sourceWorldY / SOURCE_TILE_SIZE_INT).coerceIn(0, (1 shl safeZoom) - 1)
-                val logicalPixelY = sourceWorldY - sourceTileY * SOURCE_TILE_SIZE_INT
-                for (pixelX in 0 until watchTileWidth) {
-                    val sourceWorldX = (cropWorldX + pixelX).floorMod(worldSize)
-                    val sourceTileX = (sourceWorldX / SOURCE_TILE_SIZE_INT).floorMod(1 shl safeZoom)
-                    val logicalPixelX = sourceWorldX - sourceTileX * SOURCE_TILE_SIZE_INT
-                    val raster = rasters[sourceTileX to sourceTileY]
-                    val color = raster
-                        ?.getPixel(
-                            scaledSourcePixel(logicalPixelX, raster.width),
-                            scaledSourcePixel(logicalPixelY, raster.height)
-                        )
-                        ?: rgb(238, 238, 238)
-                    sourceColors[outputIndex++] = color
+            val cropMillis = elapsedMillis(cropStarted)
+            val colorStarted = System.nanoTime()
+            val indexes = ByteArray(colors.size)
+            for (y in 0 until height) {
+                cancellation.throwIfCancelled()
+                for (x in 0 until width) {
+                    val offset = y * width + x
+                    indexes[offset] = DayTileColors.paletteIndex(colors[offset]).toByte()
                 }
             }
-
-            val rle = rlePackPaletteIndexes(
-                quantizeWatchColors(
-                    sourceColors = sourceColors,
-                    palette = palette,
-                    width = watchTileWidth,
-                    useDither = false,
-                    isNight = isNight
-                )
-            )
-            if (rle.size > watchTileWidth * watchTileHeight) {
-                return watchTileFailure(
-                    status = keyStore.getStatus(),
-                    detail = "Watch tile payload exceeded the negotiated limit.",
-                    errorCategory = ERROR_TILE_PROVIDER,
-                    worldX = cropWorldX,
-                    worldY = cropWorldY,
-                    zoom = safeZoom
-                )
-            }
-            synchronized(credentialLifecycleLock) {
-                ensureProviderOperationCurrent()
-                synchronized(encodedWatchTileCache) {
-                    encodedWatchTileCache[watchCacheKey] = rle
-                }
-            }
-            return watchTileSuccess(
-                cropWorldX,
-                cropWorldY,
-                safeZoom,
-                watchTileWidth,
-                watchTileHeight,
-                rle,
-                source = "rendered"
-            )
+            val colorMillis = elapsedMillis(colorStarted)
+            cancellation.throwIfCancelled()
+            val encodeStarted = System.nanoTime()
+            val encoded = WatchTileEncoder.encode(indexes, width, height)
+            val encodeMillis = elapsedMillis(encodeStarted)
+            cancellation.throwIfCancelled()
+            return PreparedWatchTile(encoded, mapOf(
+                "sourceWaitMillis" to waitMillis,
+                "fetchMillis" to sources.sumOf { it.fetchMillis },
+                "decodeMillis" to sources.sumOf { it.decodeMillis },
+                "cropMillis" to cropMillis, "colorMillis" to colorMillis, "encodeMillis" to encodeMillis,
+                "sourceByteCacheHits" to sources.sumOf { it.sourceByteCacheHits },
+                "sourcePixelCacheHits" to sources.sumOf { it.sourcePixelCacheHits },
+                "sharedSourceHits" to leases.count { !it.isOwner },
+                "sourceTiles" to sources.size,
+                "sourceRetries" to sources.sumOf { it.sourceRetries },
+                "payloadBytes" to encoded.payload.size
+            ))
         } finally {
-            finishWatchTileInFlight(watchCacheKey)
-            rasters.values.forEach { it.recycle() }
+            leases.forEach { it.close() }
         }
     }
 
-    private fun markWatchTileInFlight(watchCacheKey: String): Boolean {
-        inFlightWatchTilesLock.lock()
+    private fun loadSourceTile(
+        operation: WatchOperation,
+        initialSession: TileSession,
+        coordinate: TileCoordinate,
+        cacheKey: String,
+        cancellation: TileCancellationToken
+    ): LoadedSource {
+        cancellation.throwIfCancelled()
+        sourcePixelCache.get(cacheKey)?.let { return LoadedSource(it, sourcePixelCacheHits = 1) }
+        val cachedBytes = synchronized(sourceTileCache) { sourceTileCache[cacheKey] }
+        val fetchStarted = System.nanoTime()
+        var sourceRetries = 0
+        val bytes = cachedBytes ?: run {
+            var response = fetchTile(operation.key, operation.identity, initialSession.sessionToken, coordinate, cancellation)
+            if (!response.success && response.httpStatus in setOf(400, 401, 403, 404)) {
+                cancellation.throwIfCancelled()
+                val replacement = watchTileSession(operation, cancellation, initialSession.sessionToken)
+                cancellation.throwIfCancelled()
+                sourceRetries++
+                response = fetchTile(operation.key, operation.identity, replacement.sessionToken, coordinate, cancellation)
+            }
+            if (!response.success || response.bytes == null) throw SourcePreparationException(response)
+            response.bytes.also {
+                synchronized(credentialLifecycleLock) {
+                    ensureProviderOperationCurrent()
+                    cancellation.throwIfCancelled()
+                    synchronized(sourceTileCache) { sourceTileCache[cacheKey] = it }
+                }
+            }
+        }
+        val fetchMillis = if (cachedBytes == null) elapsedMillis(fetchStarted) else 0.0
+        cancellation.throwIfCancelled()
+        val decodeStarted = System.nanoTime()
+        val raster = sourceTileDecoder.decode(bytes) ?: run {
+            synchronized(sourceTileCache) { sourceTileCache.remove(cacheKey) }
+            throw SourcePreparationException(ProviderResponse(false, null, "Map tile image could not be decoded."), false)
+        }
+        val pixels = try {
+            cancellation.throwIfCancelled()
+            SourceTilePixels(raster.width, raster.height, raster.readPixels())
+        } finally { raster.recycle() }
+        val decodeMillis = elapsedMillis(decodeStarted)
+        synchronized(credentialLifecycleLock) {
+            ensureProviderOperationCurrent()
+            cancellation.throwIfCancelled()
+            sourcePixelCache.put(cacheKey, pixels)
+        }
+        return LoadedSource(pixels, fetchMillis, decodeMillis, if (cachedBytes == null) 0 else 1, sourceRetries = sourceRetries)
+    }
+
+    private fun watchTileSession(
+        operation: WatchOperation,
+        cancellation: TileCancellationToken,
+        expiredToken: String? = null
+    ): TileSession {
+        fun reusable(): TileSession? = synchronized(sessionLock) {
+            ensureProviderOperationCurrent()
+            cachedSession?.takeIf {
+                it.settingsKey == operation.settings.cacheKey && it.sessionToken != expiredToken
+            }
+        }
+        cancellation.throwIfCancelled()
+        reusable()?.let { return it }
+        val jobKey = "${operation.generation}:${operation.settings.cacheKey}:${expiredToken ?: "initial"}"
+        val lease = sessionJobs.acquire(jobKey, cancellation)
         try {
-            if (inFlightWatchTiles.contains(watchCacheKey)) {
-                return false
-            } else {
-                inFlightWatchTiles.add(watchCacheKey)
-                return true
-            }
-        } finally {
-            inFlightWatchTilesLock.unlock()
-        }
-    }
-
-    private fun waitForEncodedWatchTile(watchCacheKey: String): ByteArray? {
-        val deadline = System.currentTimeMillis() + MAX_IN_FLIGHT_WATCH_TILE_WAIT_MS
-        inFlightWatchTilesLock.lock()
-        try {
-            while (inFlightWatchTiles.contains(watchCacheKey)) {
-                val remaining = deadline - System.currentTimeMillis()
-                if (remaining <= 0L) {
-                    break
-                }
-                try {
-                    inFlightWatchTilesChanged.await(remaining.coerceAtMost(250L), TimeUnit.MILLISECONDS)
-                } catch (_: InterruptedException) {
-                    Thread.currentThread().interrupt()
-                    break
+            lease.runIfOwner { sharedCancellation ->
+                withOperationGeneration(operation.generation) {
+                    reusable() ?: run {
+                        sharedCancellation.throwIfCancelled()
+                        val response = createSession(operation.key, operation.identity.packageName,
+                            operation.identity.certSha1, operation.settings, sharedCancellation)
+                        val session = response.session
+                        if (!response.success || session == null) throw SourcePreparationException(response)
+                        synchronized(credentialLifecycleLock) {
+                            ensureProviderOperationCurrent()
+                            sharedCancellation.throwIfCancelled()
+                            synchronized(sessionLock) {
+                                reusable() ?: session.also { cachedSession = it }
+                            }
+                        }
+                    }
                 }
             }
-        } finally {
-            inFlightWatchTilesLock.unlock()
-        }
-        return synchronized(encodedWatchTileCache) {
-            encodedWatchTileCache[watchCacheKey]
-        }
+            return lease.await()
+        } finally { lease.close() }
     }
 
-    private fun finishWatchTileInFlight(watchCacheKey: String) {
-        inFlightWatchTilesLock.lock()
-        try {
-            inFlightWatchTiles.remove(watchCacheKey)
-            inFlightWatchTilesChanged.signalAll()
-        } finally {
-            inFlightWatchTilesLock.unlock()
-        }
-    }
+    private fun elapsedMillis(started: Long): Double = (System.nanoTime() - started) / 1_000_000.0
 
     fun geocodeDestination(addressText: String, language: String, region: String): Map<String, Any?> {
         val key = keyForProviderOperation()
@@ -1152,14 +1190,18 @@ class GoogleMapTilesProvider(
 
     private fun ensureTileSession(
         key: String,
-        identity: AndroidIdentity
+        identity: AndroidIdentity,
+        settings: MapTileSettings = mapTileSettings
     ): Map<String, Any?>? {
-        val settingsKey = mapTileSettings.cacheKey
+        ensureProviderOperationCurrent()
+        val settingsKey = settings.cacheKey
         if (cachedSession?.settingsKey == settingsKey) return null
         val response = synchronized(sessionLock) {
+            ensureProviderOperationCurrent()
             if (cachedSession?.settingsKey == settingsKey) return null
-            val candidate = createSession(key, identity.packageName, identity.certSha1)
+            val candidate = createSession(key, identity.packageName, identity.certSha1, settings)
             if (candidate.success && candidate.session != null) {
+                ensureProviderOperationCurrent()
                 cachedSession = candidate.session
                 return null
             }
@@ -1183,8 +1225,10 @@ class GoogleMapTilesProvider(
         ).filterValues { it != null }
     }
 
-    private fun createSession(key: String, packageName: String, certSha1: String): ProviderResponse {
-        val settings = mapTileSettings
+    private fun createSession(
+        key: String, packageName: String, certSha1: String, settings: MapTileSettings = mapTileSettings,
+        cancellation: TileCancellationToken? = null
+    ): ProviderResponse {
         val bodyJson = JSONObject()
             .put("mapType", settings.googleMapType)
             .put("language", DEFAULT_LANGUAGE)
@@ -1212,7 +1256,8 @@ class GoogleMapTilesProvider(
                     headers = androidHeaders(packageName, certSha1) +
                         mapOf("Content-Type" to "application/json; charset=utf-8"),
                     body = body
-                )
+                ),
+                cancellation
             )
             val httpStatus = response.httpStatus
             if (httpStatus in 200..299) {
@@ -1254,15 +1299,18 @@ class GoogleMapTilesProvider(
         key: String,
         identity: AndroidIdentity,
         sessionToken: String,
-        coordinate: TileCoordinate
+        coordinate: TileCoordinate,
+        cancellation: TileCancellationToken? = null
     ): ProviderResponse {
         return try {
             val response = executeProviderRequest(
                 GoogleHttpRequest(
                     url = "$MAP_TILES_BASE_URL/2dtiles/${coordinate.zoom}/${coordinate.tileX}/${coordinate.tileY}" +
                         "?session=${encoded(sessionToken)}&key=${encoded(key)}",
-                    headers = androidHeaders(identity.packageName, identity.certSha1)
-                )
+                    headers = androidHeaders(identity.packageName, identity.certSha1),
+                    expectsBinary = true
+                ),
+                cancellation
             )
             val httpStatus = response.httpStatus
             if (httpStatus in 200..299) {
@@ -1296,70 +1344,18 @@ class GoogleMapTilesProvider(
         worldY: Int,
         zoom: Int,
         httpStatus: Int? = null
-    ): Map<String, Any?> =
-        operationFailure(
-            status = status,
-            detail = detail,
-            errorCategory = errorCategory,
-            httpStatus = httpStatus
-        ) + mapOf(
-            "world_x" to worldX,
-            "world_y" to worldY,
-            "tile_zoom" to zoom
-        )
+    ): WatchTilePreparation = WatchTilePreparation(
+        worldX, worldY, zoom, encoded = null, providerStatus = status,
+        failure = operationFailure(status, detail, errorCategory, httpStatus)
+    )
 
     private fun watchTileSuccess(
-        worldX: Int,
-        worldY: Int,
-        zoom: Int,
-        width: Int,
-        height: Int,
-        rle: ByteArray,
-        source: String
-    ): Map<String, Any?> =
-        mapOf(
-            "ok" to true,
-            "providerStatus" to keyStore.getStatus(),
-            "world_x" to worldX,
-            "world_y" to worldY,
-            "tile_zoom" to zoom,
-            "width" to width,
-            "height" to height,
-            "total_bytes" to rle.size,
-            "chunk_data" to rle,
-            "tile_source" to source,
-            "attribution" to "Google Map Tiles"
-        )
-
-    private fun fetchSourceTileBytes(
-        key: String,
-        identity: AndroidIdentity,
-        sessionToken: String,
-        settingsKey: String,
-        coordinate: TileCoordinate
-    ): ProviderResponse {
-        val cacheKey = "$settingsKey:${coordinate.zoom}:${coordinate.tileX}:${coordinate.tileY}"
-        synchronized(sourceTileCache) {
-            sourceTileCache[cacheKey]?.let { cached ->
-                return ProviderResponse(
-                    success = true,
-                    httpStatus = 200,
-                    safeDetail = "Map tile fetched from cache.",
-                    bytes = cached
-                )
-            }
-        }
-        val response = fetchTile(key, identity, sessionToken, coordinate)
-        val bytes = response.bytes
-        if (response.success && bytes != null) {
-            synchronized(credentialLifecycleLock) {
-                ensureProviderOperationCurrent()
-                synchronized(sourceTileCache) {
-                    sourceTileCache[cacheKey] = bytes
-                }
-            }
-        }
-        return response
+        worldX: Int, worldY: Int, zoom: Int, width: Int, height: Int,
+        encoded: EncodedWatchTile, source: String, metrics: Map<String, Any>
+    ): WatchTilePreparation {
+        check(encoded.width == width && encoded.height == height)
+        return WatchTilePreparation(worldX, worldY, zoom,
+            encoded.copy(preparationMetrics = metrics), keyStore.getStatus(), source)
     }
 
     private fun sourceTilesForCrop(
@@ -1378,200 +1374,6 @@ class GoogleMapTilesProvider(
             watchTileWidth,
             watchTileHeight
         )
-
-    private fun nearestPaletteIndex(color: Int, palette: IntArray): Int {
-        val red = red(color)
-        val green = green(color)
-        val blue = blue(color)
-        var bestIndex = 0
-        var bestDistance = Int.MAX_VALUE
-        for (index in palette.indices) {
-            val candidate = palette[index]
-            val dr = red - red(candidate)
-            val dg = green - green(candidate)
-            val db = blue - blue(candidate)
-            val distance = dr * dr + dg * dg + db * db
-            if (distance < bestDistance) {
-                bestDistance = distance
-                bestIndex = index
-            }
-        }
-        return bestIndex
-    }
-
-    private fun ditheredPaletteIndex(color: Int, palette: IntArray, pixelX: Int, pixelY: Int): Int {
-        val threshold = BAYER_4X4[pixelY and 3][pixelX and 3] - 8
-        val adjusted = rgb(
-            (red(color) + threshold * 4).coerceIn(0, 255),
-            (green(color) + threshold * 4).coerceIn(0, 255),
-            (blue(color) + threshold * 4).coerceIn(0, 255)
-        )
-        return nearestPaletteIndex(adjusted, palette)
-    }
-
-    private fun quantize2(value: Int): Int = ((value + 42) / 85).coerceIn(0, 3)
-
-    private fun pebbleColorToRgb(pebbleColor: Int): Int =
-        rgb(
-            ((pebbleColor ushr 4) and 0x03) * 85,
-            ((pebbleColor ushr 2) and 0x03) * 85,
-            (pebbleColor and 0x03) * 85
-        )
-
-    private fun hueToRgb(p: Double, q: Double, t: Double): Double {
-        var hue = t
-        if (hue < 0.0) {
-            hue += 1.0
-        }
-        if (hue > 1.0) {
-            hue -= 1.0
-        }
-        return when {
-            hue < (1.0 / 6.0) -> p + (q - p) * 6.0 * hue
-            hue < 0.5 -> q
-            hue < (2.0 / 3.0) -> p + (q - p) * ((2.0 / 3.0) - hue) * 6.0
-            else -> p
-        }
-    }
-
-    private fun rgbaToPebbleColor(color: Int, isNight: Boolean): Int {
-        var red = red(color).toDouble()
-        var green = green(color).toDouble()
-        var blue = blue(color).toDouble()
-
-        if (isNight) {
-            val luminance = 0.30 * red + 0.59 * green + 0.11 * blue
-            val isBlueish = blue > red + 15.0 && blue > green + 5.0
-            when {
-                isBlueish -> {
-                    red = 20.0
-                    green = 30.0
-                    blue = 80.0
-                }
-                luminance > 235.0 -> {
-                    red = 200.0
-                    green = 240.0
-                    blue = 255.0
-                }
-                luminance > 205.0 -> {
-                    red = 80.0
-                    green = 120.0
-                    blue = 200.0
-                }
-                else -> {
-                    red = 0.0
-                    green = 30.0
-                    blue = 80.0
-                }
-            }
-
-            val rn = red / 255.0
-            val gn = green / 255.0
-            val bn = blue / 255.0
-            val maxChannel = maxOf(rn, gn, bn)
-            val minChannel = minOf(rn, gn, bn)
-            var lightness = (maxChannel + minChannel) / 2.0
-            var saturation = 0.0
-            var hue = 0.0
-            if (maxChannel != minChannel) {
-                val delta = maxChannel - minChannel
-                saturation = if (lightness > 0.5) {
-                    delta / (2.0 - maxChannel - minChannel)
-                } else {
-                    delta / (maxChannel + minChannel)
-                }
-                hue = when (maxChannel) {
-                    rn -> (gn - bn) / delta + if (gn < bn) 6.0 else 0.0
-                    gn -> (bn - rn) / delta + 2.0
-                    else -> (rn - gn) / delta + 4.0
-                } / 6.0
-            }
-
-            lightness = 1.0 - lightness
-            if (saturation == 0.0) {
-                val gray = (lightness * 255.0).roundToInt()
-                red = gray.toDouble()
-                green = gray.toDouble()
-                blue = gray.toDouble()
-            } else {
-                val q = if (lightness < 0.5) {
-                    lightness * (1.0 + saturation)
-                } else {
-                    lightness + saturation - lightness * saturation
-                }
-                val p = 2.0 * lightness - q
-                red = hueToRgb(p, q, hue + (1.0 / 3.0)) * 255.0
-                green = hueToRgb(p, q, hue) * 255.0
-                blue = hueToRgb(p, q, hue - (1.0 / 3.0)) * 255.0
-            }
-        } else {
-            val contrast = 1.0
-            red = ((red - 128.0) * contrast + 128.0).coerceIn(0.0, 255.0)
-            green = ((green - 128.0) * contrast + 128.0).coerceIn(0.0, 255.0)
-            blue = ((blue - 128.0) * contrast + 128.0).coerceIn(0.0, 255.0)
-
-            val brightness = -10.0
-            red = (red + brightness).coerceIn(0.0, 255.0)
-            green = (green + brightness).coerceIn(0.0, 255.0)
-            blue = (blue + brightness).coerceIn(0.0, 255.0)
-
-            val average = (red + green + blue) / 3.0
-            val saturationBoost = 3.0
-            red = (average + (red - average) * saturationBoost).coerceIn(0.0, 255.0)
-            green = (average + (green - average) * saturationBoost).coerceIn(0.0, 255.0)
-            blue = (average + (blue - average) * saturationBoost).coerceIn(0.0, 255.0)
-
-            val gamma = 1.8
-            red = (red / 255.0).pow(gamma) * 255.0
-            green = (green / 255.0).pow(gamma) * 255.0
-            blue = (blue / 255.0).pow(gamma) * 255.0
-        }
-
-        return 0xC0 or
-            (quantize2(red.roundToInt()) shl 4) or
-            (quantize2(green.roundToInt()) shl 2) or
-            quantize2(blue.roundToInt())
-    }
-
-    private fun quantizeWatchColors(
-        sourceColors: IntArray,
-        palette: IntArray,
-        width: Int,
-        useDither: Boolean,
-        isNight: Boolean
-    ): IntArray {
-        val indexes = IntArray(sourceColors.size)
-        for (index in sourceColors.indices) {
-            val pixelX = index % width
-            val pixelY = index / width
-            val pebbleRgb = pebbleColorToRgb(rgbaToPebbleColor(sourceColors[index], isNight))
-            indexes[index] = if (useDither) {
-                ditheredPaletteIndex(pebbleRgb, palette, pixelX, pixelY)
-            } else {
-                nearestPaletteIndex(pebbleRgb, palette)
-            }
-        }
-        return indexes
-    }
-
-    private fun rlePackPaletteIndexes(indexes: IntArray): ByteArray {
-        val out = ByteArrayOutputStream()
-        var index = 0
-        while (index < indexes.size) {
-            val paletteIndex = indexes[index].coerceIn(0, 15)
-            var runLength = 1
-            while (
-                index + runLength < indexes.size &&
-                runLength < 16 &&
-                indexes[index + runLength] == paletteIndex
-            ) {
-                runLength++
-            }
-            out.write(((runLength - 1) shl 4) or paletteIndex)
-            index += runLength
-        }
-        return out.toByteArray()
-    }
 
     private fun geocodeAddress(
         key: String,
@@ -2780,7 +2582,6 @@ class GoogleMapTilesProvider(
         private const val WATCH_TILE_HEIGHT = 63
         private const val MAX_SOURCE_TILE_CACHE_ENTRIES = 128
         private const val MAX_WATCH_TILE_CACHE_ENTRIES = 96
-        private const val MAX_IN_FLIGHT_WATCH_TILE_WAIT_MS = 30_000L
         private const val SOURCE_TILE_SIZE_INT = 256
         private const val SOURCE_TILE_SIZE = 256.0
         private const val MAX_WATCH_TILE_ZOOM = 21
@@ -2797,57 +2598,6 @@ class GoogleMapTilesProvider(
         private const val ERROR_ROUTE_PROVIDER = 6
         private const val ERROR_NO_ROUTE = 7
         private const val ERROR_DESTINATION_NOT_CONFIGURED = 8
-        private const val THEME_NIGHT = 2
-        private fun rgb(red: Int, green: Int, blue: Int): Int =
-            (0xFF shl 24) or
-                ((red and 0xFF) shl 16) or
-                ((green and 0xFF) shl 8) or
-                (blue and 0xFF)
-        private fun red(color: Int): Int = (color ushr 16) and 0xFF
-        private fun green(color: Int): Int = (color ushr 8) and 0xFF
-        private fun blue(color: Int): Int = color and 0xFF
-        private val WATCH_DAY_RGB = intArrayOf(
-            rgb(255, 255, 255),
-            rgb(255, 170, 255),
-            rgb(170, 170, 255),
-            rgb(170, 170, 170),
-            rgb(170, 85, 170),
-            rgb(85, 85, 85),
-            rgb(0, 0, 0),
-            rgb(85, 255, 255),
-            rgb(0, 170, 255),
-            rgb(0, 85, 255),
-            rgb(170, 255, 170),
-            rgb(85, 255, 170),
-            rgb(255, 255, 170),
-            rgb(255, 255, 0),
-            rgb(255, 170, 0),
-            rgb(170, 170, 85)
-        )
-        private val WATCH_NIGHT_RGB = intArrayOf(
-            rgb(0, 0, 0),
-            rgb(0, 85, 0),
-            rgb(0, 0, 85),
-            rgb(85, 85, 85),
-            rgb(0, 85, 85),
-            rgb(170, 170, 170),
-            rgb(255, 255, 255),
-            rgb(0, 85, 170),
-            rgb(0, 85, 255),
-            rgb(0, 170, 255),
-            rgb(0, 170, 0),
-            rgb(0, 255, 0),
-            rgb(85, 170, 0),
-            rgb(170, 170, 0),
-            rgb(0, 170, 85),
-            rgb(85, 170, 85)
-        )
-        private val BAYER_4X4 = arrayOf(
-            intArrayOf(0, 8, 2, 10),
-            intArrayOf(12, 4, 14, 6),
-            intArrayOf(3, 11, 1, 9),
-            intArrayOf(15, 7, 13, 5)
-        )
         private val EXPECTED_ANDROID_RESTRICTION_STATUSES = setOf(401, 403)
         private val GOOGLE_API_KEY_PATTERN = Regex("AIza[0-9A-Za-z_-]+")
 

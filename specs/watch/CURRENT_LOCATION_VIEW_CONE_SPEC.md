@@ -54,7 +54,7 @@ Use these canonical colors unless a target platform can only approximate them:
 
 The view sector is stroke-only so map detail remains visible inside it. Render a
 white under-stroke/halo below the blue sector outline when possible to keep the
-outline readable over day and night map palettes. Do not use the existing teal
+outline readable over the day map palette. Do not use the existing teal
 accent `#19706D` for the current-location puck or sector.
 
 ## Geometry
@@ -65,7 +65,7 @@ Puck:
 - Outer halo radius: 8 px.
 - Blue fill radius: 5 px.
 - No inner white center dot; the white region is the outer halo.
-- The halo must remain visible over day and night map palettes.
+- The halo must remain visible over the day map palette.
 
 Cone:
 
@@ -173,7 +173,7 @@ Visual tests must cover:
 - projected locations beyond each side and each corner,
 - a near-corner position where one-third-width geometry wraps onto the adjacent
   edge,
-- day and night themes.
+- day rendering.
 
 Screenshot or pixel checks should verify:
 

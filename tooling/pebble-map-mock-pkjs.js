@@ -1,6 +1,9 @@
 (function() {
   'use strict';
 
+  var codecVectors = require('./tile-codec-vectors.json');
+  codecVectors = codecVectors.vectors || codecVectors;
+
   var KEY_CMD = 50;
   var KEY_IS_COLOR = 54;
   var KEY_BUTTON_ID = 60;
@@ -24,7 +27,6 @@
   var CMD_NAV_STEPS = 305;
   var CMD_ROUTE_APPLIED = 308;
   var CMD_ROUTE_COMPLETE = 309;
-  var CMD_THEME = 401;
   var CMD_TRAVEL_MODE = 402;
   var CMD_UNITS = 403;
   var CMD_BACKLIGHT = 404;
@@ -279,9 +281,8 @@
     didSendStartupState = true;
     enqueue('phone-ready', {
       cmd: CMD_PHONE_READY,
-      protocol_version: 3
+      protocol_version: 4
     });
-    enqueue('theme', { cmd: CMD_THEME, button_id: 1 });
     enqueue('map-settings', {
       cmd: CMD_MAP_SETTINGS,
       width: TILE_W,
@@ -366,6 +367,24 @@
           positiveModulo(tileColumn, 4) === 0 &&
           positiveModulo(tileRow, 3) === 0;
       var tile = encodeTile(wx, wy, highEntropyTile);
+      var compressionFormat = 1;
+      var requestedCodec = Number(fixtureOptions.tileCodec || 0);
+      if (requestedCodec > 0) {
+        var codecVector = null;
+        for (var vectorIndex = 0; vectorIndex < codecVectors.length; vectorIndex++) {
+          var candidate = codecVectors[vectorIndex];
+          if (candidate.width === TILE_W && candidate.height === TILE_H &&
+              candidate.format === requestedCodec) {
+            codecVector = candidate;
+            break;
+          }
+        }
+        if (!codecVector) {
+          throw new Error('Missing codec golden for geometry and format');
+        }
+        tile = codecVector.payload;
+        compressionFormat = requestedCodec;
+      }
       var tileMessages = [];
       for (var offset = 0, chunkIndex = 0; offset < tile.length;
            offset += tileChunkBytes, chunkIndex++) {
@@ -376,6 +395,7 @@
           tile_zoom: zoom,
           width: TILE_W,
           height: TILE_H,
+          compression_format: compressionFormat,
           total_bytes: tile.length,
           chunk_index: chunkIndex,
           chunk_offset: offset,

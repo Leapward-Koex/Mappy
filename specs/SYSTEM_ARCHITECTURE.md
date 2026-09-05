@@ -31,7 +31,7 @@ There is no project-hosted application backend layer in the MVP.
 | Saved locations | Flutter repository and Android bridge copy | Optional shortcuts; watch receives only compact display records. |
 | Route fetch and simplification | Android native route worker | Output capped for watch protocol. |
 | Nav-step full list | Android native route cache | Watch receives chunks and requests more. |
-| Theme/travel/backlight startup values | Watch plus phone reconciliation | Watch reports persisted values in `CMD_INIT`; phone pushes user changes. |
+| Travel/backlight startup values | Watch plus phone reconciliation | Watch reports persisted values in `CMD_INIT`; phone pushes user changes. |
 | Centered map orientation | Phone UI plus watch startup reconciliation | Phone persists the user preference; watch applies north-up or facing-up projection locally only while GPS-follow is active. Manual pan uses north-up browse mode until recenter. |
 | Units | Phone UI | Pushed to watch. |
 | Diagnostics | Phone local repository | Watch emits events; export is user-initiated and redacted. |
@@ -62,7 +62,7 @@ provider specifications.
 
 ## Startup Lifecycle
 
-1. Watch loads persisted theme, travel mode, backlight, centered map
+1. Watch loads persisted travel mode, backlight, centered map
    orientation, and optional zoom.
 2. Watch opens AppMessage and sends `CMD_INIT`.
 3. PebbleKit Android 2 binds to the Android listener service and wakes the
