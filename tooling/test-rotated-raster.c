@@ -7,6 +7,7 @@
 #include <string.h>
 
 #include "../apps/pebble-watch/src/c/rotated_raster_math.h"
+#include "../apps/pebble-watch/src/c/rotated_raster_span.h"
 #include "../apps/pebble-watch/src/c/tile_codec.h"
 
 #define TEST_PI 3.14159265358979323846264338327950288
@@ -50,6 +51,13 @@ typedef struct {
 } TestRleLookup;
 
 static int s_failures;
+static RotatedRasterCover s_test_covers[2];
+static bool s_test_animation_active;
+static uint16_t s_test_visibility_q8 = 256;
+static uint16_t s_test_scale_q8 = 256;
+static uint64_t s_settled_span_count;
+static uint64_t s_general_span_count;
+static uint64_t s_occluded_pixel_count;
 static uint64_t s_coordinate_checks;
 static uint64_t s_byte_checks;
 static uint32_t s_random_state = UINT32_C(0x91e10da5);
@@ -464,6 +472,20 @@ static bool synthetic_sample_world(int32_t world_x, int32_t world_y,
   int cell_y = floor_div(world_y, tile_h);
   int local_x = world_x - cell_x * tile_w;
   int local_y = world_y - cell_y * tile_h;
+  if (s_test_animation_active) {
+    if (s_test_scale_q8 < 256) {
+      int32_t cx = tile_w * 128;
+      int32_t cy = tile_h * 128;
+      int32_t xq = cx + ((local_x * 256 - cx) * 256) / s_test_scale_q8;
+      int32_t yq = cy + ((local_y * 256 - cy) * 256) / s_test_scale_q8;
+      local_x = xq >= 0 ? (xq + 128) / 256 : -((-xq + 128) / 256);
+      local_y = yq >= 0 ? (yq + 128) / 256 : -((-yq + 128) / 256);
+      if (local_x < 0 || local_x >= tile_w || local_y < 0 || local_y >= tile_h)
+        return false;
+    }
+    if (((local_x & 7) * 5 + (local_y & 7) * 3) % 64 * 4 >= s_test_visibility_q8)
+      return false;
+  }
   uint32_t tile_hash = (uint32_t)cell_x * UINT32_C(0x9e3779b1) ^
       (uint32_t)cell_y * UINT32_C(0x85ebca6b);
   if ((tile_hash & 7) == 3) {
@@ -476,6 +498,25 @@ static bool synthetic_sample_world(int32_t world_x, int32_t world_y,
   }
   *value = (uint8_t)(1 + ((tile_hash + (uint32_t)local_x * 17 +
                            (uint32_t)local_y * 31) % 254));
+  return true;
+}
+
+// Sample the proved tile directly, without normalizing coordinates. This
+// detects incorrect fast-span eligibility even when an out-of-range local
+// coordinate would reconstruct the correct world position in the scalar path.
+static bool synthetic_sample_settled(const TestCursor *cursor,
+                                      int tile_w, int tile_h, uint8_t *value) {
+  CHECK(!s_test_animation_active, "animated tiles must use the general sampler");
+  CHECK(cursor->local_x >= 0 && cursor->local_x < tile_w &&
+            cursor->local_y >= 0 && cursor->local_y < tile_h,
+        "settled span crossed a tile boundary");
+  uint32_t tile_hash = (uint32_t)cursor->cell_x * UINT32_C(0x9e3779b1) ^
+      (uint32_t)cursor->cell_y * UINT32_C(0x85ebca6b);
+  if ((tile_hash & 7) == 3 ||
+      ((cursor->local_x & 7) * 5 + (cursor->local_y & 7) * 3 +
+       (tile_hash >> 8)) % 29 == 0) return false;
+  *value = (uint8_t)(1 + ((tile_hash + (uint32_t)cursor->local_x * 17 +
+                           (uint32_t)cursor->local_y * 31) % 254));
   return true;
 }
 
@@ -543,10 +584,12 @@ static void render_optimized_dda(uint8_t *framebuffer, int stride,
     uint16_t row_phase_x[ROTATED_RASTER_BLOCK_SIZE];
     uint16_t row_phase_y[ROTATED_RASTER_BLOCK_SIZE];
     TestCursor row_cursors[ROTATED_RASTER_BLOCK_SIZE];
+    RotatedRasterRowCover row_covers[ROTATED_RASTER_BLOCK_SIZE];
     for (int row = 0; row < block_h; row++) {
       row_phase_x[row] = next_row_point.x.phase;
       row_phase_y[row] = next_row_point.y.phase;
       row_cursors[row] = next_row_cursor;
+      row_covers[row] = rotated_raster_row_cover(s_test_covers, block_y + row);
       if (block_y + row + 1 < height) {
         int32_t dx;
         int32_t dy;
@@ -565,18 +608,34 @@ static void render_optimized_dda(uint8_t *framebuffer, int stride,
         uint16_t phase_x = row_phase_x[row];
         uint16_t phase_y = row_phase_y[row];
         TestCursor cursor = row_cursors[row];
+        bool covered = rotated_raster_row_span_covered(
+            row_covers[row], block_x, block_w);
+        bool settled = !s_test_animation_active && rotated_raster_span_in_tile(
+            cursor.local_x, cursor.local_y, tile_w, tile_h, block_w, (cos_value > 0) - (cos_value < 0), (sin_value > 0) - (sin_value < 0));
+        if (settled) s_settled_span_count++; else s_general_span_count++;
+        if (covered) s_occluded_pixel_count += block_w;
         for (int col = 0; col < block_w; col++) {
           int x = block_x + col;
           uint8_t value;
-          if (synthetic_sample_cursor(&cursor, tile_w, tile_h, &value)) {
-            framebuffer[(block_y + row) * stride + x] = value;
-          } else if (fill_missing) {
-            framebuffer[(block_y + row) * stride + x] = background;
+          if (!covered) {
+            bool hit = settled
+                ? synthetic_sample_settled(&cursor, tile_w, tile_h, &value)
+                : synthetic_sample_cursor(&cursor, tile_w, tile_h, &value);
+            if (hit) {
+              framebuffer[(block_y + row) * stride + x] = value;
+            } else if (fill_missing) {
+              framebuffer[(block_y + row) * stride + x] = background;
+            }
           }
           if (x + 1 < width) {
             int32_t dx = rotated_raster_phase_advance(&phase_x, &dda.pixel_x);
             int32_t dy = rotated_raster_phase_advance(&phase_y, &dda.pixel_y);
-            cursor_advance_unit(&cursor, dx, dy, tile_w, tile_h);
+            if (settled) {
+              cursor.local_x += dx;
+              cursor.local_y += dy;
+            } else {
+              cursor_advance_unit(&cursor, dx, dy, tile_w, tile_h);
+            }
           }
         }
         row_phase_x[row] = phase_x;
@@ -606,8 +665,10 @@ static void render_optimized_cardinal(
       block_h = ROTATED_RASTER_BLOCK_SIZE;
     }
     TestCursor rows[ROTATED_RASTER_BLOCK_SIZE];
+    RotatedRasterRowCover row_covers[ROTATED_RASTER_BLOCK_SIZE];
     for (int row = 0; row < block_h; row++) {
       rows[row] = next_row_cursor;
+      row_covers[row] = rotated_raster_row_cover(s_test_covers, block_y + row);
       if (block_y + row + 1 < height) {
         cursor_advance_unit(&next_row_cursor,
                             cardinal->row_dx, cardinal->row_dy,
@@ -622,18 +683,33 @@ static void render_optimized_cardinal(
       }
       for (int row = 0; row < block_h; row++) {
         TestCursor cursor = rows[row];
+        bool covered = rotated_raster_row_span_covered(
+            row_covers[row], block_x, block_w);
+        bool settled = !s_test_animation_active && rotated_raster_span_in_tile(
+            cursor.local_x, cursor.local_y, tile_w, tile_h, block_w, cardinal->pixel_dx, cardinal->pixel_dy);
+        if (settled) s_settled_span_count++; else s_general_span_count++;
+        if (covered) s_occluded_pixel_count += block_w;
         for (int col = 0; col < block_w; col++) {
           int x = block_x + col;
           uint8_t value;
-          if (synthetic_sample_cursor(&cursor, tile_w, tile_h, &value)) {
-            framebuffer[(block_y + row) * stride + x] = value;
-          } else if (fill_missing) {
-            framebuffer[(block_y + row) * stride + x] = background;
+          if (!covered) {
+            bool hit = settled
+                ? synthetic_sample_settled(&cursor, tile_w, tile_h, &value)
+                : synthetic_sample_cursor(&cursor, tile_w, tile_h, &value);
+            if (hit) {
+              framebuffer[(block_y + row) * stride + x] = value;
+            } else if (fill_missing) {
+              framebuffer[(block_y + row) * stride + x] = background;
+            }
           }
           if (x + 1 < width) {
-            cursor_advance_unit(&cursor,
-                                cardinal->pixel_dx, cardinal->pixel_dy,
-                                tile_w, tile_h);
+            if (settled) {
+              cursor.local_x += cardinal->pixel_dx;
+              cursor.local_y += cardinal->pixel_dy;
+            } else {
+              cursor_advance_unit(&cursor, cardinal->pixel_dx,
+                                  cardinal->pixel_dy, tile_w, tile_h);
+            }
           }
         }
         rows[row] = cursor;
@@ -1128,6 +1204,142 @@ static void test_framebuffer_equivalence(void) {
   free(optimized);
 }
 
+
+typedef struct { int x, y, w, h; } TestCard;
+
+static bool reference_card_interior(const TestCard *card, int x, int y) {
+  return card->w > 8 && card->h > 8 &&
+      x >= card->x + 4 && x < card->x + card->w - 4 &&
+      y >= card->y + 4 && y < card->y + card->h - 4;
+}
+
+static void compose_test_overlays(uint8_t *frame, int stride, int w, int h,
+                                   const TestCard cards[2], bool menu,
+                                   bool arrival) {
+  // Deterministic route/marker-like paint before chrome checks that skipped
+  // map pixels cannot leak through subsequent overlays or untouched margins.
+  for (int y = 0; y < h; y++) for (int x = 0; x < w; x++) {
+    if ((x * 3 + y * 7) % 41 < 2) frame[y * stride + x] ^= 0x73;
+    for (int i = 0; i < 2; i++) {
+      const TestCard *c = &cards[i];
+      if (menu || c->w == 0 || x < c->x || x >= c->x + c->w ||
+          y < c->y || y >= c->y + c->h) continue;
+      // Paint the center strips of each radius-four rounded card. The small
+      // corner squares stay map-colored, a stricter test than the SDK arcs.
+      if ((x >= c->x + 4 && x < c->x + c->w - 4) ||
+          (y >= c->y + 4 && y < c->y + c->h - 4)) {
+        frame[y * stride + x] = (uint8_t)(0xa0 + ((x + y + i) & 7));
+      }
+    }
+    if (menu && x > 12 && x < w - 13 && y > 44 && y < h - 45)
+      frame[y * stride + x] = 0xe1;
+    if (arrival && x > 28 && x < w - 29 && y > 74 && y < h - 75)
+      frame[y * stride + x] = 0xd2;
+  }
+}
+
+static void render_scaled_with_cover(uint8_t *frame, int stride, int w, int h,
+                                      int32_t vx, int32_t vy, int sample_zoom,
+                                      int32_t sine, int32_t cosine,
+                                      int tw, int th) {
+  for (int y = 0; y < h; y++) {
+    RotatedRasterRowCover cover = rotated_raster_row_cover(s_test_covers, y);
+    for (int x = 0; x < w; x++) {
+    if (rotated_raster_row_span_covered(cover, x, 1)) continue;
+    int32_t sx = x - w / 2, sy = y - h / 2;
+    int32_t wx = vx + reference_round(sx * cosine - sy * sine);
+    int32_t wy = vy + reference_round(sx * sine + sy * cosine);
+    wx = scale_world_to_zoom_reference(wx, 16, sample_zoom);
+    wy = scale_world_to_zoom_reference(wy, 16, sample_zoom);
+    uint8_t value;
+    frame[y * stride + x] = synthetic_sample_world(wx, wy, tw, th, &value)
+        ? value : 0x5a;
+    }
+  }
+}
+
+static void test_settled_spans_and_chrome_composition(void) {
+  const int w = 200, h = 228, stride = 207;
+  const size_t bytes = (size_t)stride * h;
+  const int geometries[][2] = {{54, 63}, {72, 84}, {108, 126}};
+  const int bearings[] = {0, 1, 37, 89, 90, 179, 180, 225, 270, 359};
+  uint8_t *reference = malloc(bytes), *optimized = malloc(bytes);
+  CHECK(reference && optimized, "chrome composition buffers must allocate");
+  if (!reference || !optimized) { free(reference); free(optimized); return; }
+  s_settled_span_count = s_general_span_count = s_occluded_pixel_count = 0;
+  for (int mode = 0; mode < 7; mode++) {
+    bool route = mode == 3 || mode == 6;
+    bool menu = mode == 4;
+    bool arrival = mode == 5;
+    int bottom_w = mode == 1 ? 112 : mode == 2 ? w - 8 : 74;
+    TestCard cards[2] = {
+      {4, 4, route ? w - 8 : 98, 22},
+      {4, h - (route ? 47 : 25), route ? w - 8 : bottom_w, route ? 43 : 21},
+    };
+    if (mode == 0) cards[1].w = 0; // Empty compact status has no bottom card.
+    memset(s_test_covers, 0, sizeof(s_test_covers));
+    if (!menu) for (int i = 0; i < 2; i++) {
+      if (cards[i].w) s_test_covers[i] = rotated_raster_card_cover(
+          cards[i].x, cards[i].y, cards[i].w, cards[i].h);
+    }
+    // Validate every one-pixel and eight-pixel mask decision against the
+    // independently expressed card interior, including rows around corners.
+    for (int y = 0; y < h; y++) for (int x = 0; x < w; x++) {
+      for (int count = 1; count <= 8 && x + count <= w; count += 7) {
+        bool covered = rotated_raster_span_covered(s_test_covers, x, y, count);
+        RotatedRasterRowCover row_cover = rotated_raster_row_cover(s_test_covers, y);
+        CHECK(rotated_raster_row_span_covered(row_cover, x, count) == covered,
+              "row cover changed mask mode=%d x=%d y=%d count=%d", mode, x, y, count);
+        if (covered) for (int dx = 0; dx < count; dx++) {
+          CHECK(!menu && (reference_card_interior(&cards[0], x + dx, y) ||
+                          reference_card_interior(&cards[1], x + dx, y)),
+                "chrome mask escaped opaque interior mode=%d x=%d y=%d", mode, x, y);
+        }
+      }
+    }
+    for (int animation = 0; animation < 3; animation++) {
+      s_test_animation_active = animation != 0;
+      s_test_visibility_q8 = animation ? 132 : 256;
+      s_test_scale_q8 = animation == 2 ? 194 : 256;
+      for (size_t g = 0; g < 3; g++) for (size_t b = 0; b < 10; b++) {
+        int32_t vx = (b & 1 ? -8388608 : 8388608) + (int32_t)g * 53;
+        int32_t vy = (b & 2 ? -4194304 : 4194304) + mode * 61;
+        int32_t sine = sine_ratio(bearings[b]), cosine = cosine_ratio(bearings[b]);
+        fill_seed(reference, bytes, (uint32_t)(mode * 100 + animation * 10 + b));
+        memcpy(optimized, reference, bytes);
+        // Both directions and multi-level fallback retain coordinate order
+        // and leave the current pass to overlay only successfully hit pixels.
+        int sample_zoom = (b & 1) ? 14 : 17;
+        render_reference(reference, stride, w, h, vx, vy, 16, sample_zoom,
+                         sine, cosine, geometries[g][0], geometries[g][1], true, 0x5a);
+        render_scaled_with_cover(optimized, stride, w, h, vx, vy, sample_zoom,
+                                 sine, cosine, geometries[g][0], geometries[g][1]);
+        render_reference(reference, stride, w, h, vx, vy, 16, 16,
+                         sine, cosine, geometries[g][0], geometries[g][1], false, 0x5a);
+        uint64_t before_fast = s_settled_span_count;
+        render_optimized_current_zoom(optimized, stride, w, h, vx, vy,
+                                      sine, cosine, geometries[g][0], geometries[g][1],
+                                      false, 0x5a);
+        CHECK(!animation || s_settled_span_count == before_fast,
+              "animation entered settled span path");
+        compose_test_overlays(reference, stride, w, h, cards, menu, arrival);
+        compose_test_overlays(optimized, stride, w, h, cards, menu, arrival);
+        assert_framebuffers_equal(reference, optimized, bytes, "chrome/fade/fallback composition");
+      }
+    }
+  }
+  CHECK(s_settled_span_count > 0 && s_general_span_count > 0 &&
+            s_occluded_pixel_count > 0,
+        "span matrix must exercise settled, boundary, and covered paths");
+  printf("raster spans settled=%" PRIu64 " general=%" PRIu64
+         " occluded_pixels=%" PRIu64 "\n",
+         s_settled_span_count, s_general_span_count, s_occluded_pixel_count);
+  memset(s_test_covers, 0, sizeof(s_test_covers));
+  s_test_animation_active = false;
+  s_test_visibility_q8 = s_test_scale_q8 = 256;
+  free(reference); free(optimized);
+}
+
 int main(void) {
   test_rounding_boundaries();
   test_step_decomposition_and_sequences();
@@ -1138,6 +1350,7 @@ int main(void) {
   test_rle_cache_locality();
   test_rle_hash_tile_boundaries();
   test_framebuffer_equivalence();
+  test_settled_spans_and_chrome_composition();
   if (s_failures != 0) {
     fprintf(stderr, "rotated raster tests: %d failures\n", s_failures);
     return 1;

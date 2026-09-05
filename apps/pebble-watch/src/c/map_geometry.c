@@ -2,6 +2,16 @@
 
 // World/screen projection, heading, compass, and map-orientation math.
 
+// Sensor timing is independent of the shared animation clock. Heading targets
+// may be reused by camera updates without becoming new derivative samples.
+static BearingSmoothingAdaptive s_bearing_adaptive;
+
+static uint32_t map_bearing_timestamp_ms(void) {
+  time_t now_s;
+  uint16_t now_ms;
+  time_ms(&now_s, &now_ms);
+  return (uint32_t)now_s * 1000 + now_ms;
+}
 int32_t floor_div_i32(int32_t value, int32_t divisor) {
   int32_t quotient = value / divisor;
   int32_t remainder = value % divisor;
@@ -174,6 +184,8 @@ int32_t corrected_compass_heading_degrees(int32_t magnetic_degrees) {
 }
 
 void refresh_corrected_compass_heading(void) {
+  // A declination correction is not physical watch motion.
+  bearing_smoothing_adaptive_reset(&s_bearing_adaptive);
   if (compass_magnetic_heading_is_valid()) {
     s_compass_heading_degrees =
         corrected_compass_heading_degrees(s_compass_magnetic_degrees);
@@ -487,6 +499,7 @@ int32_t active_map_bearing_angle(void) {
 }
 
 void cancel_map_bearing_smoothing(void) {
+  bearing_smoothing_adaptive_reset(&s_bearing_adaptive);
   if (s_map_bearing_display_centi_degrees >= 0) {
     s_map_bearing_target_centi_degrees =
         s_map_bearing_display_centi_degrees;
@@ -507,6 +520,7 @@ bool sync_map_bearing_smoothing(bool animate) {
   int32_t previous_display = s_map_bearing_display_centi_degrees;
   int32_t target = target_map_bearing_centi_degrees();
   if (target < 0) {
+    bearing_smoothing_adaptive_reset(&s_bearing_adaptive);
     s_map_bearing_target_centi_degrees = target;
     if (!map_bearing_rendering_visible()) {
       reset_map_bearing_clock();
@@ -524,10 +538,16 @@ bool sync_map_bearing_smoothing(bool animate) {
   target = normalize_centi_degrees(target);
   s_map_bearing_target_centi_degrees = target;
   if (!map_bearing_rendering_visible()) {
+    bearing_smoothing_adaptive_reset(&s_bearing_adaptive);
     reset_map_bearing_clock();
     release_visual_animation_tick_if_idle();
     return false;
   }
+  if (s_map_bearing_display_centi_degrees < 0 || !animate) {
+    bearing_smoothing_adaptive_reset(&s_bearing_adaptive);
+  }
+  bearing_smoothing_adaptive_observe(&s_bearing_adaptive, target,
+                                       map_bearing_timestamp_ms());
   if (s_map_bearing_display_centi_degrees < 0 || !animate) {
     s_map_bearing_display_centi_degrees = target;
     reset_map_bearing_clock();
@@ -585,10 +605,10 @@ bool advance_map_bearing_smoothing(void) {
     return false;
   }
   bool was_orientation_active = map_orientation_active();
-  s_map_bearing_display_centi_degrees = bearing_smoothing_advance_ticks(
-      s_map_bearing_display_centi_degrees,
-      s_map_bearing_target_centi_degrees,
-      bearing_reacquire_active(), tick_count);
+  s_map_bearing_display_centi_degrees = bearing_smoothing_adaptive_advance_ticks(
+      &s_bearing_adaptive, s_map_bearing_display_centi_degrees,
+      s_map_bearing_target_centi_degrees, bearing_reacquire_active(), tick_count,
+      (uint32_t)now_s * 1000 + now_ms);
 
   if (bearing_smoothing_shortest_delta(s_map_bearing_display_centi_degrees,
                                        s_map_bearing_target_centi_degrees) == 0) {
@@ -600,6 +620,7 @@ bool advance_map_bearing_smoothing(void) {
 }
 
 void pause_map_bearing_rendering(void) {
+  bearing_smoothing_adaptive_reset(&s_bearing_adaptive);
   reset_map_bearing_clock();
   release_visual_animation_tick_if_idle();
 }
@@ -613,6 +634,9 @@ bool resume_map_bearing_rendering(void) {
   int32_t target = target_map_bearing_centi_degrees();
   s_map_bearing_target_centi_degrees = target;
   s_map_bearing_display_centi_degrees = target;
+  bearing_smoothing_adaptive_reset(&s_bearing_adaptive);
+  bearing_smoothing_adaptive_observe(&s_bearing_adaptive, target,
+                                       map_bearing_timestamp_ms());
   reset_map_bearing_clock();
   bool changed = previous_display != s_map_bearing_display_centi_degrees;
   if (changed) {

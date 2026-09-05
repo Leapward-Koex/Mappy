@@ -184,6 +184,12 @@ bash tooling/pebble-emulator-codex.sh debug-tile 0
 
 ### Face-forward frame-rate benchmark
 
+Face-forward heading animation uses timestamp-aware adaptive smoothing: low
+cutoff while held still, faster response during turns, and one display filter
+on the shared 30 ms render clock. The scheduler follows frame deadlines to
+avoid accumulating callback delays. See [the performance comparison](FACE_FORWARD_PERFORMANCE.md)
+for measured compass lag, frame cadence, rendering changes, and baseline branch.
+
 Run the same compass stream before and after a rendering or smoothing change:
 
 ```powershell

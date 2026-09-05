@@ -1194,7 +1194,8 @@ test_face_forward_angles() {
           -z "$rle_decoded" ||
           "$render_errors" != "0" ]] ||
         (( draw_max > 50 || (i > 0 && passes < 1) ||
-           destination_pixels != sample_attempts ||
+           sample_attempts > destination_pixels ||
+           (i > 0 && (sample_attempts <= 0 || sample_attempts >= destination_pixels)) ||
            packed_hits + rle_hits + rle_misses > sample_attempts ||
            rle_decoded > 32 * rle_misses )); then
       echo "Face-forward ${angles[i]}-degree render gate failed: $summary / $render_summary" >&2

@@ -25,9 +25,11 @@ void apply_map_settings(DictionaryIterator *iter) {
   if (width_tuple || height_tuple) {
     int next_width = width_tuple ? width_tuple->value->int32 : s_tile_width;
     int next_height = height_tuple ? height_tuple->value->int32 : s_tile_height;
+#ifndef MAPPY_WATCH_PHONE_MODE_FIXTURE
     APP_LOG(APP_LOG_LEVEL_INFO, "Map settings geometry %dx%d active=%dx%d cache=%d",
             next_width, next_height, s_tile_width, s_tile_height,
             active_tile_cache_size());
+#endif
     if (next_width != s_tile_width || next_height != s_tile_height) {
       if (!configure_tile_geometry(next_width, next_height)) {
         set_bottom_text("Tile size rejected");

@@ -159,16 +159,43 @@ Bearing animation remains shortest-path and uses the shared 30 ms scheduler:
 
 | Profile | Base step per tick | Tail rule |
 | --- | --- | --- |
-| Normal | `clamp(abs_delta / 4, 0.25 deg, 12 deg)` | Complete when the remaining delta fits in one step. |
+| Normal adaptive | `clamp(abs_delta * alpha, 0.05 deg, 12 deg)` | Complete when the remaining delta fits in one step. |
 | Fast reacquire | `clamp(abs_delta / 3, 8 deg, 24 deg)` | Split the final 24–48 degrees across two frames and complete the final at-most-24 degrees in one frame. |
 
-The normal profile interpolates even one-degree compass updates across several
-render ticks. Its quarter-residual low-pass response follows the shortest
-circular delta, reducing small-angle jitter while retaining the existing
-12-degree cap for larger changes. The 0.25-degree floor settles small tails so
-rendering can stop when the compass becomes idle. This adds modest display lag
-in exchange for continuous motion between sensor events; it does not increase
-the compass sensor event rate.
+The normal profile follows the speed-adaptive low-pass principle described by
+[Casiez, Roussel, and Vogel's 1 Euro filter](https://gery.casiez.net/1euro/):
+suppress jitter while the watch is held still and increase responsiveness while
+it turns. The watch filters the displayed heading only once, on the render
+clock; it does not cascade a sensor heading filter and another interpolation
+filter.
+
+- Record the timestamp and shortest circular delta of each changed target.
+  Estimate signed angular velocity using the actual sensor interval and an
+  80 ms low-pass time constant. Reusing a held target must not create a new
+  derivative sample. Same-millisecond samples coalesce without division by zero.
+- Bound the derivative to 720 degrees/second and discard its history after a
+  sensor gap longer than one second. Between sensor events, reduce effective
+  speed by `100 / (100 + sample_age_ms)` and expire it after 500 ms; do not
+  invent repeated zero-speed sensor samples on render ticks.
+- Set cutoff to 1 Hz at low speed, increasing it by 0.15 Hz per degree/second
+  above an 8 degree/second noise band. Derive each 30 ms tick's interpolation
+  factor as `alpha = 30 / (tau_ms + 30)`, with `tau_ms = 159000 / cutoff_mHz`
+  and a minimum time constant of 10 ms. Integer fixed-point arithmetic is
+  sufficient.
+- If remaining display error exceeds six degrees, raise the interpolation
+  factor from 0.25 by `(error_centi_degrees - 600) / 4096`, capped at 0.75.
+  This lets a first heading or a turn after a long sensor gap catch up promptly
+  without inventing a velocity estimate. Smaller stationary errors retain the
+  low-cutoff response.
+- Keep each step within the latest target and the 12-degree cap. The 0.05-degree
+  floor completes small tails so rendering stops when the compass is idle.
+- Reset adaptive history on invalid heading, explicit snap/cancellation, menu
+  pause/resume, and declination corrections. Resume still shows the latest
+  valid heading immediately. Manual browse continues smoothing the location
+  cone while geographic map orientation remains north-up.
+
+This changes display responsiveness without increasing compass event frequency
+or predicting beyond the latest accepted heading.
 
 Both profiles advance in elapsed 30 ms virtual ticks, consuming up to four per
 displayed frame. Fractional time and excess backlog are retained so delayed
@@ -485,12 +512,19 @@ Watch unit tests:
   and a stationary wrist raise do not emit a watch-look event.
 - Three cadence peaks followed by a stable raised pose emit exactly one
   watch-look event; a new walking cadence rearms the detector.
-- Normal bearing smoothing interpolates small sensor changes in fractional
-  degrees, advances between streamed sensor events, attenuates jitter across
-  north, and settles without overshoot. Delayed frames produce the same result
-  as the corresponding number of 30 ms filter steps. Fast reacquisition is
-  visibly animated, follows the shortest wraparound path, accepts a changed
-  target, and completes 180 degrees within eight virtual ticks/240 ms.
+- Normal adaptive bearing smoothing interpolates in fractional degrees,
+  advances between streamed sensor events, attenuates jitter across north,
+  and settles without overshoot. Compare sustained turns, irregular sample
+  intervals, reversals, stopping, and first/long-gap large-angle steps against
+  the prior fixed quarter-residual profile. Require lower turning lag and
+  stationary jitter while retaining intermediate render frames.
+- Derivative history uses actual sensor time, coalesces zero-duration samples,
+  survives timestamp wrap, ignores held-target reuse, expires stale speed, and
+  resets after invalid heading. Delayed frames consume the corresponding
+  number of virtual filter steps without fabricating sensor samples.
+- Fast reacquisition is unaffected by adaptation: it remains visibly animated,
+  follows the shortest wraparound path, accepts a changed target, and completes
+  180 degrees within eight virtual ticks/240 ms.
 - Manual-browse bearing animation advances across multiple visual ticks without
   rotating the map, recomputing route projection, or rebuilding tile coverage.
 

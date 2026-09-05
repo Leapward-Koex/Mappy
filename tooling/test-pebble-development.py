@@ -84,6 +84,18 @@ class CredentialLoadingTest(unittest.TestCase):
 
 
 class RepositoryWorkflowTest(unittest.TestCase):
+    def test_animation_scheduler_host_contract(self) -> None:
+        compiler = shutil.which(os.environ.get("CC", "cc"))
+        self.assertIsNotNone(compiler, "C compiler is required for host tests")
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output = Path(temp_dir) / "mappy-animation-scheduler-tests"
+            subprocess.run(
+                [compiler, "-std=c99", "-Wall", "-Wextra", "-Werror",
+                 str(ROOT / "tooling" / "test-animation-scheduler.c"),
+                 "-o", str(output)], check=True,
+            )
+            subprocess.run([str(output)], check=True)
+
     def test_tile_animation_host_contract(self) -> None:
         compiler = shutil.which(os.environ.get("CC", "cc"))
         self.assertIsNotNone(compiler, "C compiler is required for host tests")

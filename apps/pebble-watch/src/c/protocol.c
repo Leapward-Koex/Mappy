@@ -847,16 +847,25 @@ void apply_debug_tile(DictionaryIterator *iter) {
   }
 
   TileRequest origin = origins[requested_index];
+#ifdef MAPPY_WATCH_PHONE_MODE_FIXTURE
+  TileSlotDiagnostics *slot_diag_out = NULL;
+#else
   TileSlotDiagnostics slot_diag;
+  TileSlotDiagnostics *slot_diag_out = &slot_diag;
+#endif
   TileCacheEntry *entry = allocate_tile_slot_with_diagnostics(origin.world_x,
                                                               origin.world_y,
                                                               origin.zoom,
-                                                              &slot_diag);
+                                                              slot_diag_out);
   if (!entry || !reserve_tile_storage(entry, (uint16_t)s_tile_bytes,
                                       TileStoragePacked)) {
+#ifdef MAPPY_WATCH_PHONE_MODE_FIXTURE
+    APP_LOG(APP_LOG_LEVEL_WARNING, "Debug tile unavailable");
+#else
     APP_LOG(APP_LOG_LEVEL_WARNING,
             "Debug tile unavailable index=%d originCount=%d slot=%s",
             requested_index, origin_count, slot_diag.reason);
+#endif
     return;
   }
 
@@ -888,11 +897,15 @@ void apply_debug_tile(DictionaryIterator *iter) {
   entry->last_used = ++s_access_counter;
   start_tile_animation(entry, true);
   update_state_after_map_change();
+#ifdef MAPPY_WATCH_PHONE_MODE_FIXTURE
+  APP_LOG(APP_LOG_LEVEL_INFO, "Debug tile accept");
+#else
   APP_LOG(APP_LOG_LEVEL_INFO,
           "Debug tile accept index=%d/%d x=%ld y=%ld z=%d tile=%dx%d slot=%s",
           requested_index, origin_count, (long)origin.world_x,
           (long)origin.world_y, (int)origin.zoom, s_tile_width, s_tile_height,
           slot_diag.reason);
+#endif
   if (s_map_layer) {
     layer_mark_dirty(s_map_layer);
   }

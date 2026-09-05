@@ -1,6 +1,28 @@
 #include "mappy.h"
 
-// One cadence and one redraw for all visual animation sources.
+// One cadence and one redraw for all visual animation sources. Deadlines stay
+// anchored to the previous frame so event-loop and update work cannot add drift.
+static uint32_t s_visual_deadline_ms;
+static uint16_t s_visual_period_ms;
+
+static uint32_t visual_animation_delay_ms(uint16_t period_ms) {
+  time_t seconds;
+  uint16_t milliseconds;
+  time_ms(&seconds, &milliseconds);
+  uint32_t now = (uint32_t)seconds * 1000u + milliseconds;
+  uint32_t delay = period_ms;
+  if (s_visual_period_ms == period_ms) {
+    uint32_t next = s_visual_deadline_ms + period_ms;
+    int32_t remaining = (int32_t)(next - now);
+    // Skip expired slots instead of dispatching catch-up timer bursts.
+    delay = remaining > period_ms ? period_ms :
+        remaining > 0 ? (uint32_t)remaining :
+        period_ms - (now - next) % period_ms;
+  }
+  s_visual_period_ms = period_ms;
+  s_visual_deadline_ms = now + delay;
+  return delay;
+}
 
 static uint32_t visual_animation_tick_ms(void) {
   // Tile reveals tolerate the specification's 20-30 fps target. Keep the
@@ -21,6 +43,7 @@ bool visual_animations_active(void) {
 }
 
 void cancel_visual_animation_timer(void) {
+  s_visual_period_ms = 0;
   if (s_visual_animation_timer) {
     app_timer_cancel(s_visual_animation_timer);
     s_visual_animation_timer = NULL;
@@ -53,6 +76,8 @@ static void visual_animation_timer_callback(void *data) {
 
   if (visual_animations_active()) {
     schedule_visual_animation_tick();
+  } else {
+    s_visual_period_ms = 0;
   }
   if (changed && s_map_layer) {
     layer_mark_dirty(s_map_layer);
@@ -69,8 +94,10 @@ static void visual_animation_timer_callback(void *data) {
 void schedule_visual_animation_tick(void) {
   if (!s_visual_animation_timer && visual_animations_active()) {
     s_visual_animation_timer = app_timer_register(
-        visual_animation_tick_ms(), visual_animation_timer_callback, NULL);
+        visual_animation_delay_ms(visual_animation_tick_ms()),
+        visual_animation_timer_callback, NULL);
     if (!s_visual_animation_timer) {
+      s_visual_period_ms = 0;
       // A failed re-arm must not strand partially rendered state indefinitely.
       // Settle every source synchronously and coalesce one final redraw.
       complete_tile_animations();

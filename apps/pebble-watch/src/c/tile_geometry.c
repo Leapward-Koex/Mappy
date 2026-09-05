@@ -81,10 +81,12 @@ bool configure_tile_geometry(int width, int height) {
   s_tile_pixels = next_pixels;
   s_tile_bytes = next_bytes;
   s_tile_cache_size = TILE_CACHE_SIZE;
+#ifndef MAPPY_WATCH_PHONE_MODE_FIXTURE
   APP_LOG(APP_LOG_LEVEL_INFO,
           "Tile geometry %dx%d packed=%d arena=%u cache=%d/%d",
           s_tile_width, s_tile_height, s_tile_bytes,
           (unsigned)TILE_STORAGE_ARENA_BYTES, active_tile_cache_size(),
           TILE_CACHE_SIZE);
+#endif
   return true;
 }

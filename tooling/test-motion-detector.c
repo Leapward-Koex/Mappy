@@ -380,6 +380,232 @@ static void test_bearing_sensor_stream(void) {
   }
 }
 
+static int32_t normalize_test_bearing(int32_t angle) {
+  angle %= 36000;
+  return angle < 0 ? angle + 36000 : angle;
+}
+
+static void test_adaptive_bearing_metrics(void) {
+  const int rates[] = {3000, 9000, -9000};
+  for (unsigned rate = 0; rate < sizeof(rates) / sizeof(rates[0]); rate++) {
+    BearingSmoothingAdaptive state = {0};
+    int32_t baseline = 35000;
+    int32_t adaptive = baseline;
+    int32_t target = baseline;
+    int32_t old_lag = 0;
+    int32_t new_lag = 0;
+    int measured = 0;
+    int moving_frames = 0;
+    bearing_smoothing_adaptive_observe(&state, target, 0);
+    // Independent 10Hz sensor and 30ms render clocks, crossing north in both
+    // directions. Compare lag to the same held sensor value after warm-up.
+    for (uint32_t now = 10; now <= 3000; now += 10) {
+      if (now % 100 == 0) {
+        target = normalize_test_bearing(35000 + rates[rate] * (int32_t)now / 1000);
+        bearing_smoothing_adaptive_observe(&state, target, now);
+      }
+      if (now % 30 == 0) {
+        baseline = bearing_smoothing_advance(baseline, target, false);
+        int32_t previous = adaptive;
+        adaptive = bearing_smoothing_adaptive_advance_ticks(
+            &state, adaptive, target, false, 1, now);
+        if (now >= 600) {
+          old_lag += abs(bearing_smoothing_shortest_delta(baseline, target));
+          new_lag += abs(bearing_smoothing_shortest_delta(adaptive, target));
+          measured++;
+          moving_frames += previous != adaptive;
+        }
+      }
+    }
+    printf("bearing turn rate=%dcd/s old_mean_lag=%ldcd adaptive_mean_lag=%ldcd frames=%d/%d\n",
+           rates[rate], (long)(old_lag / measured),
+           (long)(new_lag / measured), moving_frames, measured);
+    CHECK(new_lag * 100 <= old_lag * 65,
+          "adaptive filter must cut sustained turn lag by at least 35 percent");
+    CHECK(moving_frames == measured,
+          "adaptive turns must retain changing intermediate render frames");
+  }
+
+  BearingSmoothingAdaptive state = {0};
+  int32_t baseline = 0;
+  int32_t adaptive = 0;
+  int32_t target = 0;
+  int32_t old_jitter = 0;
+  int32_t new_jitter = 0;
+  int measured = 0;
+  bearing_smoothing_adaptive_observe(&state, target, 0);
+  for (uint32_t now = 10; now <= 3000; now += 10) {
+    if (now % 100 == 0) {
+      target = now % 200 == 0 ? 100 : 35900;
+      bearing_smoothing_adaptive_observe(&state, target, now);
+    }
+    if (now % 30 == 0) {
+      baseline = bearing_smoothing_advance(baseline, target, false);
+      adaptive = bearing_smoothing_adaptive_advance_ticks(
+          &state, adaptive, target, false, 1, now);
+      if (now >= 600) {
+        old_jitter += abs(bearing_smoothing_shortest_delta(0, baseline));
+        new_jitter += abs(bearing_smoothing_shortest_delta(0, adaptive));
+        measured++;
+      }
+    }
+  }
+  printf("bearing jitter old_mean=%ldcd adaptive_mean=%ldcd\n",
+         (long)(old_jitter / measured), (long)(new_jitter / measured));
+  CHECK(new_jitter * 100 <= old_jitter * 75,
+        "adaptive rest filtering must reduce compass jitter by at least 25 percent");
+
+  bearing_smoothing_adaptive_reset(&state);
+  bearing_smoothing_adaptive_observe(&state, 0, 0);
+  bearing_smoothing_adaptive_observe(&state, 9000, 100);
+  baseline = 0;
+  adaptive = 0;
+  int old_t90 = 0;
+  int new_t90 = 0;
+  for (uint32_t now = 130; now <= 1300; now += 30) {
+    baseline = bearing_smoothing_advance(baseline, 9000, false);
+    adaptive = bearing_smoothing_adaptive_advance_ticks(
+        &state, adaptive, 9000, false, 1, now);
+    if (!old_t90 && baseline >= 8100) old_t90 = (int)now - 100;
+    if (!new_t90 && adaptive >= 8100) new_t90 = (int)now - 100;
+  }
+  printf("bearing 90deg step old_t90=%dms adaptive_t90=%dms\n", old_t90, new_t90);
+  CHECK(new_t90 > 30 && new_t90 < old_t90,
+        "a deliberate large turn must approach its target sooner without snapping");
+  bearing_smoothing_adaptive_reset(&state);
+  for (int mode = 0; mode < 2; mode++) {
+    if (mode == 1) {
+      bearing_smoothing_adaptive_observe(&state, 0, 0);
+      bearing_smoothing_adaptive_observe(&state, 9000, 2000);
+    }
+    adaptive = 0;
+    int t90 = 0;
+    for (uint32_t elapsed = 30; elapsed <= 1200; elapsed += 30) {
+      int32_t next = bearing_smoothing_adaptive_advance_ticks(
+          &state, adaptive, 9000, false, 1, 2000 + elapsed);
+      CHECK(next > adaptive || next == 9000,
+            "large first-sample errors must converge monotonically");
+      CHECK(next <= 9000 && next - adaptive <= 1200,
+            "first and stale samples must retain the step cap without overshoot");
+      adaptive = next;
+      if (!t90 && adaptive >= 8100) t90 = (int)elapsed;
+    }
+    printf("bearing %s 90deg step adaptive_t90=%dms\n",
+           mode == 0 ? "uninitialized" : "long-gap", t90);
+    CHECK(t90 > 30 && t90 <= 240 && t90 < old_t90,
+          "a first or long-gap turn must catch up promptly without a speed estimate");
+  }
+}
+
+static void test_adaptive_bearing_clock_and_reset(void) {
+  BearingSmoothingAdaptive rapid = {0};
+  BearingSmoothingAdaptive slow = {0};
+  bearing_smoothing_adaptive_observe(&rapid, 35900, 100);
+  bearing_smoothing_adaptive_observe(&slow, 35900, 100);
+  bearing_smoothing_adaptive_observe(&rapid, 100, 120);
+  bearing_smoothing_adaptive_observe(&slow, 100, 300);
+  CHECK(rapid.velocity_centi_per_second > slow.velocity_centi_per_second &&
+            slow.velocity_centi_per_second > 0,
+        "angular velocity must use actual sensor dt and clockwise wraparound");
+  uint32_t sampled_at = rapid.sampled_at_ms;
+  int32_t velocity = rapid.velocity_centi_per_second;
+  for (uint32_t now = 150; now <= 600; now += 30) {
+    bearing_smoothing_adaptive_observe(&rapid, 100, now);
+  }
+  CHECK(rapid.sampled_at_ms == sampled_at &&
+            rapid.velocity_centi_per_second == velocity,
+        "a held target must not manufacture new sensor samples on render ticks");
+  int32_t stale = bearing_smoothing_adaptive_advance_ticks(
+      &rapid, 0, 100, false, 1, 1000);
+  BearingSmoothingAdaptive empty = {0};
+  CHECK(stale == bearing_smoothing_adaptive_advance_ticks(
+            &empty, 0, 100, false, 1, 1000),
+        "stale turning velocity must not amplify later stationary jitter");
+  bearing_smoothing_adaptive_observe(&rapid, -1, 1001);
+  CHECK(!rapid.valid && rapid.velocity_centi_per_second == 0,
+        "invalid heading must discard sensor history");
+  bearing_smoothing_adaptive_observe(&rapid, 18000, 1010);
+  CHECK(rapid.valid && rapid.velocity_centi_per_second == 0,
+        "first heading after invalidation must not infer a synthetic turn");
+  bearing_smoothing_adaptive_observe(&rapid, 19000, 1010);
+  CHECK(rapid.sampled_at_ms == 1010 && rapid.heading_centi == 19000,
+        "same-millisecond sensor bursts must not divide by zero or spike speed");
+  bearing_smoothing_adaptive_observe(&rapid, 20000, 2200);
+  CHECK(rapid.velocity_centi_per_second == 0,
+        "a long sensor gap must reset the old motion estimate");
+
+  bearing_smoothing_adaptive_reset(&rapid);
+  bearing_smoothing_adaptive_observe(&rapid, 100, UINT32_MAX - 20);
+  bearing_smoothing_adaptive_observe(&rapid, 35900, 20);
+  CHECK(rapid.velocity_centi_per_second < 0,
+        "sensor timestamp wrap must preserve counter-clockwise velocity");
+  int32_t batched = bearing_smoothing_adaptive_advance_ticks(
+      &rapid, 100, 35900, false, 4, 140);
+  int32_t sequential = 100;
+  for (int tick = 0; tick < 4; tick++) {
+    sequential = bearing_smoothing_adaptive_advance_ticks(
+        &rapid, sequential, 35900, false, 1, 140);
+  }
+  CHECK(batched == sequential,
+        "adaptive delayed frames must consume the same virtual filter steps");
+  CHECK(bearing_smoothing_adaptive_advance_ticks(
+            &rapid, 0, 18000, true, 4, 140) ==
+            bearing_smoothing_advance_ticks(0, 18000, true, 4),
+        "speed adaptation must leave fast reacquisition unchanged");
+  int32_t current = 0;
+  int ticks = 0;
+  while (current != 100 && ticks++ < 30) {
+    current = bearing_smoothing_adaptive_advance_ticks(
+        &empty, current, 100, false, 1, (uint32_t)ticks * 30);
+  }
+  CHECK(current == 100 && ticks < 20,
+        "quiet small-angle tails must settle instead of drawing forever");
+}
+static void test_adaptive_irregular_turn_and_stop(void) {
+  const uint32_t intervals[] = {50, 150, 80, 120};
+  BearingSmoothingAdaptive state = {0};
+  int32_t baseline = 35000;
+  int32_t adaptive = baseline;
+  int32_t target = baseline;
+  int32_t old_error = 0;
+  int32_t new_error = 0;
+  uint32_t next_sample = 50;
+  int sample = 1;
+  int measured = 0;
+  bearing_smoothing_adaptive_observe(&state, target, 0);
+  for (uint32_t now = 10; now <= 2700; now += 10) {
+    if (now == next_sample) {
+      // Turn at 90deg/s, reverse after one second, then hold still.
+      int32_t turn_ms = now < 1000 ? (int32_t)now :
+          now < 2000 ? 2000 - (int32_t)now : 0;
+      target = normalize_test_bearing(35000 + turn_ms * 9);
+      bearing_smoothing_adaptive_observe(&state, target, now);
+      next_sample += intervals[sample++ % 4];
+    }
+    if (now % 30 == 0) {
+      baseline = bearing_smoothing_advance(baseline, target, false);
+      int32_t remaining = bearing_smoothing_shortest_delta(adaptive, target);
+      int32_t next = bearing_smoothing_adaptive_advance_ticks(
+          &state, adaptive, target, false, 1, now);
+      int32_t step = bearing_smoothing_shortest_delta(adaptive, next);
+      CHECK(abs(step) <= abs(remaining) &&
+                (step == 0 || (step > 0) == (remaining > 0)),
+            "irregular samples and reversals must never overshoot the latest target");
+      adaptive = next;
+      if (now >= 600 && now <= 2100) {
+        old_error += abs(bearing_smoothing_shortest_delta(baseline, target));
+        new_error += abs(bearing_smoothing_shortest_delta(adaptive, target));
+        measured++;
+      }
+    }
+  }
+  printf("bearing irregular reversal old_mean_lag=%ldcd adaptive_mean_lag=%ldcd\n",
+         (long)(old_error / measured), (long)(new_error / measured));
+  CHECK(new_error * 100 <= old_error * 65,
+        "adaptive turns must reduce lag across irregular samples and reversals");
+  CHECK(adaptive == target,
+        "stopping after an irregular turn must settle exactly and stop animating");
+}
 int main(void) {
   test_csv_fixtures();
   test_idle_and_false_raises();
@@ -389,6 +615,9 @@ int main(void) {
   test_bearing_profiles();
   test_bearing_small_updates();
   test_bearing_sensor_stream();
+  test_adaptive_bearing_metrics();
+  test_adaptive_bearing_clock_and_reset();
+  test_adaptive_irregular_turn_and_stop();
   if (s_failures != 0) {
     fprintf(stderr, "motion detector tests: %d failure(s)\n", s_failures);
     return 1;
