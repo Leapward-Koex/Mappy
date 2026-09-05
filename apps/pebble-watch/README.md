@@ -212,11 +212,11 @@ bash tooling/pebble-emulator-codex.sh debug-tile 0
 
 ### Face-forward frame-rate benchmark
 
-Face-forward heading animation uses timestamp-aware adaptive smoothing: low
-cutoff while held still, faster response during turns, and one display filter
-on the shared 30 ms render clock. The scheduler follows frame deadlines to
-avoid accumulating callback delays. See [the performance comparison](FACE_FORWARD_PERFORMANCE.md)
-for measured compass lag, frame cadence, rendering changes, and baseline branch.
+Face-forward heading animation uses a continuous critically damped follower
+with persistent angular velocity and up to 8° of prediction. It bridges the
+approximately 200 ms gaps between calibrated compass readings on the shared
+30 ms render clock. See [controller design and validation](CONTINUOUS_BEARING.md)
+and the earlier [rendering performance comparison](FACE_FORWARD_PERFORMANCE.md).
 
 Run the same compass stream before and after a rendering or smoothing change:
 
@@ -226,9 +226,9 @@ Run the same compass stream before and after a rendering or smoothing change:
 
 From WSL, use `bash tooling/pebble-emulator-codex.sh test-face-forward-cadence`.
 The command builds a fixture with 128 route points and tile animation disabled,
-warms the 0–90° tile coverage, then replays thirty 3° compass updates at 100 ms
-intervals using a timer independent of rendering. It uses the normal bearing
-profile and measures through the final completed draw after smoothing settles.
+warms the four cardinal directions, then replays twenty 18° compass updates at
+200 ms intervals using a timer independent of rendering. It measures through
+the final completed draw after the controller settles.
 The command owns and stops its emulator, including on failure.
 
 `MAPPY_FPERF` reports completed frames (`n`), milliseconds to the first completed
@@ -249,12 +249,12 @@ does not measure a physical watch display's refresh rate.
 
 During an active face-forward Walk route, the production watch app samples the
 accelerometer at 25 Hz in batches of five. A fixed-memory classifier recognizes
-walking followed by a stable wrist raise and temporarily accelerates bearing
+walking followed by a stable wrist raise and requests responsive bearing
 animation. It unsubscribes during menus, manual browse, non-Walk routes,
 north-up mode, and after route completion. Raw motion samples never leave the
 watch.
 
-The classifier and bearing profiles have a host test that does not require an
+The classifier and continuous bearing controller have a host test that does not require an
 emulator:
 
 ```sh
@@ -270,8 +270,9 @@ bash tooling/pebble-emulator-codex.sh debug-motion walking-to-look
 ```
 
 `test-motion-reacquire` automates the fixture route, negative stationary-raise
-case, walking-to-look transition, compass target change, 2–8 animation-tick
-assertion, log capture, and final screenshot. It exits without installing,
+case, walking-to-look transition, compass target change, controller settlement,
+log capture, and final screenshot. Acquisition timing and rotation continuity
+are measured by the deterministic host tests. It exits without installing,
 wiping, or stopping anything when an emulator session is already running.
 
 For consumed-route overlay debugging, start a fixture route from the watch, then

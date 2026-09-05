@@ -1,177 +1,196 @@
 #include "bearing_smoothing.h"
 
-// Preserve sub-degree frames between compass events. A four-degree minimum
-// snapped ordinary sensor updates in one tick, tying visible motion to the
-// sensor cadence. Quarter-residual steps instead provide a cheap circular
-// low-pass response; the small floor finishes the tail and lets rendering idle.
-#define NORMAL_MIN_STEP_CENTI_DEGREES 25
-#define NORMAL_MAX_STEP_CENTI_DEGREES 1200
-#define NORMAL_STEP_DIVISOR 4
-#define FAST_MIN_STEP_CENTI_DEGREES 800
-#define FAST_MAX_STEP_CENTI_DEGREES 2400
-#define FAST_STEP_DIVISOR 3
+#define FULL_TURN 360000
+#define MAX_SPEED 720000
+#define PREDICTION_LIMIT 8000
+#define MOTION_SPEED 15000
 
-static int32_t clamp_step(int32_t step, int32_t minimum, int32_t maximum) {
-  if (step < minimum) {
-    return minimum;
-  }
-  if (step > maximum) {
-    return maximum;
-  }
-  return step;
+static int32_t magnitude(int32_t value) {
+  return value < 0 ? -value : value;
 }
 
-static int32_t normalize_centi_degrees(int32_t centi_degrees) {
-  int32_t normalized = centi_degrees % 36000;
-  return normalized < 0 ? normalized + 36000 : normalized;
+static int32_t normalize(int32_t angle, int32_t turn) {
+  angle %= turn;
+  return angle < 0 ? angle + turn : angle;
 }
 
-int32_t bearing_smoothing_step_centi_degrees(int32_t abs_delta,
-                                             bool fast_reacquire) {
-  if (fast_reacquire) {
-    return clamp_step(abs_delta / FAST_STEP_DIVISOR,
-                      FAST_MIN_STEP_CENTI_DEGREES,
-                      FAST_MAX_STEP_CENTI_DEGREES);
-  }
-  return clamp_step(abs_delta / NORMAL_STEP_DIVISOR,
-                    NORMAL_MIN_STEP_CENTI_DEGREES,
-                    NORMAL_MAX_STEP_CENTI_DEGREES);
+static int32_t delta(int32_t from, int32_t to, int32_t turn) {
+  int32_t result = normalize(to - from, turn);
+  return result > turn / 2 ? result - turn : result;
 }
 
-int32_t bearing_smoothing_shortest_delta(int32_t from_centi,
-                                         int32_t to_centi) {
-  int32_t delta = normalize_centi_degrees(to_centi - from_centi);
-  return delta > 18000 ? delta - 36000 : delta;
+static int32_t clamp(int32_t value, int32_t limit) {
+  return value > limit ? limit : value < -limit ? -limit : value;
 }
 
-int32_t bearing_smoothing_advance(int32_t current_centi,
-                                  int32_t target_centi,
-                                  bool fast_reacquire) {
-  int32_t delta = bearing_smoothing_shortest_delta(current_centi,
-                                                   target_centi);
-  if (delta == 0) {
-    return normalize_centi_degrees(target_centi);
-  }
-  int32_t abs_delta = delta < 0 ? -delta : delta;
-  int32_t step = bearing_smoothing_step_centi_degrees(abs_delta,
-                                                      fast_reacquire);
-  // Split the last 24..48 degrees evenly, then coalesce the final <=24-degree
-  // tail. Every frame remains within the cap and a 180-degree reacquisition
-  // completes in at most eight 30ms ticks.
-  if (fast_reacquire && abs_delta > 2400 && abs_delta <= 4800) {
-    step = (abs_delta + 1) / 2;
-  }
-  if (abs_delta <= step || (fast_reacquire && abs_delta <= 2400)) {
-    return normalize_centi_degrees(target_centi);
-  }
-  return normalize_centi_degrees(current_centi + (delta > 0 ? step : -step));
+int32_t bearing_smoothing_shortest_delta(int32_t from_centi, int32_t to_centi) {
+  return delta(from_centi, to_centi, 36000);
 }
 
-int32_t bearing_smoothing_advance_ticks(int32_t current_centi,
-                                        int32_t target_centi,
-                                        bool fast_reacquire,
-                                        uint8_t tick_count) {
-  while (tick_count-- > 0 && bearing_smoothing_shortest_delta(
-                                  current_centi, target_centi) != 0) {
-    current_centi = bearing_smoothing_advance(current_centi, target_centi,
-                                               fast_reacquire);
-  }
-  return current_centi;
+static uint32_t stale_after(const BearingTracker *state) {
+  uint32_t deadline = state->sample_period_ms * 3 / 2;
+  return deadline < 300 ? 300 : deadline;
 }
 
-// Inspired by Casiez et al.'s 1 Euro filter (https://gery.casiez.net/1euro/):
-// reduce jitter at low speed, increase the cutoff during a deliberate turn.
-// Only the derivative is filtered at sensor cadence. The heading is filtered
-// once, by the render clock, avoiding a second sensor-filter/interpolation lag.
-void bearing_smoothing_adaptive_reset(BearingSmoothingAdaptive *state) {
-  *state = (BearingSmoothingAdaptive){0};
+static bool predicting(const BearingTracker *state, uint32_t now_ms) {
+  return state->valid && state->has_sample && state->prediction_allowed &&
+      state->directional_samples >= 2 &&
+      magnitude(state->sensor_velocity_milli_per_second) >= MOTION_SPEED &&
+      (state->sensor_velocity_milli_per_second > 0 ? 1 : -1) == state->direction &&
+      now_ms - state->sampled_at_ms < stale_after(state) + 100;
 }
 
-void bearing_smoothing_adaptive_observe(BearingSmoothingAdaptive *state,
-                                         int32_t heading_centi,
-                                         uint32_t sampled_at_ms) {
-  if (heading_centi < 0) {
-    bearing_smoothing_adaptive_reset(state);
-    return;
-  }
-  heading_centi = normalize_centi_degrees(heading_centi);
-  if (state->valid && heading_centi == state->heading_centi) {
-    return;  // Reusing a held target is not a new sensor sample.
-  }
-  uint32_t elapsed = sampled_at_ms - state->sampled_at_ms;
-  if (!state->valid || elapsed > 1000) {
-    state->velocity_centi_per_second = 0;
-  } else if (elapsed == 0) {
-    // Keep the latest raw value, but do not invent a derivative interval.
-    state->heading_centi = heading_centi;
-    return;
-  } else {
-    int32_t velocity = bearing_smoothing_shortest_delta(
-        state->heading_centi, heading_centi) * 1000 / (int32_t)elapsed;
-    if (velocity > 72000) velocity = 72000;
-    if (velocity < -72000) velocity = -72000;
-    // Signed speed suppresses alternating compass jitter before abs() is
-    // taken. Alpha = dt / (80ms + dt), using the actual sensor interval.
-    state->velocity_centi_per_second +=
-        (velocity - state->velocity_centi_per_second) * (int32_t)elapsed /
-        (80 + (int32_t)elapsed);
-  }
-  state->heading_centi = heading_centi;
-  state->sampled_at_ms = sampled_at_ms;
+static int32_t prediction(const BearingTracker *state, uint32_t now_ms) {
+  if (!predicting(state, now_ms)) return 0;
+  uint32_t age = now_ms - state->sampled_at_ms;
+  int32_t lead = clamp(state->sensor_velocity_milli_per_second *
+      (int32_t)(age < 100 ? age : 100) / 1000, PREDICTION_LIMIT);
+  uint32_t deadline = stale_after(state);
+  if (age > deadline) lead = lead * (int32_t)(deadline + 100 - age) / 100;
+  return lead;
+}
+
+void bearing_tracker_reset(BearingTracker *state) {
+  *state = (BearingTracker){0};
+  state->sample_period_ms = 200;
+  state->rest_blend_ms = 120;
+}
+
+void bearing_tracker_snap(BearingTracker *state, int32_t heading_centi,
+                          uint32_t now_ms) {
+  bearing_tracker_reset(state);
+  if (heading_centi < 0) return;
+  state->display_milli_degrees = normalize(heading_centi, 36000) * 10;
+  state->target_milli_degrees = state->display_milli_degrees;
+  state->advanced_at_ms = now_ms;
   state->valid = true;
 }
 
-int32_t bearing_smoothing_adaptive_advance_ticks(
-    const BearingSmoothingAdaptive *state, int32_t current_centi,
-    int32_t target_centi, bool fast_reacquire, uint8_t tick_count,
-    uint32_t now_ms) {
-  if (fast_reacquire) {
-    return bearing_smoothing_advance_ticks(current_centi, target_centi, true,
-                                            tick_count);
-  }
-  uint32_t sample_age_ms = now_ms - state->sampled_at_ms;
-  int32_t speed = state->valid && sample_age_ms <= 500 ?
-      state->velocity_centi_per_second : 0;
-  if (speed < 0) speed = -speed;
-  // Compass events stop when the angle is held. Age the effective speed rather
-  // than feeding invented zero-speed samples into the sensor derivative.
-  if (speed != 0) speed = speed * 100 / (100 + (int32_t)sample_age_ms);
-  // 1Hz minimum + 0.15Hz per degree/second above an 8deg/s noise band.
-  // tau = 1/(2*pi*cutoff); integer milliseconds avoid floating-point code.
-  int32_t cutoff_millihz = 1000 + (speed > 800 ? (speed - 800) * 3 / 2 : 0);
-  int32_t tau_ms = 159000 / cutoff_millihz;
-  if (tau_ms < 10) tau_ms = 10;
-  int32_t alpha_q8 = (256 * 30) / (tau_ms + 30);
-  while (tick_count-- > 0) {
-    int32_t delta = bearing_smoothing_shortest_delta(current_centi, target_centi);
-    int32_t magnitude = delta < 0 ? -delta : delta;
-    // A first heading or long sensor gap cannot provide a reliable velocity.
-    // Large visible errors still catch up promptly; the six-degree threshold
-    // leaves ordinary stationary noise on the low-cutoff response.
-    int32_t error_alpha = magnitude > 600 ? 64 + (magnitude - 600) / 16 : 0;
-    if (error_alpha > 192) error_alpha = 192;
-    int32_t response = alpha_q8 > error_alpha ? alpha_q8 : error_alpha;
-    int32_t step = clamp_step((magnitude * response + 128) / 256, 5,
-                              NORMAL_MAX_STEP_CENTI_DEGREES);
-    if (magnitude <= step) {
-      return normalize_centi_degrees(target_centi);
-    }
-    current_centi = normalize_centi_degrees(
-        current_centi + (delta > 0 ? step : -step));
-  }
-  return current_centi;
+int32_t bearing_tracker_display_centi_degrees(const BearingTracker *state) {
+  return state->valid ? state->display_milli_degrees / 10 : -1;
 }
-uint8_t bearing_smoothing_consume_elapsed_ticks(uint32_t *accumulated_ms,
-                                                uint32_t elapsed_ms,
-                                                uint16_t tick_ms,
-                                                uint8_t max_ticks) {
-  if (!accumulated_ms || tick_ms == 0 || max_ticks == 0) {
-    return 0;
+
+int32_t bearing_tracker_velocity_centi_degrees_per_second(
+    const BearingTracker *state) {
+  return state->velocity_milli_per_second / 10;
+}
+
+int32_t bearing_tracker_prediction_centi_degrees(const BearingTracker *state,
+                                                uint32_t now_ms) {
+  return prediction(state, now_ms) / 10;
+}
+
+bool bearing_tracker_active(const BearingTracker *state, uint32_t now_ms) {
+  return state->valid && (predicting(state, now_ms) ||
+      state->velocity_milli_per_second != 0 ||
+      state->display_milli_degrees != state->target_milli_degrees);
+}
+
+int32_t bearing_tracker_advance(BearingTracker *state, uint32_t now_ms) {
+  if (!state->valid) return -1;
+  uint32_t elapsed = now_ms - state->advanced_at_ms;
+  state->advanced_at_ms = now_ms;
+  // A backwards clock correction only rebases the anchor. Discard long-stall
+  // backlog; replaying it on later frames creates a second visible catch-up.
+  if (elapsed > INT32_MAX) elapsed = 0;
+  if (elapsed > 120) elapsed = 120;
+  uint32_t time = now_ms - elapsed;
+  while (elapsed) {
+    uint32_t dt = elapsed < 10 ? elapsed : 10;
+    elapsed -= dt;
+    time += dt;
+    int32_t error = delta(state->display_milli_degrees,
+                          state->target_milli_degrees, FULL_TURN);
+    bool motion = state->has_sample &&
+        magnitude(state->sensor_velocity_milli_per_second) >= MOTION_SPEED &&
+        time - state->sampled_at_ms < stale_after(state);
+    if (motion || magnitude(error) >= 6000) state->moving = true;
+    if (state->moving && !motion && magnitude(error) < 1000 &&
+        magnitude(state->velocity_milli_per_second) < 5000) state->moving = false;
+    if (state->moving) {
+      state->rest_blend_ms = 0;
+    } else if (state->rest_blend_ms < 120) {
+      uint32_t blend = state->rest_blend_ms + dt;
+      state->rest_blend_ms = blend > 120 ? 120 : (uint8_t)blend;
+    }
+    int32_t omega = 20 - state->rest_blend_ms / 12;
+    error = delta(state->display_milli_degrees,
+        normalize(state->target_milli_degrees + prediction(state, time), FULL_TURN),
+        FULL_TURN);
+    // Critically damped position/velocity follower. Retargeting changes only
+    // acceleration: it never snaps position or erases velocity between samples.
+    // Bounds (180deg error, 720deg/s, dt<=10ms) keep all products in int32.
+    int32_t acceleration = omega * omega * error -
+        2 * omega * state->velocity_milli_per_second;
+    state->velocity_milli_per_second = clamp(state->velocity_milli_per_second +
+        acceleration * (int32_t)dt / 1000, MAX_SPEED);
+    state->display_milli_degrees = normalize(state->display_milli_degrees +
+        state->velocity_milli_per_second * (int32_t)dt / 1000, FULL_TURN);
+    if (!predicting(state, time) && magnitude(delta(state->display_milli_degrees,
+            state->target_milli_degrees, FULL_TURN)) <= 250 &&
+        magnitude(state->velocity_milli_per_second) <= 1000) {
+      state->display_milli_degrees = state->target_milli_degrees;
+      state->velocity_milli_per_second = 0;
+    }
   }
-  uint64_t total = (uint64_t)*accumulated_ms + elapsed_ms;
-  *accumulated_ms = total > UINT32_MAX ? UINT32_MAX : (uint32_t)total;
-  uint32_t ready = *accumulated_ms / tick_ms;
-  uint8_t consumed = ready > max_ticks ? max_ticks : (uint8_t)ready;
-  *accumulated_ms -= (uint32_t)consumed * tick_ms;
-  return consumed;
+  return bearing_tracker_display_centi_degrees(state);
+}
+
+void bearing_tracker_request_acquisition(BearingTracker *state, uint32_t now_ms) {
+  bearing_tracker_advance(state, now_ms);
+  state->has_sample = false;
+  state->sensor_velocity_milli_per_second = 0;
+  state->directional_samples = 0;
+  state->direction = 0;
+  state->sample_period_ms = 200;
+  state->moving = true;
+  state->rest_blend_ms = 0;
+}
+
+void bearing_tracker_set_target(BearingTracker *state, int32_t heading_centi,
+                                uint32_t now_ms) {
+  if (!state->valid || heading_centi < 0) {
+    bearing_tracker_snap(state, heading_centi, now_ms);
+    return;
+  }
+  bearing_tracker_request_acquisition(state, now_ms);
+  state->target_milli_degrees = normalize(heading_centi, 36000) * 10;
+}
+
+void bearing_tracker_observe(BearingTracker *state, int32_t heading_centi,
+                             uint32_t sampled_at_ms, bool allow_prediction) {
+  if (heading_centi < 0) {
+    bearing_tracker_reset(state);
+    return;
+  }
+  if (!state->valid) bearing_tracker_snap(state, heading_centi, sampled_at_ms);
+  bearing_tracker_advance(state, sampled_at_ms);
+  int32_t target = normalize(heading_centi, 36000) * 10;
+  uint32_t elapsed = sampled_at_ms - state->sampled_at_ms;
+  if (!state->has_sample || elapsed == 0 || elapsed > 1000) {
+    state->sensor_velocity_milli_per_second = 0;
+    state->directional_samples = 0;
+    state->direction = 0;
+    if (elapsed > 1000) state->sample_period_ms = 200;
+  } else {
+    int32_t velocity = clamp(delta(state->target_milli_degrees, target,
+        FULL_TURN) * 1000 / (int32_t)elapsed, MAX_SPEED);
+    // The 1 Euro filter's useful distinction is retained: estimate signed
+    // velocity at real sensor timestamps; integrate displayed pose separately.
+    state->sensor_velocity_milli_per_second +=
+        (velocity - state->sensor_velocity_milli_per_second) * (int32_t)elapsed /
+        (80 + (int32_t)elapsed);
+    int8_t direction = magnitude(velocity) >= MOTION_SPEED ?
+        (velocity > 0 ? 1 : -1) : 0;
+    state->directional_samples = direction == 0 ? 0 :
+        direction != state->direction ? 1 : 2;
+    state->direction = direction;
+    int32_t period = state->sample_period_ms +
+        ((int32_t)elapsed - state->sample_period_ms) / 4;
+    state->sample_period_ms = period < 50 ? 50 : period > 300 ? 300 : period;
+  }
+  state->target_milli_degrees = target;
+  state->sampled_at_ms = sampled_at_ms;
+  state->has_sample = true;
+  state->prediction_allowed = allow_prediction;
 }

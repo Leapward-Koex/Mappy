@@ -1,12 +1,13 @@
 #include "mappy.h"
+#include "bearing_trace.h"
 
 // World/screen projection, heading, compass, and map-orientation math.
 
-// Sensor timing is independent of the shared animation clock. Heading targets
-// may be reused by camera updates without becoming new derivative samples.
-static BearingSmoothingAdaptive s_bearing_adaptive;
+// The tracker owns sensor history and private continuous motion. Only the
+// shared animation tick publishes that motion to the renderer.
+static BearingTracker s_bearing_tracker;
 
-static uint32_t map_bearing_timestamp_ms(void) {
+uint32_t map_bearing_timestamp_ms(void) {
   time_t now_s;
   uint16_t now_ms;
   time_ms(&now_s, &now_ms);
@@ -74,7 +75,7 @@ static int32_t rounded_degrees_from_centi(int32_t centi_degrees) {
 static int32_t target_map_bearing_centi_degrees(void) {
 #if defined(PBL_COMPASS)
   if (compass_heading_is_valid()) {
-    return normalize_degrees(s_compass_heading_degrees) * 100;
+    return s_compass_heading_centi_degrees;
   }
   return -1;
 #else
@@ -83,19 +84,6 @@ static int32_t target_map_bearing_centi_degrees(void) {
   }
   return -1;
 #endif
-}
-
-static void reset_map_bearing_clock(void) {
-  s_map_bearing_clock_valid = false;
-  s_map_bearing_advanced_s = 0;
-  s_map_bearing_advanced_ms = 0;
-  s_map_bearing_elapsed_ms = 0;
-}
-
-static void start_map_bearing_clock(void) {
-  time_ms(&s_map_bearing_advanced_s, &s_map_bearing_advanced_ms);
-  s_map_bearing_elapsed_ms = 0;
-  s_map_bearing_clock_valid = true;
 }
 
 bool map_bearing_rendering_visible(void) {
@@ -171,48 +159,47 @@ bool compass_magnetic_heading_is_valid(void) {
   return s_compass_magnetic_degrees >= 0 && s_compass_magnetic_degrees < 360;
 }
 
+static int32_t corrected_compass_heading_centi_degrees(int32_t magnetic_centi) {
+  return normalize_centi_degrees(magnetic_centi +
+      (s_declination_valid ? s_declination_centi_degrees : 0));
+}
+
 int32_t corrected_compass_heading_degrees(int32_t magnetic_degrees) {
-  int32_t centi_degrees = normalize_degrees(magnetic_degrees) * 100;
-  if (s_declination_valid) {
-    centi_degrees += s_declination_centi_degrees;
-  }
-  centi_degrees %= 36000;
-  if (centi_degrees < 0) {
-    centi_degrees += 36000;
-  }
-  return (centi_degrees + 50) / 100 % 360;
+  return rounded_degrees_from_centi(corrected_compass_heading_centi_degrees(
+      normalize_degrees(magnetic_degrees) * 100));
 }
 
 void refresh_corrected_compass_heading(void) {
-  // A declination correction is not physical watch motion.
-  bearing_smoothing_adaptive_reset(&s_bearing_adaptive);
-  if (compass_magnetic_heading_is_valid()) {
-    s_compass_heading_degrees =
-        corrected_compass_heading_degrees(s_compass_magnetic_degrees);
-  } else {
-    s_compass_heading_degrees = -1;
-  }
+  // sync_map_bearing_smoothing retargets this correction without recording a
+  // new measurement or treating the declination change as angular velocity.
+  s_compass_heading_centi_degrees = compass_magnetic_heading_is_valid() ?
+      corrected_compass_heading_centi_degrees(s_compass_magnetic_centi_degrees) : -1;
+  s_compass_heading_degrees = s_compass_heading_centi_degrees < 0 ? -1 :
+      rounded_degrees_from_centi(s_compass_heading_centi_degrees);
 }
 
 #if defined(PBL_COMPASS)
-int32_t compass_heading_to_degrees(CompassHeading heading) {
-  // Pebble compass headings increase counter-clockwise; app rendering uses clockwise degrees.
-  int32_t counter_clockwise_heading = heading % TRIG_MAX_ANGLE;
-  if (counter_clockwise_heading < 0) {
-    counter_clockwise_heading += TRIG_MAX_ANGLE;
+int32_t compass_heading_to_centi_degrees(CompassHeading heading) {
+  // Pebble increases counter-clockwise; the app uses clockwise centidegrees.
+  int32_t counter_clockwise = heading % TRIG_MAX_ANGLE;
+  if (counter_clockwise < 0) {
+    counter_clockwise += TRIG_MAX_ANGLE;
   }
-  int32_t clockwise_heading =
-      (TRIG_MAX_ANGLE - counter_clockwise_heading) % TRIG_MAX_ANGLE;
-  return (int32_t)(((int64_t)clockwise_heading * 360) / TRIG_MAX_ANGLE);
+  int32_t clockwise = (TRIG_MAX_ANGLE - counter_clockwise) % TRIG_MAX_ANGLE;
+  return (int32_t)(((int64_t)clockwise * 36000 + TRIG_MAX_ANGLE / 2) /
+                    TRIG_MAX_ANGLE) % 36000;
+}
+
+int32_t compass_heading_to_degrees(CompassHeading heading) {
+  return rounded_degrees_from_centi(compass_heading_to_centi_degrees(heading));
 }
 #endif
 
 bool active_facing_heading_degrees(int32_t *heading_degrees) {
   int32_t target = target_map_bearing_centi_degrees();
-  if (target >= 0) {
-    int32_t display = s_map_bearing_display_centi_degrees >= 0 ?
-        s_map_bearing_display_centi_degrees : target;
-    *heading_degrees = rounded_degrees_from_centi(display);
+  if (target >= 0 && s_map_bearing_display_centi_degrees >= 0) {
+    *heading_degrees = rounded_degrees_from_centi(
+        s_map_bearing_display_centi_degrees);
     return true;
   }
   return false;
@@ -490,8 +477,7 @@ int32_t active_map_bearing_centi_degrees(void) {
   if (s_map_bearing_display_centi_degrees >= 0) {
     return normalize_centi_degrees(s_map_bearing_display_centi_degrees);
   }
-  int32_t target = target_map_bearing_centi_degrees();
-  return target >= 0 ? target : 0;
+  return 0;
 }
 
 int32_t active_map_bearing_angle(void) {
@@ -499,129 +485,120 @@ int32_t active_map_bearing_angle(void) {
 }
 
 void cancel_map_bearing_smoothing(void) {
-  bearing_smoothing_adaptive_reset(&s_bearing_adaptive);
-  if (s_map_bearing_display_centi_degrees >= 0) {
-    s_map_bearing_target_centi_degrees =
-        s_map_bearing_display_centi_degrees;
-  }
-  reset_map_bearing_clock();
+  bearing_tracker_reset(&s_bearing_tracker);
+  bearing_trace_shutdown();
   release_visual_animation_tick_if_idle();
 }
 
 bool map_bearing_smoothing_active(void) {
-  return map_bearing_rendering_visible() &&
-      s_map_bearing_target_centi_degrees >= 0 &&
-      s_map_bearing_display_centi_degrees >= 0 &&
-      bearing_smoothing_shortest_delta(s_map_bearing_display_centi_degrees,
-                                       s_map_bearing_target_centi_degrees) != 0;
+  if (!map_bearing_rendering_visible() ||
+      target_map_bearing_centi_degrees() < 0) {
+    return false;
+  }
+  int32_t private_display =
+      bearing_tracker_display_centi_degrees(&s_bearing_tracker);
+  return private_display >= 0 &&
+      (private_display != s_map_bearing_display_centi_degrees ||
+       bearing_tracker_active(&s_bearing_tracker, map_bearing_timestamp_ms()));
+}
+
+void observe_map_bearing_centi_degrees(int32_t heading_centi,
+                                      uint32_t observed_at_ms,
+                                      bool prediction_allowed) {
+  s_map_bearing_target_centi_degrees = heading_centi < 0 ? -1 :
+      normalize_centi_degrees(heading_centi);
+  bearing_trace_sample(observed_at_ms, s_map_bearing_target_centi_degrees,
+      heading_centi < 0 ? 0 : BearingTraceRawValid |
+          (prediction_allowed ? BearingTraceCalibrated : 0));
+  if (heading_centi < 0) {
+    bearing_tracker_reset(&s_bearing_tracker);
+  } else if (map_bearing_rendering_visible()) {
+    bearing_tracker_observe(&s_bearing_tracker,
+        s_map_bearing_target_centi_degrees, observed_at_ms, prediction_allowed);
+  }
+  // Observation may advance private state to the event time, but the renderer
+  // continues using the last published frame until the shared tick below.
+  bearing_trace_set_active(map_bearing_smoothing_active());
+  schedule_visual_animation_tick();
+  release_visual_animation_tick_if_idle();
+}
+
+void reset_map_bearing_display_to_north(void) {
+  // Entering face-forward starts from the north-up camera that was visible.
+  bearing_tracker_snap(&s_bearing_tracker, 0, map_bearing_timestamp_ms());
+  s_map_bearing_display_centi_degrees = 0;
+  s_map_bearing_target_centi_degrees = -1;
+}
+
+void request_map_bearing_acquisition(void) {
+  if (map_bearing_rendering_visible()) {
+    bearing_tracker_request_acquisition(&s_bearing_tracker,
+                                         map_bearing_timestamp_ms());
+    bearing_trace_set_active(map_bearing_smoothing_active());
+    schedule_visual_animation_tick();
+  }
 }
 
 bool sync_map_bearing_smoothing(bool animate) {
   int32_t previous_display = s_map_bearing_display_centi_degrees;
   int32_t target = target_map_bearing_centi_degrees();
+  uint32_t now = map_bearing_timestamp_ms();
   if (target < 0) {
-    bearing_smoothing_adaptive_reset(&s_bearing_adaptive);
-    s_map_bearing_target_centi_degrees = target;
-    if (!map_bearing_rendering_visible()) {
-      reset_map_bearing_clock();
-      release_visual_animation_tick_if_idle();
-      return false;
+    bearing_tracker_reset(&s_bearing_tracker);
+  } else if (map_bearing_rendering_visible()) {
+    if (!animate) {
+      // Explicit camera/menu synchronization keeps its existing snap policy.
+      bearing_tracker_snap(&s_bearing_tracker, target, now);
+      s_map_bearing_display_centi_degrees = target;
+    } else if (target != s_map_bearing_target_centi_degrees ||
+               bearing_tracker_display_centi_degrees(&s_bearing_tracker) < 0) {
+      // A reused camera target or declination correction is not fresh input.
+      bearing_tracker_set_target(&s_bearing_tracker, target, now);
     }
-    s_map_bearing_display_centi_degrees = target;
-    reset_map_bearing_clock();
-    release_visual_animation_tick_if_idle();
-    return previous_display != s_map_bearing_display_centi_degrees;
   }
-
-  // Manual browse still smooths the facing bearing used by the location cone.
-  // active_map_bearing_centi_degrees() keeps the geographic map north-up.
-  target = normalize_centi_degrees(target);
   s_map_bearing_target_centi_degrees = target;
-  if (!map_bearing_rendering_visible()) {
-    bearing_smoothing_adaptive_reset(&s_bearing_adaptive);
-    reset_map_bearing_clock();
-    release_visual_animation_tick_if_idle();
-    return false;
-  }
-  if (s_map_bearing_display_centi_degrees < 0 || !animate) {
-    bearing_smoothing_adaptive_reset(&s_bearing_adaptive);
-  }
-  bearing_smoothing_adaptive_observe(&s_bearing_adaptive, target,
-                                       map_bearing_timestamp_ms());
-  if (s_map_bearing_display_centi_degrees < 0 || !animate) {
-    s_map_bearing_display_centi_degrees = target;
-    reset_map_bearing_clock();
-    release_visual_animation_tick_if_idle();
-    return previous_display != s_map_bearing_display_centi_degrees;
-  }
-
-  if (bearing_smoothing_shortest_delta(
-          s_map_bearing_display_centi_degrees, target) == 0) {
-    s_map_bearing_display_centi_degrees = target;
-    reset_map_bearing_clock();
-    release_visual_animation_tick_if_idle();
-    return previous_display != s_map_bearing_display_centi_degrees;
-  }
-
-  if (!s_map_bearing_clock_valid) {
-    start_map_bearing_clock();
-  }
+  bearing_trace_set_active(map_bearing_smoothing_active());
   schedule_visual_animation_tick();
-  return false;
+  release_visual_animation_tick_if_idle();
+  return previous_display != s_map_bearing_display_centi_degrees;
 }
 
 bool advance_map_bearing_smoothing(void) {
-  if (!map_bearing_rendering_visible() ||
-      s_map_bearing_target_centi_degrees < 0 ||
-      s_map_bearing_display_centi_degrees < 0) {
+  if (!map_bearing_smoothing_active()) {
+    bearing_trace_set_active(false);
     return false;
   }
-
-  int32_t delta = bearing_smoothing_shortest_delta(
-      s_map_bearing_display_centi_degrees,
-      s_map_bearing_target_centi_degrees);
-  if (delta == 0) {
-    reset_map_bearing_clock();
-    return false;
-  }
-  time_t now_s;
-  uint16_t now_ms;
-  time_ms(&now_s, &now_ms);
-  int32_t elapsed_ms = 0;
-  if (s_map_bearing_clock_valid) {
-    elapsed_ms = (int32_t)(now_s - s_map_bearing_advanced_s) * 1000 +
-        (int32_t)now_ms - (int32_t)s_map_bearing_advanced_ms;
-  }
-  if (elapsed_ms < 0) {
-    elapsed_ms = 0;
-  }
-  uint8_t tick_count = bearing_smoothing_consume_elapsed_ticks(
-      &s_map_bearing_elapsed_ms, (uint32_t)elapsed_ms,
-      VISUAL_ANIMATION_TICK_MS, BEARING_SMOOTHING_MAX_CATCHUP_TICKS);
-  s_map_bearing_advanced_s = now_s;
-  s_map_bearing_advanced_ms = now_ms;
-  s_map_bearing_clock_valid = true;
-  if (tick_count == 0) {
-    return false;
-  }
+  uint32_t now = map_bearing_timestamp_ms();
+  int32_t previous_display = s_map_bearing_display_centi_degrees;
   bool was_orientation_active = map_orientation_active();
-  s_map_bearing_display_centi_degrees = bearing_smoothing_adaptive_advance_ticks(
-      &s_bearing_adaptive, s_map_bearing_display_centi_degrees,
-      s_map_bearing_target_centi_degrees, bearing_reacquire_active(), tick_count,
-      (uint32_t)now_s * 1000 + now_ms);
-
-  if (bearing_smoothing_shortest_delta(s_map_bearing_display_centi_degrees,
-                                       s_map_bearing_target_centi_degrees) == 0) {
-    reset_map_bearing_clock();
+  s_map_bearing_display_centi_degrees =
+      bearing_tracker_advance(&s_bearing_tracker, now);
+#ifdef MAPPY_BEARING_TRACE
+  uint8_t flags = map_orientation_active() ? BearingTraceFaceForward : 0;
+  if (bearing_tracker_active(&s_bearing_tracker, now)) {
+    flags |= BearingTraceMoving;
   }
-
-  update_map_after_bearing_display_change(was_orientation_active);
-  return true;
+  if (!s_bearing_tracker.has_sample) {
+    flags |= BearingTraceReacquiring;
+  }
+  if (bearing_tracker_prediction_centi_degrees(&s_bearing_tracker, now) != 0) {
+    flags |= BearingTracePredicting;
+  }
+  bearing_trace_frame(now, s_map_bearing_target_centi_degrees,
+      s_map_bearing_display_centi_degrees,
+      bearing_tracker_velocity_centi_degrees_per_second(&s_bearing_tracker), flags);
+#endif
+  bearing_trace_set_active(map_bearing_smoothing_active());
+  bool changed = previous_display != s_map_bearing_display_centi_degrees;
+  if (changed) {
+    update_map_after_bearing_display_change(was_orientation_active);
+  }
+  return changed;
 }
 
 void pause_map_bearing_rendering(void) {
-  bearing_smoothing_adaptive_reset(&s_bearing_adaptive);
-  reset_map_bearing_clock();
+  bearing_tracker_reset(&s_bearing_tracker);
+  bearing_trace_set_active(false);
   release_visual_animation_tick_if_idle();
 }
 
@@ -634,15 +611,52 @@ bool resume_map_bearing_rendering(void) {
   int32_t target = target_map_bearing_centi_degrees();
   s_map_bearing_target_centi_degrees = target;
   s_map_bearing_display_centi_degrees = target;
-  bearing_smoothing_adaptive_reset(&s_bearing_adaptive);
-  bearing_smoothing_adaptive_observe(&s_bearing_adaptive, target,
-                                       map_bearing_timestamp_ms());
-  reset_map_bearing_clock();
+  if (target >= 0) {
+    bearing_tracker_snap(&s_bearing_tracker, target, map_bearing_timestamp_ms());
+  } else {
+    bearing_tracker_reset(&s_bearing_tracker);
+  }
+  bearing_trace_set_active(false);
+  release_visual_animation_tick_if_idle();
   bool changed = previous_display != s_map_bearing_display_centi_degrees;
   if (changed) {
     update_map_after_bearing_display_change(was_orientation_active);
   }
   return changed;
+}
+
+static void update_after_compass_validity_change(bool had_heading,
+                                                  bool was_orientation_active) {
+  if (had_heading != compass_heading_is_valid()) {
+    update_map_after_bearing_display_change(was_orientation_active);
+    if (s_map_layer) {
+      layer_mark_dirty(s_map_layer);
+    }
+  }
+}
+
+void update_debug_compass_centi_degrees(int32_t heading_centi,
+                                        uint32_t observed_at_ms) {
+  bool had_heading = compass_heading_is_valid();
+  bool was_orientation_active = map_orientation_active();
+#ifdef MAPPY_WATCH_PHONE_MODE_FIXTURE
+  s_debug_compass_override_active = heading_centi >= 0;
+#endif
+  s_compass_magnetic_centi_degrees = heading_centi < 0 ? -1 :
+      normalize_centi_degrees(heading_centi);
+  s_compass_heading_centi_degrees = s_compass_magnetic_centi_degrees;
+  s_compass_magnetic_degrees = heading_centi < 0 ? -1 :
+      rounded_degrees_from_centi(s_compass_magnetic_centi_degrees);
+  s_compass_heading_degrees = s_compass_magnetic_degrees;
+#if defined(PBL_COMPASS)
+  observe_map_bearing_centi_degrees(s_compass_heading_centi_degrees,
+                                    observed_at_ms, true);
+#else
+  // A debug compass must not replace the phone-heading fallback source.
+  (void)observed_at_ms;
+#endif
+  maybe_begin_pending_route_start_reacquire();
+  update_after_compass_validity_change(had_heading, was_orientation_active);
 }
 
 void world_delta_to_screen_delta(int32_t dx, int32_t dy,
@@ -714,38 +728,22 @@ GPoint point_from_heading(GPoint origin, int32_t heading_degrees, int16_t length
 
 #if defined(PBL_COMPASS)
 void update_compass_heading(CompassHeadingData heading_data) {
-  if (heading_data.compass_status == CompassStatusDataInvalid) {
-    bool was_orientation_active = map_orientation_active();
-    if (s_compass_heading_degrees != -1) {
-      s_compass_magnetic_degrees = -1;
-      s_compass_heading_degrees = -1;
-      bool display_changed = sync_map_bearing_smoothing(false);
-      update_map_after_bearing_display_change(was_orientation_active);
-      if (display_changed && s_map_layer) {
-        layer_mark_dirty(s_map_layer);
-      }
-    }
-    return;
-  }
-
-  int32_t next_magnetic_heading =
-      compass_heading_to_degrees(heading_data.magnetic_heading);
-  int32_t next_heading = corrected_compass_heading_degrees(next_magnetic_heading);
-  if (next_heading == s_compass_heading_degrees) {
-    s_compass_magnetic_degrees = next_magnetic_heading;
-    return;
-  }
-
-  s_compass_magnetic_degrees = next_magnetic_heading;
-  s_compass_heading_degrees = next_heading;
+  bool was_orientation_active = map_orientation_active();
+  bool had_heading = compass_heading_is_valid();
+  bool valid = heading_data.compass_status == CompassStatusCalibrating ||
+      heading_data.compass_status == CompassStatusCalibrated;
+  s_compass_magnetic_centi_degrees = valid ?
+      compass_heading_to_centi_degrees(heading_data.magnetic_heading) : -1;
+  s_compass_magnetic_degrees = valid ?
+      rounded_degrees_from_centi(s_compass_magnetic_centi_degrees) : -1;
+  refresh_corrected_compass_heading();
+  // Every fresh callback reaches the tracker, including sub-degree movement
+  // and repeated rounded headings. Calibration data may track, but not predict.
+  observe_map_bearing_centi_degrees(s_compass_heading_centi_degrees,
+      map_bearing_timestamp_ms(),
+      heading_data.compass_status == CompassStatusCalibrated);
   maybe_begin_pending_route_start_reacquire();
-  bool display_changed = sync_map_bearing_smoothing(true);
-  if (display_changed) {
-    update_map_after_bearing_display_change(false);
-  }
-  if (display_changed && s_map_layer) {
-    layer_mark_dirty(s_map_layer);
-  }
+  update_after_compass_validity_change(had_heading, was_orientation_active);
 }
 
 void compass_heading_handler(CompassHeadingData heading_data) {
@@ -758,9 +756,9 @@ void compass_heading_handler(CompassHeadingData heading_data) {
 }
 
 void start_compass_service(void) {
+  bearing_trace_init();
   compass_service_subscribe(compass_heading_handler);
-  compass_service_set_heading_filter(
-      TRIG_MAX_ANGLE * COMPASS_HEADING_FILTER_DEGREES / 360);
+  compass_service_set_heading_filter(0);
 }
 
 void stop_compass_service(void) {
@@ -768,6 +766,7 @@ void stop_compass_service(void) {
 }
 #else
 void start_compass_service(void) {
+  bearing_trace_init();
 }
 
 void stop_compass_service(void) {

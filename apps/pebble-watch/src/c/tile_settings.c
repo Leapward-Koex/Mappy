@@ -40,7 +40,7 @@ void apply_map_orientation(DictionaryIterator *iter) {
     s_map_orientation = next_orientation;
     persist_write_int(PERSIST_MAP_ORIENTATION, s_map_orientation);
     if (!was_orientation_active && map_orientation_active()) {
-      s_map_bearing_display_centi_degrees = 0;
+      reset_map_bearing_display_to_north();
     }
     sync_map_bearing_smoothing(true);
     if (was_orientation_active || map_orientation_active()) {

@@ -5,6 +5,7 @@ cd "$ROOT_DIR/apps/pebble-watch"
 operation="${1:?Expected build, check, or install}"
 if [[ "$operation" == build ]]; then
   export MAPPY_WATCH_HARDWARE_PERF=0
+  export MAPPY_BEARING_TRACE=0
   exec make --jobs=1 release
 fi
 if [[ "$operation" != check && "$operation" != install ]]; then

@@ -148,6 +148,8 @@ def build(ctx):
     hardware_perf = os.environ.get('MAPPY_WATCH_HARDWARE_PERF', '').strip().lower()
     if phone_mode == PHONE_MODE_PHONE and hardware_perf in ('1', 'true', 'yes', 'on'):
         defines.append('MAPPY_WATCH_HARDWARE_PERF=1')
+    if fixture_bool_env('MAPPY_BEARING_TRACE'):
+        defines.append('MAPPY_BEARING_TRACE=1')
     build_worker = os.path.exists('worker_src')
     binaries = []
 

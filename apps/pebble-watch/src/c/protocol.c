@@ -608,7 +608,8 @@ static bool gps_sequence_is_stale(int32_t sequence) {
 static void apply_gps_fix(int32_t world_x, int32_t world_y, int32_t zoom,
                           int32_t heading_degrees, bool has_sequence,
                           int32_t sequence, int32_t elapsed_ms,
-                          int32_t accuracy_cm, const char *provider) {
+                          int32_t accuracy_cm, const char *provider,
+                          bool heading_is_observation) {
   if (has_sequence && gps_sequence_is_stale(sequence)) {
     return;
   }
@@ -643,6 +644,15 @@ static void apply_gps_fix(int32_t world_x, int32_t world_y, int32_t zoom,
   s_has_gps = true;
   s_gps_received_at = time(NULL);
   maybe_begin_pending_route_start_reacquire();
+#if !defined(PBL_COMPASS)
+  if (heading_is_observation) {
+    observe_map_bearing_centi_degrees(phone_heading_is_usable() ?
+        normalized_phone_heading_degrees() * 100 : -1,
+        map_bearing_timestamp_ms(), false);
+  }
+#else
+  (void)heading_is_observation;
+#endif
   sync_map_bearing_smoothing(true);
   s_route_gps_stale_logged = false;
   update_touch_subscription();
@@ -702,7 +712,7 @@ void apply_gps(DictionaryIterator *iter) {
                 sequence_tuple ? sequence_tuple->value->int32 : 0,
                 elapsed_tuple ? elapsed_tuple->value->int32 : -1,
                 accuracy_tuple ? accuracy_tuple->value->int32 : -1,
-                provider_tuple ? provider_tuple->value->cstring : "");
+                provider_tuple ? provider_tuple->value->cstring : "", true);
 }
 
 void apply_declination(DictionaryIterator *iter) {
@@ -718,10 +728,10 @@ void apply_declination(DictionaryIterator *iter) {
 
   s_declination_centi_degrees = next_declination;
   s_declination_valid = true;
-  int32_t previous_heading = s_compass_heading_degrees;
+  int32_t previous_heading = s_compass_heading_centi_degrees;
   bool was_orientation_active = map_orientation_active();
   refresh_corrected_compass_heading();
-  if (previous_heading != s_compass_heading_degrees) {
+  if (previous_heading != s_compass_heading_centi_degrees) {
     bool display_changed = sync_map_bearing_smoothing(true);
     if (display_changed) {
       update_map_after_bearing_display_change(was_orientation_active);
@@ -773,22 +783,10 @@ void apply_debug_compass(DictionaryIterator *iter) {
     fixture_perf_begin();
   }
 #endif
-  if (heading < 0) {
-#ifdef MAPPY_WATCH_PHONE_MODE_FIXTURE
-    s_debug_compass_override_active = false;
-#endif
-    s_compass_magnetic_degrees = -1;
-    s_compass_heading_degrees = -1;
-    APP_LOG(APP_LOG_LEVEL_INFO, "Debug compass cleared");
-  } else {
-#ifdef MAPPY_WATCH_PHONE_MODE_FIXTURE
-    s_debug_compass_override_active = true;
-#endif
-    s_compass_magnetic_degrees = normalize_degrees(heading);
-    s_compass_heading_degrees = normalize_degrees(heading);
-    maybe_begin_pending_route_start_reacquire();
-    APP_LOG(APP_LOG_LEVEL_INFO, "Debug compass heading=%ld", (long)s_compass_heading_degrees);
-  }
+  update_debug_compass_centi_degrees(heading < 0 ? -1 :
+      normalize_degrees(heading) * 100, map_bearing_timestamp_ms());
+  APP_LOG(APP_LOG_LEVEL_INFO, "Debug compass heading=%ld",
+          (long)s_compass_heading_degrees);
 
   bool display_changed = sync_map_bearing_smoothing(true);
 #ifdef MAPPY_WATCH_PHONE_MODE_FIXTURE
@@ -800,10 +798,10 @@ void apply_debug_compass(DictionaryIterator *iter) {
     fixture_perf_start_mixed_sources();
   }
 #endif
-  if (display_changed) {
+  if (display_changed || was_orientation_active != map_orientation_active()) {
     update_map_after_bearing_display_change(was_orientation_active);
   }
-  if (display_changed && s_map_layer) {
+  if ((display_changed || heading < 0) && s_map_layer) {
     layer_mark_dirty(s_map_layer);
   }
 #ifdef MAPPY_WATCH_PHONE_MODE_FIXTURE
@@ -969,7 +967,7 @@ void apply_debug_route_progress(DictionaryIterator *iter) {
   APP_LOG(APP_LOG_LEVEL_INFO, "Debug route progress=%ld gps=%ld,%ld",
           (long)permille, (long)world_x, (long)world_y);
   apply_gps_fix(world_x, world_y, ROUTE_WORLD_ZOOM, s_heading_degrees,
-                false, 0, -1, -1, "debug");
+                false, 0, -1, -1, "debug", false);
 }
 
 

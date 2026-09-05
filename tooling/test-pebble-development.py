@@ -84,6 +84,35 @@ class CredentialLoadingTest(unittest.TestCase):
 
 
 class RepositoryWorkflowTest(unittest.TestCase):
+    def test_bearing_integration_host_contract(self) -> None:
+        compiler = shutil.which(os.environ.get("CC", "cc"))
+        self.assertIsNotNone(compiler, "C compiler is required for host tests")
+        with tempfile.TemporaryDirectory() as temp_dir:
+            for variant in ([], ["-DMAPPY_TEST_PHONE_HEADING"]):
+                with self.subTest(variant=variant):
+                    output = Path(temp_dir) / "mappy-bearing-integration-tests"
+                    subprocess.run(
+                        [compiler, "-std=c99", "-Wall", "-Wextra", "-Werror",
+                         "-Wno-unused-variable", *variant,
+                         str(ROOT / "tooling" / "test-bearing-integration.c"),
+                         str(ROOT / "apps/pebble-watch/src/c/bearing_smoothing.c"),
+                         "-o", str(output)], check=True,
+                    )
+                    subprocess.run([str(output)], check=True)
+
+    def test_bearing_trace_host_contract(self) -> None:
+        compiler = shutil.which(os.environ.get("CC", "cc"))
+        self.assertIsNotNone(compiler, "C compiler is required for host tests")
+        with tempfile.TemporaryDirectory() as temp_dir:
+            for variant in ([], ["-DMAPPY_BEARING_TRACE"]):
+                with self.subTest(variant=variant):
+                    output = Path(temp_dir) / "mappy-bearing-trace-tests"
+                    subprocess.run(
+                        [compiler, "-std=c99", "-Wall", "-Wextra", "-Werror",
+                         *variant, str(ROOT / "tooling" / "test-bearing-trace.c"),
+                         "-o", str(output)], check=True,
+                    )
+                    subprocess.run([str(output)], check=True)
     def test_animation_scheduler_host_contract(self) -> None:
         compiler = shutil.which(os.environ.get("CC", "cc"))
         self.assertIsNotNone(compiler, "C compiler is required for host tests")
@@ -253,6 +282,24 @@ class RepositoryWorkflowTest(unittest.TestCase):
                 source,
             )
 
+    def test_failed_build_does_not_wipe_or_install(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            calls = temp / "calls"
+            pebble = temp / "pebble"
+            pebble.write_text(
+                '#!/bin/sh\nprintf "%s\\n" "$1" >> "$TEST_PEBBLE_CALLS"\nexit 42\n',
+                encoding="utf-8",
+            )
+            pebble.chmod(0o755)
+            env = dict(os.environ, PATH=f"{temp}{os.pathsep}{os.environ['PATH']}",
+                       TEST_PEBBLE_CALLS=str(calls))
+            result = subprocess.run(
+                ["bash", str(ROOT / "tooling/pebble-emulator-codex.sh"),
+                 "capture-fixture"], env=env, capture_output=True, text=True,
+            )
+            self.assertEqual(result.returncode, 42, result.stdout + result.stderr)
+            self.assertEqual(calls.read_text(encoding="utf-8").splitlines(), ["build"])
     def test_shell_scripts_parse_and_help_lists_supported_commands(self) -> None:
         helper = ROOT / "tooling" / "pebble-emulator-codex.sh"
         bootstrap = ROOT / "tooling" / "bootstrap-pebble-sdk-wsl.sh"

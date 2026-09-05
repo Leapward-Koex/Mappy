@@ -150,62 +150,50 @@ The fixed-memory detector uses these initial responsive thresholds:
 6. Emit at most one watch-look event per walking episode. Another three-peak
    walking cadence is required before a subsequent watch look can trigger.
 
-A confirmed watch look enables the fast bearing profile for 1.5 seconds. Route
-start also enables that profile for every travel mode; if heading is initially
-invalid, route start may wait up to three seconds for the first valid heading
-and then receives the full 1.5-second fast window.
+A confirmed watch look or route start requests acquisition once. Route start
+may wait up to three seconds for a first valid heading. These events do not
+start a timed animation profile or reset rotation velocity.
 
-Bearing animation remains shortest-path and uses the shared 30 ms scheduler:
+### Continuous bearing controller
 
-| Profile | Base step per tick | Tail rule |
-| --- | --- | --- |
-| Normal adaptive | `clamp(abs_delta * alpha, 0.05 deg, 12 deg)` | Complete when the remaining delta fits in one step. |
-| Fast reacquire | `clamp(abs_delta / 3, 8 deg, 24 deg)` | Split the final 24–48 degrees across two frames and complete the final at-most-24 degrees in one frame. |
+The controller retains displayed angle and angular velocity across observations.
+It follows the shortest circular error with a critically damped spring:
+`acceleration = omega^2 * error - 2 * omega * velocity`. Use omega 20/s during
+turns or acquisition errors of at least six degrees. Remain responsive until
+motion is stale, error is below one degree, and speed is below five degrees/s;
+then blend toward omega 10/s over 120 ms. New readings retarget the same follower.
 
-The normal profile follows the speed-adaptive low-pass principle described by
-[Casiez, Roussel, and Vogel's 1 Euro filter](https://gery.casiez.net/1euro/):
-suppress jitter while the watch is held still and increase responsiveness while
-it turns. The watch filters the displayed heading only once, on the render
-clock; it does not cascade a sensor heading filter and another interpolation
-filter.
+- Integrate velocity before angle in fixed-point steps of at most 10 ms, capped
+  at 720 degrees/s. Advance at most 120 ms after a delayed frame and discard
+  excess backlog. Rendering uses the existing shared 30 ms scheduler.
+- Retain sub-degree compass precision; round only for legacy degree consumers.
+  Explicitly set the compass event filter to zero after subscribing. This
+  removes application-side suppression without changing firmware sampling.
+- Derive signed turn velocity only from fresh observations and their actual
+  callback intervals, with an 80 ms smoothing time constant. Neither frame
+  advancement, camera synchronization, nor a cached compass peek is a sample.
+- After two consecutive directional samples above 15 degrees/s agree with the
+  estimate, predict `velocity * min(sample_age, 100 ms)`, capped at eight degrees
+  in either direction. The first opposing sample disables prediction.
+- Hold that bounded lead between timely readings. After
+  `max(300 ms, 1.5 * estimated_sample_period)`, fade it away over 100 ms.
+  Seed the period at 200 ms and update with a quarter-weight average, bounded
+  to 50–300 ms. Prediction is separate from total stopping overshoot.
+- Preserve displayed position while correcting; brake existing velocity rather
+  than snapping at each sensor target. Keep rendering until angle and velocity
+  settle. Reaching an intermediate reading does not end the animation.
+- Invalid input, menu pause/resume, explicit snap, and reset have explicit
+  lifecycle operations. Resume shows the latest valid heading immediately.
+  Declination correction retargets without fabricating sensor velocity. Manual
+  browse continues smoothing the location cone with geographic map north-up.
 
-- Record the timestamp and shortest circular delta of each changed target.
-  Estimate signed angular velocity using the actual sensor interval and an
-  80 ms low-pass time constant. Reusing a held target must not create a new
-  derivative sample. Same-millisecond samples coalesce without division by zero.
-- Bound the derivative to 720 degrees/second and discard its history after a
-  sensor gap longer than one second. Between sensor events, reduce effective
-  speed by `100 / (100 + sample_age_ms)` and expire it after 500 ms; do not
-  invent repeated zero-speed sensor samples on render ticks.
-- Set cutoff to 1 Hz at low speed, increasing it by 0.15 Hz per degree/second
-  above an 8 degree/second noise band. Derive each 30 ms tick's interpolation
-  factor as `alpha = 30 / (tau_ms + 30)`, with `tau_ms = 159000 / cutoff_mHz`
-  and a minimum time constant of 10 ms. Integer fixed-point arithmetic is
-  sufficient.
-- If remaining display error exceeds six degrees, raise the interpolation
-  factor from 0.25 by `(error_centi_degrees - 600) / 4096`, capped at 0.75.
-  This lets a first heading or a turn after a long sensor gap catch up promptly
-  without inventing a velocity estimate. Smaller stationary errors retain the
-  low-cutoff response.
-- Keep each step within the latest target and the 12-degree cap. The 0.05-degree
-  floor completes small tails so rendering stops when the compass is idle.
-- Reset adaptive history on invalid heading, explicit snap/cancellation, menu
-  pause/resume, and declination corrections. Resume still shows the latest
-  valid heading immediately. Manual browse continues smoothing the location
-  cone while geographic map orientation remains north-up.
+Diagnostic builds may buffer compass observations and displayed-frame state.
+Flush records only after animation settles, and pause flushing if motion
+resumes. Production builds have no trace buffer or logging cost.
 
-This changes display responsiveness without increasing compass event frequency
-or predicting beyond the latest accepted heading.
-
-Both profiles advance in elapsed 30 ms virtual ticks, consuming up to four per
-displayed frame. Fractional time and excess backlog are retained so delayed
-frames catch up without changing the smoothing response.
-
-The fast profile remains animated and settles a worst-case
-180-degree change within eight ticks/240 ms. Every accepted compass update in
-the window replaces the target. Invalid heading still falls back to north-up;
-it must never cause a stale or synthetic bearing to be animated.
-
+The calibrated firmware normally delivers about five readings per second;
+rendering bridges those sample gaps with bounded prediction. See the
+[implementation and validation notes](../../apps/pebble-watch/CONTINUOUS_BEARING.md).
 ## Watch Projection
 
 The watch keeps the same viewport center model:
@@ -512,19 +500,17 @@ Watch unit tests:
   and a stationary wrist raise do not emit a watch-look event.
 - Three cadence peaks followed by a stable raised pose emit exactly one
   watch-look event; a new walking cadence rearms the detector.
-- Normal adaptive bearing smoothing interpolates in fractional degrees,
-  advances between streamed sensor events, attenuates jitter across north,
-  and settles without overshoot. Compare sustained turns, irregular sample
-  intervals, reversals, stopping, and first/long-gap large-angle steps against
-  the prior fixed quarter-residual profile. Require lower turning lag and
-  stationary jitter while retaining intermediate render frames.
-- Derivative history uses actual sensor time, coalesces zero-duration samples,
-  survives timestamp wrap, ignores held-target reuse, expires stale speed, and
-  resets after invalid heading. Delayed frames consume the corresponding
-  number of virtual filter steps without fabricating sensor samples.
-- Fast reacquisition is unaffected by adaptation: it remains visibly animated,
-  follows the shortest wraparound path, accepts a changed target, and completes
-  180 degrees within eight virtual ticks/240 ms.
+- Replay steady turns at 50/100/200/300 ms intervals, irregular delivery,
+  stopping, reversals, and north crossings. For steady streams up to 200 ms
+  apart, require no near-stop lasting 60 ms and no repeated speed peaks above
+  twice the sustained turn rate.
+- Reach 90% of a 90-degree acquisition within 240 ms and of a 180-degree
+  acquisition within 300 ms. Reverse within 150 ms of an opposing observation.
+- Keep stopping overshoot at most ten degrees, stationary mean jitter at most
+  0.3 degrees, and settle to idle within one second.
+- Verify fresh repeated headings, zero-duration coalescing, timestamp wrap,
+  prediction qualification/revocation/expiry, delayed-frame backlog discard,
+  camera sync/peek separation, invalid heading, and menu reset behavior.
 - Manual-browse bearing animation advances across multiple visual ticks without
   rotating the map, recomputing route projection, or rebuilding tile coverage.
 
@@ -548,7 +534,7 @@ Visual/emulator tests:
 - Verify no blank rotated corners remain after all requested tiles arrive.
 - Verify UI bands and menu text remain unrotated and within bounds.
 - Replay deterministic stationary-raise and walking-to-look accelerometer
-  fixtures. Only walking-to-look starts fast reacquisition, and it produces one
+  fixtures. Only walking-to-look requests acquisition, and it produces one
   look event before requiring another walking cadence.
 
 ## Acceptance Criteria
@@ -566,8 +552,8 @@ Visual/emulator tests:
 - Invalid or stale heading falls back without showing stale direction.
 - Starting face-forward navigation in any travel mode accelerates initial
   bearing acquisition. During a walking route, walking-to-look detection starts
-  one 1.5-second fast-animation window and settles the latest target within
-  240 ms without snapping.
+  one acquisition request. New readings preserve rotation velocity, with
+  bounded prediction bridging normal compass gaps.
 - Facing-up requests enough tile coverage for the rotated viewport while
   GPS-follow is active.
 - The feature works without adding a project backend, a Google Maps notification

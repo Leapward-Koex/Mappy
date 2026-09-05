@@ -30,7 +30,7 @@ void recenter_viewport(void) {
   s_viewport_y = scale_world_to_zoom(s_gps_world_y, s_gps_zoom, s_viewport_zoom);
   s_manual_pan = false;
   if (!was_orientation_active && map_orientation_active()) {
-    s_map_bearing_display_centi_degrees = 0;
+    reset_map_bearing_display_to_north();
   }
   sync_map_bearing_smoothing(true);
   update_state_after_map_change();
@@ -685,7 +685,7 @@ void select_menu_item(void) {
         persist_write_int(PERSIST_MAP_ORIENTATION, s_map_orientation);
         send_map_orientation();
         if (!was_orientation_active && map_orientation_active()) {
-          s_map_bearing_display_centi_degrees = 0;
+          reset_map_bearing_display_to_north();
         }
         sync_map_bearing_smoothing(true);
         if (resume_follow_for_facing || was_orientation_active ||

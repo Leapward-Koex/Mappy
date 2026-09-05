@@ -100,26 +100,21 @@ static void fixture_compass_replay_callback(void *context) {
   (void)context;
   s_fixture_compass_replay_timer = NULL;
   if (--s_fixture_compass_replay_remaining > 0) {
-    // Re-arm before processing this reading so compass input has its own
-    // 100 ms cadence, independent of the visual animation scheduler.
+    // Calibrated firmware normally delivers compass observations at 5 Hz.
+    // This timer is independent of the 30 ms visual scheduler.
     s_fixture_compass_replay_timer = app_timer_register(
-        100, fixture_compass_replay_callback, NULL);
+        200, fixture_compass_replay_callback, NULL);
     if (!s_fixture_compass_replay_timer) {
       s_fixture_perf.errors++;
     }
   }
-  bool was_orientation_active = map_orientation_active();
-  s_compass_heading_degrees = normalize_degrees(s_compass_heading_degrees + 3);
-  s_compass_magnetic_degrees = s_compass_heading_degrees;
-  if (sync_map_bearing_smoothing(true)) {
-    fixture_perf_bearing_immediate_step();
-    update_map_after_bearing_display_change(was_orientation_active);
-    if (s_map_layer) {
-      layer_mark_dirty(s_map_layer);
-    }
-  } else {
-    fixture_perf_maybe_emit();
-  }
+  time_t now_s;
+  uint16_t now_ms;
+  time_ms(&now_s, &now_ms);
+  update_debug_compass_centi_degrees(
+      normalize_degrees(s_compass_heading_degrees + 18) * 100,
+      (uint32_t)now_s * 1000 + now_ms);
+  fixture_perf_maybe_emit();
 }
 
 void fixture_perf_start_compass_replay(void) {
@@ -127,11 +122,10 @@ void fixture_perf_start_compass_replay(void) {
     app_timer_cancel(s_fixture_compass_replay_timer);
   }
   fixture_perf_begin();
-  cancel_bearing_reacquire();
   s_debug_compass_override_active = true;
-  s_fixture_compass_replay_remaining = 30;
+  s_fixture_compass_replay_remaining = 20;
   s_fixture_compass_replay_timer = app_timer_register(
-      100, fixture_compass_replay_callback, NULL);
+      200, fixture_compass_replay_callback, NULL);
   if (!s_fixture_compass_replay_timer) {
     s_fixture_perf.errors++;
     fixture_perf_maybe_emit();

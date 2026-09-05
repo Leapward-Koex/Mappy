@@ -27,12 +27,12 @@ Commands:
                            Run exact rotated-raster tests and the host benchmark.
   test-face-forward-angles Run 0/30/45/60/75/90-degree Emery render gates.
   test-face-forward-cadence
-                           Measure completed-draw FPS during a 10 Hz compass replay.
+                           Measure completed-draw FPS during a 5 Hz compass replay.
   test-render-performance  Run fixture bearing and tile-animation matrix assertions.
   test-pan-under-load [prompt]
                            Run pan/load assertions, or only the prompt fade case.
   test-rapid-zoom-reversal Run A-to-B-to-A fallback eviction/refetch assertions.
-  test-motion-reacquire    Replay wrist motion and assert fast bearing behavior.
+  test-motion-reacquire    Replay wrist motion and assert bearing acquisition.
   build                    Build the Pebble watch app.
   build-fixture            Build with emulator fixture PKJS bundled.
   build-real-fixture       Build with the local provider-map fixture bundled.
@@ -101,6 +101,7 @@ Environment:
   MAPPY_FIXTURE_ROUTE_POINT_COUNT
                            Deterministic fixture route points: 3..128.
   MAPPY_FIXTURE_FRAME_PERF  Optional fixture completed-frame metrics and compass replay.
+  MAPPY_BEARING_TRACE      Optional buffered compass trace, flushed only after settling.
   MAPPY_FIXTURE_PHONE_READY_DELAY_MS
                            Delay protocol-v4 phone-ready after INIT.
   MAPPY_FIXTURE_IGNORE_STARTUP_READY
@@ -189,15 +190,16 @@ wipe_emulator() {
 }
 
 install_app_with_recovery() {
-  if install_app; then
+  # A compiler/size failure cannot be repaired by wiping emulator state.
+  build_app || return
+  if pebble install --emulator "$PLATFORM" --force "$PBW_PATH"; then
     return 0
   fi
 
   echo "Install failed; wiping Pebble emulator data and retrying once..." >&2
   wipe_emulator
-  install_app
+  pebble install --emulator "$PLATFORM" --force "$PBW_PATH"
 }
-
 capture_after_install() {
   install_app_with_recovery || return
   if [[ "$CAPTURE_DELAY_SECONDS" != "0" ]]; then
@@ -1085,6 +1087,10 @@ test_face_forward_cadence() (
   sleep 3
   send_debug_compass 90
   sleep 3
+  send_debug_compass 180
+  sleep 3
+  send_debug_compass 270
+  sleep 3
   send_debug_compass 0
   sleep 3
 
@@ -1095,7 +1101,7 @@ test_face_forward_cadence() (
   sleep 1
   pebble send-app-message --emulator "$PLATFORM" --app-uuid "$(app_uuid)" \
     --int 50=901 52=5 60=0
-  sleep 5
+  sleep 6
   kill "$log_pid" >/dev/null 2>&1 || true
   wait "$log_pid" 2>/dev/null || true
   log_pid=""
@@ -2101,7 +2107,7 @@ test_motion_reacquire() {
     return 1
   fi
   if ! grep -Fq 'Motion state=walking' "$log_file" ||
-      ! grep -Fq 'Bearing reacquire reason=watch_look' "$log_file"; then
+      ! grep -Fq 'Bearing acquisition reason=watch_look' "$log_file"; then
     echo "Motion state transition or watch-look reacquisition was not logged; see $(windows_path "$log_file")" >&2
     pebble kill >/dev/null 2>&1 || true
     return 1
@@ -2110,8 +2116,12 @@ test_motion_reacquire() {
   local summary steps
   summary="$(grep 'MAPPY_PERF' "$log_file" | tail -n 1)"
   steps="$(perf_summary_value "$summary" b)"
-  if [[ -z "$steps" ]] || (( steps < 2 || steps > 8 )); then
-    echo "Fast bearing animation did not complete in 2..8 ticks: $summary" >&2
+  # The controller retains velocity and brakes through its tail. Exact 90%
+  # acquisition latency is tested by the host replay; this integrated check
+  # requires a real animation and an idle PERF summary within the one-second
+  # observation window above, rather than the obsolete eight-tick snap profile.
+  if [[ -z "$steps" ]] || (( steps < 2 )); then
+    echo "Bearing acquisition did not animate and settle: $summary" >&2
     pebble kill >/dev/null 2>&1 || true
     return 1
   fi
