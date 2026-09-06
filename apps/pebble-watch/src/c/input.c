@@ -49,6 +49,7 @@ static uint16_t s_pan_clock_ms;
 static bool s_pan_clock_valid;
 static bool s_pan_settlement_pending;
 static bool s_touch_teardown;
+static bool s_touch_requires_touchdown;
 
 #ifdef MAPPY_WATCH_PHONE_MODE_FIXTURE
 static int32_t saturating_viewport_add(int32_t value, int32_t delta) {
@@ -294,6 +295,11 @@ bool advance_pan_inertia_animation(void) {
 }
 
 void settle_pan_motion(void) {
+  // A button/modal can cancel a finger that is still on the screen. Its later
+  // position events must not recover that intentionally cancelled gesture.
+  if (s_touch_active) {
+    s_touch_requires_touchdown = true;
+  }
   settle_pan_motion_internal(true, true);
   release_visual_animation_tick_if_idle();
 }
@@ -354,26 +360,35 @@ bool fixture_start_pan_inertia(int32_t viewport_dx, int32_t viewport_dy,
 #endif
 
 void touch_handler(const TouchEvent *event, void *context) {
-  if (!event || s_menu_mode != MenuNone || s_arrival_dialog_visible ||
-      !touch_service_is_enabled()) {
-    if (event && !touch_service_is_enabled()) {
-      log_touch_disabled_once();
-      settle_pan_motion();
-    }
+  if (!event || !s_touch_subscribed || s_menu_mode != MenuNone ||
+      s_arrival_dialog_visible) {
+    return;
+  }
+  if (!touch_service_is_enabled()) {
+    log_touch_disabled_once();
+    settle_pan_motion();
     return;
   }
 
   switch (event->type) {
     case TouchEvent_Touchdown:
+      s_touch_requires_touchdown = false;
       begin_pan_interaction(event->x, event->y);
       break;
     case TouchEvent_PositionUpdate:
       if (!s_touch_active) {
+        // A busy app queue can lose touchdown while later movement survives.
+        // Anchor at the first available position so this same drag can pan,
+        // without inventing the missing delta or changing rendering cadence.
+        if (!s_touch_requires_touchdown) {
+          begin_pan_interaction(event->x, event->y);
+        }
         return;
       }
       update_pan_interaction(event->x, event->y);
       break;
     case TouchEvent_Liftoff:
+      s_touch_requires_touchdown = false;
       if (!s_touch_active) {
         return;
       }
@@ -400,6 +415,7 @@ void update_touch_subscription(void) {
     settle_pan_motion();
     touch_service_unsubscribe();
     s_touch_subscribed = false;
+    s_touch_requires_touchdown = true;
     reset_touch_state();
   } else if (should_subscribe && !touch_enabled) {
     log_touch_disabled_once();
@@ -553,7 +569,7 @@ void menu_item_label(int index, char *buffer, size_t buffer_size) {
       }
       break;
     case MenuTravelMode: {
-      const int mode_for_index[3] = {2, 0, 1};
+      const int mode_for_index[3] = {TRAVEL_MODE_WALK, TRAVEL_MODE_DRIVE, TRAVEL_MODE_BIKE};
       int mode = mode_for_index[index < 0 || index > 2 ? 0 : index];
       snprintf(buffer, buffer_size, "%s%s", mode == s_travel_mode ? "* " : "", travel_mode_label(mode));
       break;
@@ -630,7 +646,7 @@ void select_menu_item(void) {
       }
       break;
     case MenuTravelMode: {
-      const int mode_for_index[3] = {2, 0, 1};
+      const int mode_for_index[3] = {TRAVEL_MODE_WALK, TRAVEL_MODE_DRIVE, TRAVEL_MODE_BIKE};
       int next_mode = mode_for_index[s_menu_selection < 0 || s_menu_selection > 2 ? 0 : s_menu_selection];
       bool should_refresh_active_route =
           has_active_route() && next_mode != s_active_route_mode;

@@ -310,7 +310,7 @@ MVP controls:
 | Setting | Values | Owner |
 | --- | --- | --- |
 | Units | Imperial, metric | Phone UI pushed to watch |
-| Default travel mode | Drive, walk, bike | Phone and watch reconciled |
+| Default travel mode | Walk, drive, bike (Walk first in every travel mode picker) | Phone and watch reconciled |
 | Backlight | System/default, keep on during app where supported | Watch/phone reconciled |
 | Haptics | All, turns, arrival, off | Watch/phone reconciled |
 | Navigation glance | All, turns, arrival, off | Watch/phone reconciled |

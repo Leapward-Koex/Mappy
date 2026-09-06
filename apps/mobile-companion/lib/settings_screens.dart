@@ -647,6 +647,7 @@ class PermissionsScreen extends StatefulWidget {
     required this.onRequestNotifications,
     required this.onOpenNotificationSettings,
     required this.onRequestBatteryExemption,
+    required this.onOpenBatterySettings,
     this.focus,
     super.key,
   });
@@ -659,6 +660,7 @@ class PermissionsScreen extends StatefulWidget {
   final Future<BridgeStatus> Function() onRequestNotifications;
   final Future<bool> Function() onOpenNotificationSettings;
   final Future<BatteryOptimizationState> Function() onRequestBatteryExemption;
+  final Future<bool> Function() onOpenBatterySettings;
   final PermissionsFocus? focus;
 
   @override
@@ -892,10 +894,31 @@ class _PermissionsScreenState extends State<PermissionsScreen>
                 value: batteryLabel,
                 ready: batteryReady,
                 actionLabel: batteryReady ? null : 'Change setting',
-                onAction: batteryReady || _busy
+                onAction: !_snapshot.battery.canRequest || _busy
                     ? null
                     : () => _perform(widget.onRequestBatteryExemption),
               ),
+              if (_snapshot.battery != BatteryOptimizationState.unavailable)
+                ListTile(
+                  title: const Text('Phone battery settings'),
+                  subtitle: const Text(
+                    'Open Mappy’s app settings to review battery usage. If your '
+                    'phone has autostart or sleeping-app controls, also allow '
+                    'Mappy there. These extra settings cannot be checked here.',
+                  ),
+                  trailing: const Icon(Icons.open_in_new),
+                  onTap: _busy
+                      ? null
+                      : () => _perform(() async {
+                          final opened = await widget.onOpenBatterySettings();
+                          if (!opened && mounted) {
+                            _showFailure(
+                              'Phone battery settings could not be opened.',
+                            );
+                          }
+                          return opened;
+                        }),
+                ),
             ],
           ),
           if (_busy) ...[
@@ -1086,8 +1109,8 @@ class _NavigationPreferencesScreenState
           title: 'Default travel mode',
           value: _settings.travelMode,
           values: const [
-            WatchTravelMode.drive,
             WatchTravelMode.walk,
+            WatchTravelMode.drive,
             WatchTravelMode.bike,
           ],
           labelFor: (value) => value.label,

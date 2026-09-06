@@ -624,6 +624,21 @@ void main() {
     await tester.pumpAndSettle();
     expect(battery.requestCount, 1);
     expect(find.text('Unrestricted'), findsOneWidget);
+
+    final phoneSettings = find.text('Phone battery settings');
+    await tester.ensureVisible(phoneSettings);
+    await tester.tap(phoneSettings);
+    await tester.pumpAndSettle();
+    expect(battery.openSettingsCount, 1);
+    expect(find.text('Unrestricted'), findsOneWidget);
+
+    battery.settingsOpened = false;
+    await tester.tap(phoneSettings);
+    await tester.pumpAndSettle();
+    expect(
+      find.text('Phone battery settings could not be opened.'),
+      findsOneWidget,
+    );
   });
 
   testWidgets('foreground permission updates without waiting for a GPS fix', (
@@ -1900,6 +1915,15 @@ class TestBatteryOptimizationRepository
 
   @override
   Future<BatteryOptimizationState> getBatteryOptimizationState() async => state;
+
+  @override
+  Future<bool> openBatterySettings() async {
+    openSettingsCount++;
+    return settingsOpened;
+  }
+
+  int openSettingsCount = 0;
+  bool settingsOpened = true;
 
   @override
   Future<BatteryOptimizationState> requestDisableBatteryOptimization() async {

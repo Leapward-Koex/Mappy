@@ -85,7 +85,8 @@ Tile grid:
 
 Map-ready view shows:
 
-- Top band: short state or destination/context text.
+- Top band: only when there is useful state or destination/context text;
+  omit it during normal map-ready and manual-pan use.
 - Map tiles.
 - Current-location puck near screen center.
 - Current-location view cone only when heading is valid.
@@ -150,8 +151,7 @@ Centered map orientation:
 
 `WAITING_FOR_PHONE`:
 
-- Top band: neutral state or context text, such as `Map`; do not show app-name
-  branding inside the running watch app.
+- Top band: omitted. Do not show app-name branding inside the running watch app.
 - Center or bottom text: `Waiting for phone`.
 - No route or tile assumptions.
 
@@ -228,7 +228,7 @@ Saved-location menu:
 
 Travel mode menu:
 
-- Values: drive, walk, bike.
+- Display order: Walk, Drive, Bike. Walk is always first.
 - The selected value is persisted and sent with route requests.
 - Walk/bike warning must be visible before or during active route display.
 

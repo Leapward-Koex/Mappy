@@ -534,7 +534,7 @@ static void finish_route_at_destination(void) {
   pause_map_bearing_rendering();
   s_route_complete_pending = true;
   s_route_clear_armed = false;
-  copy_bounded_text(s_top_text, sizeof(s_top_text), "Map");
+  copy_bounded_text(s_top_text, sizeof(s_top_text), "");
   set_bottom_text("");
   update_touch_subscription();
   if (!s_outbox_busy) {

@@ -1,5 +1,6 @@
-import 'package:disable_battery_optimization/disable_battery_optimization.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
+import 'package:permission_handler/permission_handler.dart';
 
 enum BatteryOptimizationState { unknown, disabled, enabled, unavailable }
 
@@ -28,18 +29,24 @@ abstract class BatteryOptimizationRepository {
   Future<BatteryOptimizationState> getBatteryOptimizationState();
 
   Future<BatteryOptimizationState> requestDisableBatteryOptimization();
+
+  Future<bool> openBatterySettings();
 }
 
 class NativeBatteryOptimizationRepository
     implements BatteryOptimizationRepository {
   const NativeBatteryOptimizationRepository();
 
+  static bool get _isSupported =>
+      !kIsWeb && defaultTargetPlatform == TargetPlatform.android;
+
   @override
   Future<BatteryOptimizationState> getBatteryOptimizationState() async {
+    if (!_isSupported) return BatteryOptimizationState.unavailable;
     try {
-      final disabled =
-          await DisableBatteryOptimization.isAllBatteryOptimizationDisabled;
-      return _stateFromDisabled(disabled);
+      return _stateFromPermission(
+        await Permission.ignoreBatteryOptimizations.status,
+      );
     } on MissingPluginException {
       return BatteryOptimizationState.unavailable;
     } on PlatformException {
@@ -49,16 +56,13 @@ class NativeBatteryOptimizationRepository
 
   @override
   Future<BatteryOptimizationState> requestDisableBatteryOptimization() async {
+    if (!_isSupported) return BatteryOptimizationState.unavailable;
     try {
-      await DisableBatteryOptimization.showDisableAllOptimizationsSettings(
-        'Allow Mappy to start automatically',
-        'Enable autostart if this phone asks for it so Mappy can reconnect the watch session after Android reclaims the app.',
-        'Disable extra battery optimization',
-        'Follow the device-specific steps so Mappy can keep live GPS and route updates flowing to the Pebble watch.',
+      // The request completes after the dialog returns and checks the actual
+      // Android exemption, including when the user declines it.
+      return _stateFromPermission(
+        await Permission.ignoreBatteryOptimizations.request(),
       );
-      final disabled =
-          await DisableBatteryOptimization.isAllBatteryOptimizationDisabled;
-      return _stateFromDisabled(disabled);
     } on MissingPluginException {
       return BatteryOptimizationState.unavailable;
     } on PlatformException {
@@ -66,12 +70,28 @@ class NativeBatteryOptimizationRepository
     }
   }
 
-  static BatteryOptimizationState _stateFromDisabled(bool? disabled) {
-    if (disabled == null) {
-      return BatteryOptimizationState.unknown;
+  @override
+  Future<bool> openBatterySettings() async {
+    if (!_isSupported) return false;
+    try {
+      return await openAppSettings();
+    } on MissingPluginException {
+      return false;
+    } on PlatformException {
+      return false;
     }
-    return disabled
-        ? BatteryOptimizationState.disabled
-        : BatteryOptimizationState.enabled;
   }
+
+  // Manufacturer autostart and sleeping-app settings cannot be verified by
+  // Android's permission API. Only the system battery exemption counts here.
+  static BatteryOptimizationState _stateFromPermission(
+    PermissionStatus status,
+  ) => switch (status) {
+    PermissionStatus.granted => BatteryOptimizationState.disabled,
+    PermissionStatus.denied ||
+    PermissionStatus.permanentlyDenied => BatteryOptimizationState.enabled,
+    PermissionStatus.restricted => BatteryOptimizationState.unavailable,
+    PermissionStatus.limited ||
+    PermissionStatus.provisional => BatteryOptimizationState.unknown,
+  };
 }

@@ -7,7 +7,7 @@ redacted diagnostics.
 
 ## Requirements
 
-- Flutter 3.44.1 (Dart 3.12.1)
+- Flutter 3.47.2 (Dart 3.13.2)
 - Android development tools for Android builds
 - A Pebble-compatible phone bridge
 - A Google Maps Platform API key for live maps and routing
@@ -24,7 +24,7 @@ fvm flutter pub get
 fvm flutter run
 ```
 
-If Flutter 3.44.1 is already active globally, the equivalent `flutter` commands
+If Flutter 3.47.2 is already active globally, the equivalent `flutter` commands
 work as well.
 
 ## Google Maps Platform setup
@@ -91,6 +91,19 @@ Android permission dialogs automatically, can be deferred, and remains
 available later at Settings > Setup checklist. Active navigation and incoming
 Google Maps shares take priority over the checklist.
 
+## Battery optimization
+
+Android battery exemption requests use the published `permission_handler` 12.x
+package, compatible with this app's Android SDK and AGP 9 build. The status is
+read from Android and refreshed after the permission dialog or app settings
+closes. Declining the exemption leaves optimization enabled.
+
+Settings > Permissions > Phone battery settings opens Mappy's app settings for
+manual battery configuration. Manufacturer-specific autostart and sleeping-app
+controls may need to be adjusted separately; they cannot be verified through
+Android's battery exemption API and do not affect the reported exemption status.
+Battery optimization remains unavailable on non-Android platforms.
+
 ## App structure
 
 - `lib/main.dart` contains the three-tab app shell plus Navigate and Saved.
@@ -121,8 +134,9 @@ fvm flutter analyze
 fvm flutter test
 ```
 
-Android unit tests are local and fake-backed, so they need neither network
-access nor a live API key:
+Android unit tests require Java 21, matching CI and the PebbleKit2 dependency.
+They are local and fake-backed, so they need neither network access nor a live
+API key:
 
 ```sh
 cd android

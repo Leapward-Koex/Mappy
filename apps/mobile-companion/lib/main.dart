@@ -1325,6 +1325,8 @@ class _CompanionHomeState extends State<CompanionHome>
           onRequestNotifications: _requestNotificationPermission,
           onOpenNotificationSettings: _openNotificationSettings,
           onRequestBatteryExemption: _requestDisableBatteryOptimization,
+          onOpenBatterySettings:
+              widget.batteryOptimizationRepository.openBatterySettings,
         ),
       ),
     );
@@ -4019,14 +4021,14 @@ class _SavedLocationsScreenState extends State<SavedLocationsScreen> {
                     showSelectedIcon: false,
                     segments: const [
                       ButtonSegment(
-                        value: WatchTravelMode.drive,
-                        icon: Icon(Icons.directions_car_outlined),
-                        label: Text('Drive'),
-                      ),
-                      ButtonSegment(
                         value: WatchTravelMode.walk,
                         icon: Icon(Icons.directions_walk),
                         label: Text('Walk'),
+                      ),
+                      ButtonSegment(
+                        value: WatchTravelMode.drive,
+                        icon: Icon(Icons.directions_car_outlined),
+                        label: Text('Drive'),
                       ),
                       ButtonSegment(
                         value: WatchTravelMode.bike,
