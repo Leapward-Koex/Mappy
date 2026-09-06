@@ -790,8 +790,12 @@ static bool draw_rotated_tiles_framebuffer_sampled(uint8_t *framebuffer_data,
   };
   if (s_menu_mode == MenuNone) {
     GRect cards[2] = {top_chrome_rect(), bottom_chrome_rect()};
-    int count = has_active_route() || s_bottom_text[0] ? 2 : 1;
-    for (int i = 0; i < count; i++) {
+    bool visible[2] = {s_top_text[0] != '\0',
+                       has_active_route() || s_bottom_text[0] != '\0'};
+    for (int i = 0; i < 2; i++) {
+      if (!visible[i]) {
+        continue;
+      }
       // A four-pixel inset excludes the rounded edges, border and shadow.
       // Routes/markers still draw normally, then the opaque cards overwrite
       // these interiors before the frame is presented.
