@@ -302,6 +302,7 @@ void main() {
           onOpenLocationServicesSettings: () async => true,
           onRequestNotifications: () async => const BridgeStatus.unavailable(),
           onOpenNotificationSettings: () async => true,
+          onOpenBatterySettings: () async => true,
           onRequestBatteryExemption: () async =>
               BatteryOptimizationState.disabled,
         ),
@@ -338,6 +339,7 @@ void main() {
           onOpenLocationServicesSettings: () async => true,
           onRequestNotifications: () async => const BridgeStatus.unavailable(),
           onOpenNotificationSettings: () async => true,
+          onOpenBatterySettings: () async => true,
           onRequestBatteryExemption: () async =>
               BatteryOptimizationState.disabled,
         ),
@@ -379,6 +381,7 @@ void main() {
           onOpenLocationServicesSettings: () async => true,
           onRequestNotifications: () async => const BridgeStatus.unavailable(),
           onOpenNotificationSettings: () async => true,
+          onOpenBatterySettings: () async => true,
           onRequestBatteryExemption: () async =>
               BatteryOptimizationState.disabled,
         ),
@@ -415,6 +418,7 @@ void main() {
           onOpenLocationServicesSettings: () async => true,
           onRequestNotifications: () async => const BridgeStatus.unavailable(),
           onOpenNotificationSettings: () async => true,
+          onOpenBatterySettings: () async => true,
           onRequestBatteryExemption: () async =>
               BatteryOptimizationState.disabled,
         ),

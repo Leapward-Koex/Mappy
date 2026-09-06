@@ -1325,6 +1325,8 @@ class _CompanionHomeState extends State<CompanionHome>
           onRequestNotifications: _requestNotificationPermission,
           onOpenNotificationSettings: _openNotificationSettings,
           onRequestBatteryExemption: _requestDisableBatteryOptimization,
+          onOpenBatterySettings:
+              widget.batteryOptimizationRepository.openBatterySettings,
         ),
       ),
     );

@@ -8,12 +8,11 @@ environment:
   flutter: ">=3.47.0"
 
 dependencies:
-  disable_battery_optimization:
-    path: third_party/disable_battery_optimization
   flutter:
     sdk: flutter
   google_maps_flutter: ^2.17.1
   package_info_plus: ^10.2.1
+  permission_handler: ^12.0.3
   url_launcher: ^6.3.2
 
 dev_dependencies:
