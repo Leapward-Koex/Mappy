@@ -1905,6 +1905,10 @@ void split_status_text(const char *source, char *primary, size_t primary_size,
 }
 
 void draw_top_chrome(GContext *ctx) {
+  if (s_top_text[0] == '\0') {
+    return;
+  }
+
   GRect rect = top_chrome_rect();
   draw_card(ctx, rect, chrome_bg(), chrome_border());
 

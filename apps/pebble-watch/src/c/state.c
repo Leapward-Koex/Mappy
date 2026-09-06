@@ -162,7 +162,7 @@ uint16_t s_menu_highlight_started_ms;
 GRect s_menu_highlight_from_rect;
 GRect s_menu_highlight_to_rect;
 bool s_route_clear_armed;
-char s_top_text[48] = "Map";
+char s_top_text[48] = "";
 char s_bottom_text[64] = "Starting";
 char s_instruction[48] = "";
 int16_t s_transient_zoom_scale_q8 = TRANSIENT_SCALE_Q8_ONE;

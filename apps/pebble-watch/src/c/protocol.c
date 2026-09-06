@@ -596,7 +596,7 @@ bool apply_destinations_payload(const uint8_t *data, uint16_t len) {
   free(s_destinations);
   s_destinations = next;
   s_destination_count = next_count;
-  copy_bounded_text(s_top_text, sizeof(s_top_text), "Map");
+  copy_bounded_text(s_top_text, sizeof(s_top_text), "");
   return true;
 }
 
@@ -677,7 +677,7 @@ static void apply_gps_fix(int32_t world_x, int32_t world_y, int32_t zoom,
   } else {
     complete_gps_smoothing();
   }
-  copy_bounded_text(s_top_text, sizeof(s_top_text), "Map");
+  copy_bounded_text(s_top_text, sizeof(s_top_text), "");
   update_nav_progress_from_gps();
   if (!s_tile_requests_interaction_paused) {
     update_state_after_map_change();
