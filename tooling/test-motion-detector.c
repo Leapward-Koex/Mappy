@@ -273,7 +273,7 @@ static void old_advance(OldBearing *state, uint32_t now) {
 }
 
 static void test_tracker_ramps(void) {
-  const int periods[] = {50, 100, 200, 300};
+  const int periods[] = {50, 100, 200, 300, 400};
   const int rates[] = {3000, 9000, 18000, -3000, -9000, -18000};
   for (unsigned p = 0; p < sizeof(periods) / sizeof(periods[0]); p++) {
     for (unsigned r = 0; r < sizeof(rates) / sizeof(rates[0]); r++) {
@@ -323,10 +323,10 @@ static void test_tracker_ramps(void) {
           old_pauses, (long)(old_max - old_min), (long)(max_speed - min_speed));
       CHECK(max_speed - min_speed < old_max - old_min,
             "continuous tracking reduces measured speed ripple versus old filter");
-      if (periods[p] <= 200) {
+      if (periods[p] <= 400) {
         CHECK(longest_pause < 60, "steady turns have no near-stop lasting 60ms");
         CHECK(min_speed >= abs(rates[r]) / 10 && max_speed <= abs(rates[r]) * 2,
-              "steady 5Hz-or-faster speed remains between 0.1x and 2x true motion");
+              "steady streams through 400ms keep speed between 0.1x and 2x true motion");
       }
     }
   }
@@ -368,56 +368,88 @@ static void test_tracker_steps_and_wrap(void) {
 }
 
 static void test_tracker_stop_and_reverse(void) {
-  int worst_overshoot = 0, worst_idle = 0, worst_reverse = 0;
-  const int rates[] = {9000, 18000, -9000, -18000};
-  for (int r = 0; r < 4; r++) for (int phase = 0; phase < 200; phase += 50) {
-    for (int reverse = 0; reverse < 2; reverse++) {
-      BearingTracker state;
-      bearing_tracker_reset(&state);
-      bearing_tracker_observe(&state, 0, 0, true);
-      int stop_at = 1000 + phase;
-      int last_sample = 0, first_opposed = 0, reversed_at = 0, idle_at = 0;
-      int final_heading = rates[r] * stop_at / 1000;
-      int overshoot = 0, display_unwrapped = 0, previous_display = 0;
-      for (int now = 10; now <= stop_at + 1500; now += 10) {
-        int turn_time = now <= stop_at ? now : reverse ? 2 * stop_at - now : stop_at;
-        int truth = normalize_test_bearing(rates[r] * turn_time / 1000);
-        if (now % 200 == 0 && truth != last_sample) {
-          int sample_delta = bearing_smoothing_shortest_delta(last_sample, truth);
-          bool opposing = sample_delta != 0 && (sample_delta > 0) != (rates[r] > 0);
-          if (opposing && !first_opposed) first_opposed = now;
-          bearing_tracker_observe(&state, truth, now, true);
-          if (opposing && first_opposed == now) {
-            CHECK(bearing_tracker_prediction_centi_degrees(&state, now + 30) == 0,
-                  "the first opposing sample immediately disables prediction");
+  const int periods[] = {200, 400};
+  const int rates[] = {3000, 9000, 18000, -3000, -9000, -18000};
+  for (unsigned p = 0; p < sizeof(periods) / sizeof(periods[0]); p++) {
+    int worst_overshoot = 0, worst_idle = 0, worst_reverse = 0;
+    for (unsigned r = 0; r < sizeof(rates) / sizeof(rates[0]); r++) {
+      for (int phase = 0; phase < periods[p]; phase += 50) {
+        // Exercise both sensor silence and explicit repeated stop observations.
+        // Mode 0 delivers the final heading once, mode 1 keeps delivering it,
+        // mode 2 reverses, and mode 3 loses input immediately at the stop.
+        for (int mode = 0; mode < 4; mode++) {
+          BearingTracker state;
+          bearing_tracker_reset(&state);
+          bearing_tracker_observe(&state, 0, 0, true);
+          int stop_at = 1600 + phase;
+          int last_sample = 0, first_opposed = 0, reversed_at = 0, idle_at = 0;
+          int final_heading = rates[r] * stop_at / 1000;
+          int overshoot = 0, display_unwrapped = 0, previous_display = 0;
+          for (int now = 10; now <= stop_at + 1800; now += 10) {
+            int turn_time = now <= stop_at ? now : mode == 2 ? 2 * stop_at - now : stop_at;
+            int truth = normalize_test_bearing(rates[r] * turn_time / 1000);
+            bool deliver = now % periods[p] == 0 &&
+                (mode == 1 || truth != last_sample) && (mode != 3 || now <= stop_at);
+            if (deliver) {
+              int sample_delta = bearing_smoothing_shortest_delta(last_sample, truth);
+              bool opposing = sample_delta != 0 && (sample_delta > 0) != (rates[r] > 0);
+              if (opposing && !first_opposed) first_opposed = now;
+              int previous_direction = state.direction;
+              bearing_tracker_observe(&state, truth, now, true);
+              if (opposing && first_opposed == now) {
+                int lead = bearing_tracker_prediction_centi_degrees(&state, now + 30);
+                if (previous_direction) {
+                  CHECK(lead == 0, "a direct opposing sample immediately disables prediction");
+                } else {
+                  // A preceding below-threshold interval declared rest. A new
+                  // clear turn may predict immediately, but only its new sign.
+                  CHECK(lead == 0 || (lead > 0) == (sample_delta > 0),
+                        "a reversal after a quiet interval never predicts in the abandoned direction");
+                }
+              }
+              last_sample = truth;
+            }
+            int display = bearing_tracker_advance(&state, now);
+            display_unwrapped += bearing_smoothing_shortest_delta(previous_display, display);
+            previous_display = display;
+            if (now < stop_at) continue;
+            int beyond = display_unwrapped - final_heading;
+            if (rates[r] < 0) beyond = -beyond;
+            if (beyond > overshoot) overshoot = beyond;
+            bool opposed_velocity = rates[r] > 0 ? state.velocity_milli_per_second < 0 :
+                state.velocity_milli_per_second > 0;
+            if (first_opposed && !reversed_at && opposed_velocity) reversed_at = now;
+            if (mode != 2 && !idle_at && !bearing_tracker_active(&state, now)) idle_at = now;
           }
-          last_sample = truth;
+          // A partial final movement first arrives up to 400ms after the actual
+          // stop (mode 0), then must age out and settle. With immediate sensor
+          // silence or repeated stationary samples, require the tighter bound.
+          int idle_limit = mode == 0 ? 1500 : 1250;
+          if (overshoot > 2500 || (mode == 2 && (!reversed_at || reversed_at - first_opposed > 150)) ||
+              (mode != 2 && (!idle_at || idle_at - stop_at > idle_limit))) {
+            fprintf(stderr, "stop case sample=%d rate=%d phase=%d mode=%d overshoot=%d idle=%d reverse=%d\n",
+                periods[p], rates[r], phase, mode, overshoot, idle_at ? idle_at - stop_at : -1,
+                reversed_at ? reversed_at - first_opposed : -1);
+          }
+          CHECK(overshoot <= 2500, "stop/reversal total display overshoot stays within 25 degrees");
+          if (overshoot > worst_overshoot) worst_overshoot = overshoot;
+          if (mode == 2) {
+            CHECK(reversed_at && reversed_at - first_opposed <= 150,
+                  "display velocity reverses within 150ms after first opposing sample");
+            if (reversed_at - first_opposed > worst_reverse) worst_reverse = reversed_at - first_opposed;
+          } else {
+            CHECK(idle_at && idle_at - stop_at <= idle_limit,
+                  "stopped turns idle within the observed-stop or immediate-silence deadline");
+            CHECK(bearing_tracker_display_centi_degrees(&state) == last_sample,
+                  "stopped turns settle exactly to the final observed bearing");
+            if (idle_at - stop_at > worst_idle) worst_idle = idle_at - stop_at;
+          }
         }
-        int display = bearing_tracker_advance(&state, now);
-        display_unwrapped += bearing_smoothing_shortest_delta(previous_display, display);
-        previous_display = display;
-        if (now < stop_at) continue;
-        int beyond = display_unwrapped - final_heading;
-        if (rates[r] < 0) beyond = -beyond;
-        if (beyond > overshoot) overshoot = beyond;
-        if (first_opposed && !reversed_at &&
-            (state.velocity_milli_per_second > 0) != (rates[r] > 0)) reversed_at = now;
-        if (!reverse && !idle_at && !bearing_tracker_active(&state, now)) idle_at = now;
-      }
-      CHECK(overshoot <= 1000, "abrupt stop/reversal total display overshoot stays below ten degrees");
-      if (overshoot > worst_overshoot) worst_overshoot = overshoot;
-      if (reverse) {
-        CHECK(reversed_at && reversed_at - first_opposed <= 150,
-              "display velocity reverses within 150ms after first opposing sample");
-        if (reversed_at - first_opposed > worst_reverse) worst_reverse = reversed_at - first_opposed;
-      } else {
-        CHECK(idle_at && idle_at - stop_at <= 1000, "stopped turns idle within one second");
-        if (idle_at - stop_at > worst_idle) worst_idle = idle_at - stop_at;
       }
     }
+    printf("tracker stop/reverse sample=%dms max_overshoot=%dcd idle=%dms reverse_after_sample=%dms\n",
+           periods[p], worst_overshoot, worst_idle, worst_reverse);
   }
-  printf("tracker stop/reverse max_overshoot=%dcd idle=%dms reverse_after_sample=%dms\n",
-         worst_overshoot, worst_idle, worst_reverse);
 }
 
 static void test_tracker_jitter_and_history(void) {
@@ -445,22 +477,18 @@ static void test_tracker_jitter_and_history(void) {
 
   bearing_tracker_reset(&state);
   bearing_tracker_observe(&state, 35000, 0, true);
-  bearing_tracker_observe(&state, 800, 200, true);
-  CHECK(bearing_tracker_prediction_centi_degrees(&state, 250) == 0,
-        "one directional delta is insufficient for prediction");
-  bearing_tracker_observe(&state, 2600, 400, true);
-  CHECK(bearing_tracker_prediction_centi_degrees(&state, 500) == 800,
-        "two consistent turns predict up to eight degrees");
+  bearing_tracker_observe(&state, 35400, 100, true);
+  CHECK(bearing_tracker_prediction_centi_degrees(&state, 150) == 0,
+        "a sub-six-degree directional change needs another agreeing observation");
+  bearing_tracker_observe(&state, 35800, 200, true);
+  CHECK(bearing_tracker_prediction_centi_degrees(&state, 250) > 0,
+        "two agreeing small turns can predict across north");
   uint32_t sample_time = state.sampled_at_ms;
   int32_t sensor_velocity = state.sensor_velocity_milli_per_second;
-  for (uint32_t now = 430; now <= 700; now += 30) bearing_tracker_advance(&state, now);
+  for (uint32_t now = 230; now <= 500; now += 30) bearing_tracker_advance(&state, now);
   CHECK(state.sampled_at_ms == sample_time && state.sensor_velocity_milli_per_second == sensor_velocity,
         "render ticks do not create observations or decay sensor velocity between samples");
-  CHECK(bearing_tracker_prediction_centi_degrees(&state, 700) == 800 &&
-        bearing_tracker_prediction_centi_degrees(&state, 750) == 400 &&
-        bearing_tracker_prediction_centi_degrees(&state, 800) == 0,
-        "late prediction holds to stale deadline then fades over exactly 100ms");
-  bearing_tracker_observe(&state, 2600, 720, true);
+  bearing_tracker_observe(&state, 35800, 720, true);
   CHECK(state.sampled_at_ms == 720 && state.directional_samples == 0,
         "an unchanged real sample refreshes timestamp and clears direction confidence");
   bearing_tracker_observe(&state, -1, 730, true);
@@ -481,6 +509,207 @@ static void test_tracker_jitter_and_history(void) {
   bearing_tracker_observe(&state, 22000, 2400, false);
   CHECK(bearing_tracker_prediction_centi_degrees(&state, 2500) == 0,
         "phone or explicitly disabled prediction never extrapolates");
+}
+
+static void test_tracker_prediction_shape_and_cadence(void) {
+  for (int direction = -1; direction <= 1; direction += 2) {
+    BearingTracker state;
+    bearing_tracker_reset(&state);
+    bearing_tracker_observe(&state, 35000, 0, true);
+    bearing_tracker_observe(&state, normalize_test_bearing(35000 + direction * 600), 200, true);
+    CHECK(direction * bearing_tracker_prediction_centi_degrees(&state, 230) > 0,
+          "a first clear six-degree turn from rest predicts in its measured direction");
+    bearing_tracker_observe(&state, 35000, 400, true);
+    CHECK(bearing_tracker_prediction_centi_degrees(&state, 430) == 0,
+          "a first opposing clear turn cannot immediately enable reversed prediction");
+    bearing_tracker_observe(&state, normalize_test_bearing(35000 - direction * 600), 600, true);
+    CHECK(direction * bearing_tracker_prediction_centi_degrees(&state, 630) < 0,
+          "a second agreeing reversal reading enables prediction in the new direction");
+
+    bearing_tracker_reset(&state);
+    bearing_tracker_observe(&state, 35000, 0, true);
+    bearing_tracker_observe(&state, normalize_test_bearing(35000 + direction * 7200), 400, true);
+    CHECK(state.sample_period_ms == 400, "one ordinary slow callback promptly teaches the 400ms cadence");
+    int previous = 0, previous_step = 2400, first_step = 0, late_step = 0;
+    for (uint32_t age = 20; age <= 340; age += 20) {
+      int lead = direction * bearing_tracker_prediction_centi_degrees(&state, 400 + age);
+      int step = lead - previous;
+      CHECK(lead >= previous && lead <= 2400,
+            "prediction approaches its 24-degree bound monotonically");
+      CHECK(step <= previous_step + 2,
+            "prediction reference velocity tapers instead of accelerating into a hard clamp");
+      if (age == 20) first_step = step;
+      if (age == 300) late_step = step;
+      previous = lead;
+      previous_step = step;
+    }
+    CHECK(first_step > 0 && late_step < first_step / 4,
+          "prediction brakes substantially before reaching its boundary");
+    int held = direction * bearing_tracker_prediction_centi_degrees(&state, 800);
+    CHECK(held >= 2390 && held <= 2400 &&
+          direction * bearing_tracker_prediction_centi_degrees(&state, 900) == held,
+          "fast turns use the 24-degree allowance and hold it through the expected sample gap");
+    int faded = direction * bearing_tracker_prediction_centi_degrees(&state, 950);
+    CHECK(abs(faded * 2 - held) <= 2 && bearing_tracker_prediction_centi_degrees(&state, 1000) == 0,
+          "stale prediction fades smoothly to zero during the following 100ms");
+
+    bearing_tracker_observe(&state, normalize_test_bearing(35000 + direction * 14400), 1200, true);
+    CHECK(state.sample_period_ms == 400, "one missing 400ms reading does not inflate learned cadence");
+    bearing_tracker_observe(&state, normalize_test_bearing(35000 + direction * 18000), 1400, true);
+    CHECK(state.sample_period_ms > 350 && state.sample_period_ms < 400,
+          "a shorter callback only slowly reduces the learned cadence");
+    bearing_tracker_observe(&state, normalize_test_bearing(35000 + direction * 21600), 1850, true);
+    CHECK(state.sample_period_ms == 450, "longer ordinary cadence is learned immediately");
+    bearing_tracker_observe(&state, normalize_test_bearing(35000 + direction * 25200), 2350, true);
+    CHECK(state.sample_period_ms == 500, "500ms cadence is supported within the bounded estimate");
+    bearing_tracker_observe(&state, normalize_test_bearing(35000 + direction * 28800), 3150, true);
+    CHECK(state.sample_period_ms == 500, "isolated 800ms dropout cannot expand the maximum cadence");
+    for (uint32_t now = 3200; now <= 8000; now += 50) {
+      bearing_tracker_observe(&state, normalize_test_bearing(35000 + direction * (int32_t)now), now, true);
+      CHECK(state.sample_period_ms >= 50 && state.sample_period_ms <= 500,
+            "sustained cadence changes retain the 50-to-500ms bounds");
+    }
+    CHECK(state.sample_period_ms <= 60, "sustained fast callbacks eventually teach a shorter cadence");
+  }
+  puts("tracker prediction: first motion, reversal confidence, tapered lead, stale fade and adaptive cadence passed");
+}
+
+static void test_tracker_braking_preserves_momentum(void) {
+  BearingTracker state;
+  bearing_tracker_reset(&state);
+  bearing_tracker_observe(&state, 0, 0, true);
+  for (uint32_t now = 10; now <= 2160; now += 10) {
+    if (now % 400 == 0) bearing_tracker_observe(&state,
+        normalize_test_bearing(36 * (int32_t)now), now, true);
+    bearing_tracker_advance(&state, now);
+  }
+  int32_t position = state.display_milli_degrees;
+  int32_t velocity = state.velocity_milli_per_second;
+  bearing_tracker_observe(&state, state.target_milli_degrees / 10, 2160, true);
+  int32_t limit = abs(state.sensor_velocity_milli_per_second) * 3 / 2;
+  if (limit < 90000) limit = 90000;
+  CHECK(velocity > limit, "braking fixture begins above the newly reduced requested-speed limit");
+  CHECK(state.display_milli_degrees == position && state.velocity_milli_per_second == velocity,
+        "an abrupt slow reading cannot clamp existing position or angular momentum");
+  bearing_tracker_advance(&state, 2170);
+  CHECK(state.velocity_milli_per_second < velocity && state.velocity_milli_per_second > limit,
+        "tracking brakes through a lowered speed request without an instantaneous velocity jump");
+  position = state.display_milli_degrees;
+  velocity = state.velocity_milli_per_second;
+  bearing_tracker_request_acquisition(&state, 2170);
+  CHECK(state.acquiring && state.display_milli_degrees == position &&
+        state.velocity_milli_per_second == velocity && !state.has_sample,
+        "acquisition from an ongoing turn preserves displayed pose and braking momentum");
+}
+
+static void test_tracker_acquisition_after_silence(void) {
+  for (int direction = -1; direction <= 1; direction += 2) {
+    for (int repeated = 0; repeated < 2; repeated++) {
+      BearingTracker state;
+      bearing_tracker_reset(&state);
+      bearing_tracker_observe(&state, 35000, 0, true);
+      if (repeated) {
+        for (uint32_t now = 400; now <= 2000; now += 400) {
+          bearing_tracker_observe(&state, 35000, now, true);
+          bearing_tracker_advance(&state, now);
+        }
+      }
+      uint32_t resumed = repeated ? 3400 : 3000;
+      int target = normalize_test_bearing(35000 + direction * 15000);
+      bearing_tracker_observe(&state, target, resumed, true);
+      CHECK(state.acquiring && state.sensor_velocity_milli_per_second == 0 &&
+            bearing_tracker_display_centi_degrees(&state) == 35000,
+            "a large heading after sensor silence requests acquisition without stale velocity or a pose snap");
+      int t90 = 0;
+      for (uint32_t elapsed = 10; elapsed <= 1000; elapsed += 10) {
+        int shown = bearing_tracker_advance(&state, resumed + elapsed);
+        int progress = direction * bearing_smoothing_shortest_delta(35000, shown);
+        CHECK(progress >= 0 && progress <= 15000,
+              "acquisition after silence follows the shortest arc without overshoot");
+        if (!t90 && progress >= 13500) t90 = elapsed;
+      }
+      CHECK(t90 > 30 && t90 <= 300,
+            "a 150-degree observation after silence reaches ninety percent within 300ms");
+      CHECK(bearing_tracker_display_centi_degrees(&state) == target &&
+            !bearing_tracker_active(&state, resumed + 1000),
+            "acquisition after silence settles exactly within one second");
+    }
+  }
+}
+
+static void test_recorded_compass_sweeps(void) {
+  FILE *fixture = fopen("tooling/fixtures/compass-watch-sweeps.csv", "r");
+  CHECK(fixture != NULL, "recorded compass sweep fixture must be readable");
+  if (!fixture) return;
+  struct { uint32_t at_ms; int32_t native; int status; } samples[256];
+  unsigned count = 0;
+  char line[128];
+  bool valid = fgets(line, sizeof(line), fixture) != NULL;
+  while (valid && fgets(line, sizeof(line), fixture)) {
+    unsigned at_ms;
+    int native, status;
+    char extra;
+    valid = count < sizeof(samples) / sizeof(samples[0]) &&
+        sscanf(line, "\"%u\",\"%d\",\"%d\" %c", &at_ms, &native, &status, &extra) == 3;
+    if (!valid) break;
+    valid = native >= 0 && native < 65536 && status >= -1 && status <= 2 &&
+        (count ? at_ms > samples[count - 1].at_ms : at_ms == 0);
+    if (!valid) break;
+    samples[count].at_ms = at_ms;
+    samples[count].native = native;
+    samples[count].status = status;
+    count++;
+  }
+  valid = valid && !ferror(fixture) && count > 2;
+  fclose(fixture);
+  CHECK(valid, "recorded compass fixture retains valid native angles and ordered callback timestamps");
+  if (!valid) return;
+
+  BearingTracker state;
+  bearing_tracker_reset(&state);
+  unsigned next = 0, trailing_frames = 0, catchup_frames = 0;
+  int previous_display = -1, peak_frame_speed = 0, peak_controller_speed = 0;
+  int peak_catchup_speed = 0, trailing_velocity = 0;
+  uint32_t end = samples[count - 1].at_ms + 2000;
+  for (uint32_t now = 0; now <= end; now += 30) {
+    // Real observations precede a coincident frame; each callback advances the
+    // old private trajectory only to its actual arrival timestamp.
+    while (next < count && samples[next].at_ms <= now) {
+      int clockwise = (65536 - samples[next].native) % 65536;
+      int centi = (int)(((int64_t)clockwise * 36000 + 32768) / 65536) % 36000;
+      bearing_tracker_observe(&state, samples[next].status > 0 ? centi : -1,
+          samples[next].at_ms, samples[next].status == 2);
+      next++;
+    }
+    int display = bearing_tracker_advance(&state, now);
+    CHECK(display >= 0 && display < 36000, "physical sweep replay keeps displayed bearings normalized");
+    int velocity = bearing_tracker_velocity_centi_degrees_per_second(&state);
+    int frame_speed = previous_display >= 0 ?
+        abs(bearing_smoothing_shortest_delta(previous_display, display)) * 1000 / 30 : 0;
+    if (frame_speed > peak_frame_speed) peak_frame_speed = frame_speed;
+    if (abs(velocity) > peak_controller_speed) peak_controller_speed = abs(velocity);
+    // This is the recorded 399ms gap that previously slowed to 2.6deg/s,
+    // immediately before a 129.8-degree reading caused a 720deg/s burst.
+    if (now >= 9570 && now < 9621) {
+      trailing_frames++;
+      trailing_velocity = velocity;
+      CHECK(velocity > 2000, "recorded long sample gap retains over 20deg/s of forward motion at its tail");
+    }
+    if (now >= 9621 && now < 10023) {
+      catchup_frames++;
+      if (frame_speed > peak_catchup_speed) peak_catchup_speed = frame_speed;
+      CHECK(frame_speed < 55000 && abs(velocity) < 55000,
+            "the recorded 130-degree correction stays below a 550deg/s burst");
+    }
+    previous_display = display;
+  }
+  CHECK(next == count && trailing_frames >= 1 && catchup_frames >= 2,
+        "physical replay consumes all observations and covers the reported hesitation and catch-up");
+  CHECK(peak_frame_speed < 60000 && peak_controller_speed < 60000,
+        "all recorded moderate sweeps remain below 600deg/s at frame and controller level");
+  CHECK(!bearing_tracker_active(&state, end), "physical sweep replay idles after the final observation");
+  printf("tracker recorded samples=%u tail=%dcd/s catchup_peak=%dcd/s frame_peak=%dcd/s velocity_peak=%dcd/s\n",
+      count, trailing_velocity, peak_catchup_speed, peak_frame_speed, peak_controller_speed);
 }
 
 static void test_tracker_event_clock(void) {
@@ -532,7 +761,7 @@ static void test_tracker_event_clock(void) {
   bearing_tracker_observe(&event_first, 35900, 20, true);
   CHECK(event_first.sensor_velocity_milli_per_second < 0,
         "timestamp wrap preserves real counter-clockwise sensor velocity");
-  CHECK(event_first.sample_period_ms >= 50 && event_first.sample_period_ms <= 300,
+  CHECK(event_first.sample_period_ms >= 50 && event_first.sample_period_ms <= 500,
         "sample period estimate remains bounded");
   bearing_tracker_snap(&event_first, 12300, 100);
   CHECK(!event_first.has_sample && event_first.velocity_milli_per_second == 0 &&
@@ -573,7 +802,7 @@ static void test_tracker_irregular_and_first_motion(void) {
       int32_t shown = bearing_tracker_advance(&state, now);
       CHECK(shown >= 0 && shown < 36000 && abs(state.velocity_milli_per_second) <= 720000,
             "irregular callback integration stays normalized and speed bounded");
-      CHECK(abs(bearing_tracker_prediction_centi_degrees(&state, now)) <= 800 &&
+      CHECK(abs(bearing_tracker_prediction_centi_degrees(&state, now)) <= 2400 &&
             state.sampled_at_ms == observed_at,
             "irregular rendering bounds prediction without inventing observations");
     }
@@ -592,6 +821,10 @@ int main(void) {
   test_tracker_steps_and_wrap();
   test_tracker_stop_and_reverse();
   test_tracker_jitter_and_history();
+  test_tracker_prediction_shape_and_cadence();
+  test_tracker_braking_preserves_momentum();
+  test_tracker_acquisition_after_silence();
+  test_recorded_compass_sweeps();
   test_tracker_event_clock();
   test_tracker_irregular_and_first_motion();
   if (s_failures != 0) {

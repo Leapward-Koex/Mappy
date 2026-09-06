@@ -21,6 +21,7 @@ typedef struct {
   bool has_sample;
   bool prediction_allowed;
   bool moving;
+  bool acquiring;
 } BearingTracker;
 
 void bearing_tracker_reset(BearingTracker *state);

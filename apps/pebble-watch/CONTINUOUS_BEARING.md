@@ -1,3 +1,5 @@
+This document records the earlier 8-degree controller. See [Adaptive compass rotation](ADAPTIVE_COMPASS.md) for the current implementation and physical-recording results.
+
 # Continuous compass rotation
 
 Comparison branch: `codex/continuous-bearing`, based on the merged

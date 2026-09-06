@@ -212,11 +212,12 @@ bash tooling/pebble-emulator-codex.sh debug-tile 0
 
 ### Face-forward frame-rate benchmark
 
-Face-forward heading animation uses a continuous critically damped follower
-with persistent angular velocity and up to 8° of prediction. It bridges the
-approximately 200 ms gaps between calibrated compass readings on the shared
-30 ms render clock. See [controller design and validation](CONTINUOUS_BEARING.md)
-and the earlier [rendering performance comparison](FACE_FORWARD_PERFORMANCE.md).
+Face-forward heading animation uses continuous position/velocity tracking,
+with prediction that adapts to turn speed and callback cadence up to 24°. The
+controller is tuned against recorded 200/400 ms delivery and uses the shared
+30 ms render clock. See [current design, tradeoffs and validation](ADAPTIVE_COMPASS.md),
+the [earlier controller results](CONTINUOUS_BEARING.md), and the
+[rendering performance comparison](FACE_FORWARD_PERFORMANCE.md).
 
 Run the same compass stream before and after a rendering or smoothing change:
 
