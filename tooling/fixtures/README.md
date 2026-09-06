@@ -8,6 +8,14 @@ The original complete export was validated against all 71 raw developer-log rows
 before this fixture was extracted. All readings report calibrated (status 2).
 The 70 arrival intervals have a 398 ms median and range from 195 to 805 ms.
 
+**Subsequent angle-distortion report.** After this capture, the user confirmed
+approximately half-angle movement in the unsmoothed Compass Lab app (Pebble Time
+2, firmware 4.36.2), alongside half-angle movement and sudden jumps in Mappy. Retain these native values unchanged as a
+regression input and callback-timing reference. Angle-derived replay results
+measure response to the reported headings, not accurate physical wrist motion;
+do not infer an optimal prediction angle from this recording. A new capture
+must first verify known physical 90/180-degree turns.
+
 Native values have 65,536 units per counterclockwise turn. The benchmark uses
 Mappy's exact clockwise centidegree conversion, including rounding, then calls
 the actual C controller through its public interface.

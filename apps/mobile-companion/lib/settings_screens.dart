@@ -516,6 +516,7 @@ class SettingsHubScreen extends StatelessWidget {
         _SettingsLinkTile(
           icon: Icons.help_outline,
           title: 'Help & diagnostics',
+          subtitle: 'Compass calibration and troubleshooting',
           onTap: onOpenDiagnostics,
         ),
         _SettingsLinkTile(
@@ -1333,6 +1334,52 @@ class DiagnosticsScreen extends StatelessWidget {
       body: ListView(
         padding: const EdgeInsets.fromLTRB(16, 8, 16, 32),
         children: [
+          const ExpansionTile(
+            key: PageStorageKey('compass-calibration-help'),
+            leading: Icon(Icons.explore_outlined),
+            title: Text('Compass points the wrong way'),
+            subtitle: Text('Fix jumps or rotation that only moves halfway'),
+            childrenPadding: EdgeInsets.fromLTRB(16, 0, 16, 20),
+            expandedCrossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                'An inaccurate compass calibration can make Face forward '
+                'rotate only halfway, jump suddenly, or point in the wrong '
+                'direction. Recalibrating the watch can fix this.',
+              ),
+              SizedBox(height: 16),
+              Text(
+                '1. Open Mappy on your watch in Face forward mode, or open a '
+                'compass app. Keep it open while you recalibrate.',
+              ),
+              SizedBox(height: 12),
+              Text(
+                '2. Briefly attach the watch charger until charging registers, '
+                'then remove it. This clears the saved compass calibration.',
+              ),
+              SizedBox(height: 12),
+              Text(
+                '3. Move away from the charger, phone, magnets, and metal '
+                'furniture. Gently rotate and tilt the watch in several '
+                'directions to let it recalibrate. If your compass app shows '
+                'a calibration status, wait for Calibrated.',
+              ),
+              SizedBox(height: 12),
+              Text(
+                '4. Hold the watch face level, turn it roughly 90 degrees, '
+                'and hold still for two seconds. The map should rotate by '
+                'about the same amount; a compass reading should change by '
+                'about 90 degrees. Repeat in the other direction.',
+              ),
+              SizedBox(height: 16),
+              Text(
+                'If the problem continues, try another location and check '
+                'for watch firmware updates. You can use North up while '
+                'troubleshooting: Settings > Watch map > Orientation.',
+              ),
+            ],
+          ),
+          const SizedBox(height: 12),
           FilledButton.icon(
             key: const ValueKey('copy-diagnostics'),
             onPressed: onExportDiagnostics,

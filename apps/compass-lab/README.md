@@ -96,6 +96,31 @@ markers plus a note about which turns visibly jumped are more useful.
 Keep the recorder running during each turn and its following hold. Pause between
 sets if needed. No special walking or route setup is required.
 
+## Check physical angles before tuning Mappy
+
+The first watch recording measured callback timing, but a subsequent check on
+Pebble Time 2 firmware 4.36.2 showed approximately half-angle movement in this
+unsmoothed app. A calibrated status does not independently prove accurate
+bearings. Do not rescale the export or assume its reported speed equals wrist
+speed; preserve the native values for diagnosis.
+
+For a fresh calibration, leave Compass Lab open, briefly attach the charger
+until charging registers, then remove it. Move away from the charger, phone,
+magnets and metal furniture. Rotate and tilt the watch in several directions
+until it reports Calibrated. Pebble documents charging as clearing saved
+calibration; the same reset is present in the firmware 4.36.2 compass service.
+
+Then hold the watch face level and rotate in known 90-degree increments through
+a complete turn, pausing for two seconds at each position. A paper right-angle
+reference helps check relative angles without relying on another magnetometer.
+Use UP to mark each held position, and record both clockwise and counterclockwise
+turns. Note any compressed angular range, reversal, or jump. Only after this
+check passes should another set of moderate/quick wrist sweeps be used to tune
+prediction. Keep the existing controller while diagnosing incorrect raw input.
+
+References: [Pebble compass calibration guide](https://developer.repebble.com/guides/events-and-services/compass/),
+[firmware 4.36.2 reset and heading calculation](https://github.com/coredevices/PebbleOS/blob/v4.36.2/src/fw/services/ecompass/service.c#L228).
+
 ## Data and timing
 
 Every real CompassService callback is retained while recording, including
@@ -160,5 +185,5 @@ recorder host tests (including undefined-behavior sanitizer), six CSV/export
 tests, the emulator UI/control/export flow, and live desktop collection all
 passed. Re-exporting the retained buffer produced an identical CSV. Production
 uses approximately 44 KiB of linked RAM, well below the 65,535-byte executable
-limit; the sample buffer accounts for 40 KiB of that. Physical sensor cadence
-has not been measured by this app yet.
+limit; the sample buffer accounts for 40 KiB of that. The first physical capture retained 71 calibrated callbacks over 23.656 seconds,
+with a 398 ms median interval; its angle-accuracy limitation is described above.
