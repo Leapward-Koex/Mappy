@@ -21,6 +21,10 @@ typedef struct {
   uint32_t route_segments_clipped;
   uint32_t map_draw_time_ms;
   uint32_t max_map_draw_time_ms;
+#ifdef MAPPY_FIXTURE_FRAME_PERF
+  uint32_t first_draw_complete_ms;
+  uint32_t last_draw_complete_ms;
+#endif
   uint32_t rotated_destination_pixels;
   uint32_t rotated_sample_attempts;
   uint32_t rotated_packed_hits;
@@ -37,6 +41,11 @@ typedef struct {
 
 static FixturePerfCounters s_fixture_perf;
 static bool s_fixture_perf_active;
+#ifdef MAPPY_FIXTURE_FRAME_PERF
+static uint32_t s_fixture_perf_started_ms;
+static AppTimer *s_fixture_compass_replay_timer;
+static uint8_t s_fixture_compass_replay_remaining;
+#endif
 static uint16_t s_fixture_perf_draw_started_ms;
 static bool s_fixture_pan_active;
 static bool s_fixture_pan_input_pending;
@@ -75,10 +84,54 @@ static int32_t fixture_elapsed_ms(time_t start_seconds, uint16_t start_ms,
 
 void fixture_perf_begin(void) {
   memset(&s_fixture_perf, 0, sizeof(s_fixture_perf));
+#ifdef MAPPY_FIXTURE_FRAME_PERF
+  time_t now_s;
+  uint16_t now_ms;
+  time_ms(&now_s, &now_ms);
+  s_fixture_perf_started_ms = (uint32_t)now_s * 1000 + now_ms;
+#endif
   s_fixture_pan_input_pending = false;
   s_fixture_inertia_measurement = false;
   s_fixture_perf_active = true;
 }
+
+#ifdef MAPPY_FIXTURE_FRAME_PERF
+static void fixture_compass_replay_callback(void *context) {
+  (void)context;
+  s_fixture_compass_replay_timer = NULL;
+  if (--s_fixture_compass_replay_remaining > 0) {
+    // Calibrated firmware normally delivers compass observations at 5 Hz.
+    // This timer is independent of the 30 ms visual scheduler.
+    s_fixture_compass_replay_timer = app_timer_register(
+        200, fixture_compass_replay_callback, NULL);
+    if (!s_fixture_compass_replay_timer) {
+      s_fixture_perf.errors++;
+    }
+  }
+  time_t now_s;
+  uint16_t now_ms;
+  time_ms(&now_s, &now_ms);
+  update_debug_compass_centi_degrees(
+      normalize_degrees(s_compass_heading_degrees + 18) * 100,
+      (uint32_t)now_s * 1000 + now_ms);
+  fixture_perf_maybe_emit();
+}
+
+void fixture_perf_start_compass_replay(void) {
+  if (s_fixture_compass_replay_timer) {
+    app_timer_cancel(s_fixture_compass_replay_timer);
+  }
+  fixture_perf_begin();
+  s_debug_compass_override_active = true;
+  s_fixture_compass_replay_remaining = 20;
+  s_fixture_compass_replay_timer = app_timer_register(
+      200, fixture_compass_replay_callback, NULL);
+  if (!s_fixture_compass_replay_timer) {
+    s_fixture_perf.errors++;
+    fixture_perf_maybe_emit();
+  }
+}
+#endif
 
 void fixture_perf_bearing_immediate_step(void) {
   if (s_fixture_perf_active) {
@@ -152,7 +205,21 @@ void fixture_perf_map_draw_complete(void) {
   if (!s_fixture_perf_active) {
     return;
   }
+#ifdef MAPPY_FIXTURE_FRAME_PERF
+  time_t now_s;
+  uint16_t now_ms;
+  time_ms(&now_s, &now_ms);
+  // Unsigned subtraction remains valid across the 32-bit clock wrap. Each
+  // fixture lasts seconds, far less than the clock's roughly 49-day period.
+  uint32_t completion_ms = (uint32_t)now_s * 1000 + now_ms -
+      s_fixture_perf_started_ms;
+  if (s_fixture_perf.map_draws == 1) {
+    s_fixture_perf.first_draw_complete_ms = completion_ms;
+  }
+  s_fixture_perf.last_draw_complete_ms = completion_ms;
+#else
   uint16_t now_ms = time_ms(NULL, NULL);
+#endif
   int32_t elapsed = (int32_t)now_ms - s_fixture_perf_draw_started_ms;
   if (elapsed < 0) {
     elapsed += 1000;
@@ -487,11 +554,34 @@ void fixture_perf_pan_under_load(int action) {
 }
 
 void fixture_perf_maybe_emit(void) {
+#ifdef MAPPY_FIXTURE_FRAME_PERF
+  if (s_fixture_compass_replay_timer) {
+    return;
+  }
+#endif
   if (!s_fixture_perf_active || s_fixture_pan_active ||
       s_visual_animation_timer ||
       visual_animations_active()) {
     return;
   }
+#ifdef MAPPY_FIXTURE_FRAME_PERF
+  // Both hooks run once per map update, and emission follows completion.
+  // Actual cadence is (n - 1) * 1000 / span, including scheduler/event delays;
+  // 1000 / average draw CPU time would overstate FPS. No frames means zero.
+  APP_LOG(APP_LOG_LEVEL_INFO,
+          "MAPPY_FPERF n=%lu first=%lu span=%lu",
+          (unsigned long)s_fixture_perf.map_draws,
+          (unsigned long)s_fixture_perf.first_draw_complete_ms,
+          (unsigned long)(s_fixture_perf.last_draw_complete_ms -
+                          s_fixture_perf.first_draw_complete_ms));
+  // Pebble truncates long log messages; keep cadence draw timing separate
+  // from the detailed default-fixture counter report.
+  APP_LOG(APP_LOG_LEVEL_INFO, "MAPPY_PERF e=%lu d=%lu q=%lu/%lu",
+          (unsigned long)s_fixture_perf.errors,
+          (unsigned long)s_fixture_perf.map_draws,
+          (unsigned long)s_fixture_perf.map_draw_time_ms,
+          (unsigned long)s_fixture_perf.max_map_draw_time_ms);
+#else
   APP_LOG(APP_LOG_LEVEL_INFO,
           "MAPPY_RPERF p=%lu s=%lu k=%lu h=%lu m=%lu r=%lu a=%lu c=%lu d=%lu z=%lu e=%lu",
           (unsigned long)s_fixture_perf.rotated_destination_pixels,
@@ -535,6 +625,7 @@ void fixture_perf_maybe_emit(void) {
           (unsigned long)s_fixture_perf.map_draw_time_ms,
           (unsigned long)s_fixture_perf.max_map_draw_time_ms,
           (unsigned long)s_fixture_perf.route_segments_submitted);
+#endif
   s_fixture_inertia_measurement = false;
   s_fixture_perf_active = false;
 }

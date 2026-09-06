@@ -193,10 +193,12 @@ bool maybe_request_route_window(void) {
 
   s_route_window_request_inflight = true;
   s_route_window_request_pending = false;
+#ifndef MAPPY_WATCH_PHONE_MODE_FIXTURE
   APP_LOG(APP_LOG_LEVEL_DEBUG,
           "Route window request gen=%ld center=%ld,%ld z=%d size=%ldx%ld",
           (long)s_route_generation, (long)center_x, (long)center_y,
           (int)s_viewport_zoom, (long)window_w, (long)window_h);
+#endif
   return true;
 }
 
@@ -865,11 +867,13 @@ void apply_route_window_points(DictionaryIterator *iter) {
     s_route_detail_points[i].world_y = read_i32_le(data, offset + 4);
   }
   s_route_detail_point_count = point_count;
+#ifndef MAPPY_WATCH_PHONE_MODE_FIXTURE
   APP_LOG(APP_LOG_LEVEL_DEBUG,
           "Route window points gen=%ld count=%d center=%ld,%ld size=%ldx%ld",
           (long)generation, (int)point_count, (long)s_route_detail_center_x,
           (long)s_route_detail_center_y, (long)s_route_detail_width,
           (long)s_route_detail_height);
+#endif
   update_state_after_map_change();
 }
 

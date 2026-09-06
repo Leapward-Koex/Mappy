@@ -102,12 +102,10 @@ int8_t s_gps_zoom = ROUTE_WORLD_ZOOM;
 int32_t s_heading_degrees = -1;
 int32_t s_compass_heading_degrees = -1;
 int32_t s_compass_magnetic_degrees = -1;
+int32_t s_compass_heading_centi_degrees = -1;
+int32_t s_compass_magnetic_centi_degrees = -1;
 int32_t s_map_bearing_display_centi_degrees = -1;
 int32_t s_map_bearing_target_centi_degrees = -1;
-time_t s_map_bearing_advanced_s;
-uint16_t s_map_bearing_advanced_ms;
-bool s_map_bearing_clock_valid;
-uint32_t s_map_bearing_elapsed_ms;
 #ifdef MAPPY_WATCH_PHONE_MODE_FIXTURE
 bool s_debug_compass_override_active;
 #endif

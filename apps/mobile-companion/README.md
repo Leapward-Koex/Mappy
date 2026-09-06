@@ -46,8 +46,8 @@ the key; hot reload does not update the native manifest. If using a process
 environment variable, restart VS Code after changing the machine environment.
 
 Every Android variant embeds this SDK key in the manifest; release packaging
-fails if it is missing. GitHub Actions reads the repository Actions variable
-`MAPPY_ANDROID_SDK_API_KEY` via `vars`, for both debug and release builds.
+fails if it is missing. GitHub Actions reads the repository Actions secret
+`MAPPY_ANDROID_SDK_API_KEY` via `secrets`, for both debug and release builds.
 Restrict the key to Maps SDK for Android and `com.leapwardkoex.mappy` with the
 appropriate debug/release signing SHA-1s (use the Play app signing certificate
 for Play-distributed builds). This SDK key does not replace the user-supplied

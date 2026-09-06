@@ -210,16 +210,52 @@ bash tooling/pebble-emulator-codex.sh debug-facing 45
 bash tooling/pebble-emulator-codex.sh debug-tile 0
 ```
 
+### Face-forward frame-rate benchmark
+
+Face-forward heading animation uses continuous position/velocity tracking,
+with prediction that adapts to turn speed and callback cadence up to 24°. The
+controller is tuned against recorded 200/400 ms delivery and uses the shared
+30 ms render clock. See [current design, tradeoffs and validation](ADAPTIVE_COMPASS.md),
+the [earlier controller results](CONTINUOUS_BEARING.md), and the
+[rendering performance comparison](FACE_FORWARD_PERFORMANCE.md).
+
+Run the same compass stream before and after a rendering or smoothing change:
+
+```powershell
+.\tooling\pebble-wsl.ps1 test-face-forward-cadence
+```
+
+From WSL, use `bash tooling/pebble-emulator-codex.sh test-face-forward-cadence`.
+The command builds a fixture with 128 route points and tile animation disabled,
+warms the four cardinal directions, then replays twenty 18° compass updates at
+200 ms intervals using a timer independent of rendering. It measures through
+the final completed draw after the controller settles.
+The command owns and stops its emulator, including on failure.
+
+`MAPPY_FPERF` reports completed frames (`n`), milliseconds to the first completed
+frame (`first`), and the first-to-last completion interval (`span`). Actual draw
+cadence is `(n - 1) * 1000 / span` FPS; total time to the final frame is
+`first + span`. The helper reports draw CPU time separately and saves
+`codex-emulator/face-forward-cadence.log` and `codex-emulator/facing-cadence.png`.
+Keep a copy of each run's log when comparing the old and new implementation.
+There is no minimum FPS gate, so the old approximately 10 FPS path can be
+measured with the same input; errors, missing frames, and draws above 50 ms fail.
+
+The command enables `MAPPY_FIXTURE_FRAME_PERF=1`, which adds fixture-only timing
+and replay code. Normal fixture builds and production phone builds have no added cadence
+instrumentation overhead. Emulator cadence measures completed app draws; it
+does not measure a physical watch display's refresh rate.
+
 ### Motion-assisted face-forward reacquisition
 
 During an active face-forward Walk route, the production watch app samples the
 accelerometer at 25 Hz in batches of five. A fixed-memory classifier recognizes
-walking followed by a stable wrist raise and temporarily accelerates bearing
+walking followed by a stable wrist raise and requests responsive bearing
 animation. It unsubscribes during menus, manual browse, non-Walk routes,
 north-up mode, and after route completion. Raw motion samples never leave the
 watch.
 
-The classifier and bearing profiles have a host test that does not require an
+The classifier and continuous bearing controller have a host test that does not require an
 emulator:
 
 ```sh
@@ -235,8 +271,9 @@ bash tooling/pebble-emulator-codex.sh debug-motion walking-to-look
 ```
 
 `test-motion-reacquire` automates the fixture route, negative stationary-raise
-case, walking-to-look transition, compass target change, 2–8 animation-tick
-assertion, log capture, and final screenshot. It exits without installing,
+case, walking-to-look transition, compass target change, controller settlement,
+log capture, and final screenshot. Acquisition timing and rotation continuity
+are measured by the deterministic host tests. It exits without installing,
 wiping, or stopping anything when an emulator session is already running.
 
 For consumed-route overlay debugging, start a fixture route from the watch, then

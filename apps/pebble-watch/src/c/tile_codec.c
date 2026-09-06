@@ -286,12 +286,21 @@ static bool tile_rle_decode_indexed_span(const uint8_t *encoded,
     if (run_length > pixel_count - pixel) {
       run_length = pixel_count - pixel;
     }
-    while (run_length-- > 0) {
-      if (pixel & 1) {
-        packed[pixel / 2] |= palette_index << 4;
-      } else {
-        packed[pixel / 2] = palette_index;
-      }
+    // Finish a preceding low nibble, then fill two pixels per byte. An odd
+    // final pixel writes only its low nibble, keeping the unused high nibble 0.
+    if (pixel & 1) {
+      packed[pixel / 2] |= palette_index << 4;
+      pixel++;
+      run_length--;
+    }
+    uint8_t packed_pair = palette_index | (palette_index << 4);
+    while (run_length >= 2) {
+      packed[pixel / 2] = packed_pair;
+      pixel += 2;
+      run_length -= 2;
+    }
+    if (run_length > 0) {
+      packed[pixel / 2] = palette_index;
       pixel++;
     }
   }

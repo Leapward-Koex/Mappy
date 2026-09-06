@@ -148,14 +148,12 @@
 #define VISUAL_ANIMATION_TICK_MS 30
 #define TILE_ANIMATION_TICK_MS 40
 #define TILE_ANIMATION_MAX_ACTIVE 2
-#define BEARING_SMOOTHING_MAX_CATCHUP_TICKS 4
 #define TILE_ANIMATION_ZOOM_START_Q8 236
 #define TILE_REQUEST_STALE_MS 8000
 #define TILE_REQUEST_WATCHDOG_MS 1000
 #define TILE_REQUEST_MAX_FLIGHTS 2
 #define TILE_REQUEST_TOUCH_RESUME_MS 100
 #define TILE_REDRAW_COALESCE_MS 60
-#define COMPASS_HEADING_FILTER_DEGREES 2
 #define GPS_SMOOTHING_NONE 0
 #define GPS_SMOOTHING_LOCATION 1
 #define GPS_SMOOTHING_MAP 2
@@ -428,12 +426,10 @@ extern int8_t s_gps_zoom;
 extern int32_t s_heading_degrees;
 extern int32_t s_compass_heading_degrees;
 extern int32_t s_compass_magnetic_degrees;
+extern int32_t s_compass_heading_centi_degrees;
+extern int32_t s_compass_magnetic_centi_degrees;
 extern int32_t s_map_bearing_display_centi_degrees;
 extern int32_t s_map_bearing_target_centi_degrees;
-extern time_t s_map_bearing_advanced_s;
-extern uint16_t s_map_bearing_advanced_ms;
-extern bool s_map_bearing_clock_valid;
-extern uint32_t s_map_bearing_elapsed_ms;
 #ifdef MAPPY_WATCH_PHONE_MODE_FIXTURE
 extern bool s_debug_compass_override_active;
 #endif
@@ -510,6 +506,7 @@ extern const GColor s_day_palette[16];
 
 #if defined(PBL_COMPASS)
 int32_t compass_heading_to_degrees(CompassHeading heading);
+int32_t compass_heading_to_centi_degrees(CompassHeading heading);
 void update_compass_heading(CompassHeadingData heading_data);
 void compass_heading_handler(CompassHeadingData heading_data);
 #endif
@@ -544,6 +541,14 @@ int32_t display_gps_world_y(void);
 int32_t active_map_bearing_centi_degrees(void);
 int32_t active_map_bearing_degrees(void);
 int32_t active_map_bearing_angle(void);
+uint32_t map_bearing_timestamp_ms(void);
+void observe_map_bearing_centi_degrees(int32_t heading_centi,
+                                      uint32_t observed_at_ms,
+                                      bool prediction_allowed);
+void update_debug_compass_centi_degrees(int32_t heading_centi,
+                                        uint32_t observed_at_ms);
+void request_map_bearing_acquisition(void);
+void reset_map_bearing_display_to_north(void);
 void cancel_map_bearing_smoothing(void);
 bool sync_map_bearing_smoothing(bool animate);
 bool map_bearing_smoothing_active(void);
@@ -551,7 +556,6 @@ bool advance_map_bearing_smoothing(void);
 bool map_bearing_rendering_visible(void);
 void pause_map_bearing_rendering(void);
 bool resume_map_bearing_rendering(void);
-bool bearing_reacquire_active(void);
 void begin_bearing_reacquire(BearingReacquireReason reason);
 void arm_route_start_bearing_reacquire(void);
 void maybe_begin_pending_route_start_reacquire(void);
@@ -820,6 +824,9 @@ void settle_pan_motion(void);
 void cancel_pan_motion_for_teardown(void);
 #ifdef MAPPY_WATCH_PHONE_MODE_FIXTURE
 void fixture_perf_begin(void);
+#ifdef MAPPY_FIXTURE_FRAME_PERF
+void fixture_perf_start_compass_replay(void);
+#endif
 void fixture_perf_bearing_immediate_step(void);
 void fixture_perf_scheduler_tick(bool bearing_active, bool gps_active,
                                  bool tile_active, bool menu_active,

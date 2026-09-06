@@ -84,6 +84,9 @@ static int tile_cache_select_pressure_candidate(
 // TileFlight records in tile_requests.c, not by cache entries.
 
 void invalidate_tiles_with_reason(TileInvalidationReason reason) {
+#ifdef MAPPY_WATCH_PHONE_MODE_FIXTURE
+  (void)reason;
+#endif
   complete_tile_animations();
   clear_zoom_fallback();
   cancel_all_tile_requests();
@@ -92,18 +95,24 @@ void invalidate_tiles_with_reason(TileInvalidationReason reason) {
   if (!s_tiles) {
     s_request_count = 0;
     s_request_index = 0;
+#ifndef MAPPY_WATCH_PHONE_MODE_FIXTURE
     APP_LOG(APP_LOG_LEVEL_INFO, "Tile invalidate reason=%s cache=0/%d",
             tile_invalidation_reason_label(reason), TILE_CACHE_SIZE);
+#endif
     return;
   }
+#ifndef MAPPY_WATCH_PHONE_MODE_FIXTURE
   int valid_count = 0;
   int pending_count = any_pending_tile_requests() ? 1 : 0;
+#endif
   int capacity = active_tile_cache_size();
   tile_storage_arena_reset(&s_tile_storage_arena);
   for (int i = 0; i < capacity; i++) {
+#ifndef MAPPY_WATCH_PHONE_MODE_FIXTURE
     if (s_tiles[i].valid) {
       valid_count++;
     }
+#endif
     s_tiles[i].valid = false;
     s_tiles[i].storage_suppressed = false;
     tile_storage_ref_reset(&s_tiles[i].storage);
@@ -112,10 +121,12 @@ void invalidate_tiles_with_reason(TileInvalidationReason reason) {
   }
   s_request_count = 0;
   s_request_index = 0;
+#ifndef MAPPY_WATCH_PHONE_MODE_FIXTURE
   APP_LOG(APP_LOG_LEVEL_INFO,
           "Tile invalidate reason=%s valid=%d pending=%d cache=%d/%d size=%dx%d",
           tile_invalidation_reason_label(reason), valid_count, pending_count,
           capacity, TILE_CACHE_SIZE, s_tile_width, s_tile_height);
+#endif
 }
 
 bool tile_matches(const TileCacheEntry *entry, int32_t world_x, int32_t world_y, int8_t zoom) {

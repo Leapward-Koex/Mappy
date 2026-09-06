@@ -1,0 +1,17 @@
+{
+  "name": "compass-lab",
+  "author": "Mappy",
+  "version": "0.1.0",
+  "private": true,
+  "keywords": ["pebble-app"],
+  "dependencies": {},
+  "pebble": {
+    "displayName": "Compass Lab",
+    "uuid": "8a74f020-498f-46c8-992c-14925ca16d88",
+    "sdkVersion": "3",
+    "targetPlatforms": ["emery"],
+    "watchapp": {"watchface": false},
+    "messageKeys": {},
+    "resources": {"media": []}
+  }
+}

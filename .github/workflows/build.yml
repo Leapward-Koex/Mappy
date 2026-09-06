@@ -18,7 +18,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     env:
-      MAPPY_ANDROID_SDK_API_KEY: ${{ vars.MAPPY_ANDROID_SDK_API_KEY }}
+      MAPPY_ANDROID_SDK_API_KEY: ${{ secrets.MAPPY_ANDROID_SDK_API_KEY }}
     defaults:
       run:
         working-directory: apps/mobile-companion

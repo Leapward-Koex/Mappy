@@ -140,9 +140,16 @@ def build(ctx):
     if phone_mode in (PHONE_MODE_FIXTURE, PHONE_MODE_REAL_FIXTURE):
         write_fixture_options(ctx)
     defines = phone_mode_defines(phone_mode)
+    # Optional completed-frame cadence timing has no production/default-fixture
+    # cost; the fixture binary is close to the Pebble process size limit.
+    if (phone_mode in (PHONE_MODE_FIXTURE, PHONE_MODE_REAL_FIXTURE) and
+            fixture_bool_env('MAPPY_FIXTURE_FRAME_PERF')):
+        defines.append('MAPPY_FIXTURE_FRAME_PERF=1')
     hardware_perf = os.environ.get('MAPPY_WATCH_HARDWARE_PERF', '').strip().lower()
     if phone_mode == PHONE_MODE_PHONE and hardware_perf in ('1', 'true', 'yes', 'on'):
         defines.append('MAPPY_WATCH_HARDWARE_PERF=1')
+    if fixture_bool_env('MAPPY_BEARING_TRACE'):
+        defines.append('MAPPY_BEARING_TRACE=1')
     build_worker = os.path.exists('worker_src')
     binaries = []
 
