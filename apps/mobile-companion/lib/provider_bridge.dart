@@ -18,7 +18,7 @@ enum ProviderValidationState {
   unknown,
 }
 
-enum TravelMode { drive, walk, bike }
+enum TravelMode { walk, drive, bike }
 
 enum PlaceSearchRole { origin, destination }
 

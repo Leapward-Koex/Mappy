@@ -553,7 +553,7 @@ void menu_item_label(int index, char *buffer, size_t buffer_size) {
       }
       break;
     case MenuTravelMode: {
-      const int mode_for_index[3] = {2, 0, 1};
+      const int mode_for_index[3] = {TRAVEL_MODE_WALK, TRAVEL_MODE_DRIVE, TRAVEL_MODE_BIKE};
       int mode = mode_for_index[index < 0 || index > 2 ? 0 : index];
       snprintf(buffer, buffer_size, "%s%s", mode == s_travel_mode ? "* " : "", travel_mode_label(mode));
       break;
@@ -630,7 +630,7 @@ void select_menu_item(void) {
       }
       break;
     case MenuTravelMode: {
-      const int mode_for_index[3] = {2, 0, 1};
+      const int mode_for_index[3] = {TRAVEL_MODE_WALK, TRAVEL_MODE_DRIVE, TRAVEL_MODE_BIKE};
       int next_mode = mode_for_index[s_menu_selection < 0 || s_menu_selection > 2 ? 0 : s_menu_selection];
       bool should_refresh_active_route =
           has_active_route() && next_mode != s_active_route_mode;

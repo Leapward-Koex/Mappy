@@ -228,7 +228,7 @@ Saved-location menu:
 
 Travel mode menu:
 
-- Values: drive, walk, bike.
+- Display order: Walk, Drive, Bike. Walk is always first.
 - The selected value is persisted and sent with route requests.
 - Walk/bike warning must be visible before or during active route display.
 

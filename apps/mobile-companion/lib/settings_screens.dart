@@ -1086,8 +1086,8 @@ class _NavigationPreferencesScreenState
           title: 'Default travel mode',
           value: _settings.travelMode,
           values: const [
-            WatchTravelMode.drive,
             WatchTravelMode.walk,
+            WatchTravelMode.drive,
             WatchTravelMode.bike,
           ],
           labelFor: (value) => value.label,
