@@ -84,6 +84,28 @@ class CredentialLoadingTest(unittest.TestCase):
 
 
 class RepositoryWorkflowTest(unittest.TestCase):
+    def test_touch_input_host_contract(self) -> None:
+        compiler = shutil.which(os.environ.get("CC", "cc"))
+        self.assertIsNotNone(compiler, "C compiler is required for host tests")
+        watch_source = ROOT / "apps/pebble-watch/src/c"
+        source = (watch_source / "input.c").read_text(encoding="utf-8")
+        # Exercise the unmodified production recenter/touch implementation;
+        # stop before the unrelated button/menu section to keep stubs scoped.
+        touch_source = source[:source.index("\nbool has_active_route(void)")]
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output = Path(temp_dir) / "mappy-touch-input-tests"
+            (Path(temp_dir) / "touch-input-under-test.h").write_text(
+                touch_source, encoding="utf-8"
+            )
+            subprocess.run(
+                [compiler, "-std=c99", "-Wall", "-Wextra", "-Werror",
+                 "-Wno-unused-parameter", "-I", str(watch_source),
+                 "-I", temp_dir, str(ROOT / "tooling/test-touch-input.c"),
+                 str(watch_source / "pan_inertia.c"), "-o", str(output)],
+                check=True,
+            )
+            subprocess.run([str(output)], check=True)
+
     def test_bearing_integration_host_contract(self) -> None:
         compiler = shutil.which(os.environ.get("CC", "cc"))
         self.assertIsNotNone(compiler, "C compiler is required for host tests")
