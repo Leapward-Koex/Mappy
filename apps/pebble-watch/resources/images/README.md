@@ -3,27 +3,37 @@
 `menu_icon.png` is the 25 x 25 Pebble launcher resource registered as `MENU_ICON`
 with `menuIcon: true` in `../../package.json`.
 
-`menu_icon.svg` is its editable, pixel-aligned source. It adapts the winding route
-and two oval markers from Android's notification icon at
+`menu_icon.svg` retains the original Android notification icon's curved route
+and two oval markers, without a background tile or view cone. The source is
 `../../../mobile-companion/android/app/src/main/res/drawable/ic_stat_mappy.xml`.
-The route is two pixels thick through the tight bend, the markers have balanced
-pixel steps, and a two-pixel margin keeps the silhouette clear of the menu edge.
+The route is black and 1.8 pixels wide at native size. Its Bezier curve and the
+marker ellipses are rasterized at 16x resolution, then area-downsampled and
+quantized to Pebble's four supported alpha levels without dithering.
 
-The PNG uses only opaque black and fully transparent pixels, with no smoothing
-or dithering. Black keeps the glyph visible on Emery's white and blue launcher
-rows; transparency avoids a square behind it. Emery does not invert app icons.
-See the [Pebble launcher icon guidance](https://developer.repebble.com/guides/app-resources/images/#menu-icon-in-the-launcher).
+## Smooth grayscale edges
 
-After editing the SVG, regenerate with ImageMagick 7 from `apps/pebble-watch`:
+All RGB values are black. Pixel opacity is exactly 0, 85, 170, or 255, so the
+edges appear light gray and dark gray against a white launcher row, while the
+interiors remain solid black. Partial opacity also blends the edges into the
+blue selection row instead of leaving a white fringe. Only the boundary pixels
+are shaded; this is coverage antialiasing, not a blur applied to the icon.
+
+The four opacity levels match the SDK's 2-bit alpha quantization. The launcher
+luminance-tints app icons, which preserves this black-with-alpha artwork.
+The PNG is stored as RGBA; Pebble's resource compiler handles palette packing.
+
+## Regenerate
+
+With ImageMagick 7, from `apps/pebble-watch`:
 
 ```sh
-magick -background none resources/images/menu_icon.svg -channel A -threshold 50% +channel -strip PNG8:resources/images/menu_icon.png
+magick -background none -density 1536 resources/images/menu_icon.svg -filter Box -resize '25x25!' -channel A -fx 'round(a*3)/3' +channel -depth 8 -strip PNG32:resources/images/menu_icon.png
 ```
 
-Keep `PNG8:` so the output retains a palette with binary transparency. Avoid
-forcing a one-bit PNG export, which can discard transparency in ImageMagick.
-The PNG is checked in, so normal Pebble builds do not need ImageMagick.
+Keep `PNG32:` to preserve both intermediate opacity levels. Do not threshold
+the alpha channel or use the old `PNG8:` export: either can remove the edge
+shading. The PNG is checked in, so normal builds do not need ImageMagick.
 
-Review at native size and with nearest-neighbor enlargement, then use the
-repository's `install-phone`, `button`, and `screenshot` helpers to inspect
-both selected and unselected launcher rows on Emery.
+Review at native size and with nearest-neighbor enlargement, then inspect
+both white and blue launcher rows on Emery using the repository's
+`install-phone`, `button`, and `screenshot` helpers.
