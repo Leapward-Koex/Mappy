@@ -901,7 +901,9 @@ void main() {
     expect(find.text('Android package'), findsOneWidget);
     expect(find.text('Signing SHA-1'), findsOneWidget);
     expect(
-      find.text('Map Tiles, Places, Geocoding, and Routes'),
+      find.text(
+        'Map Tiles API, Places API (New), Geocoding API, and Routes API',
+      ),
       findsOneWidget,
     );
 
@@ -915,7 +917,78 @@ void main() {
 
     await tester.tap(find.byTooltip('Copy required APIs'));
     await tester.pump();
-    expect(clipboardText, 'Map Tiles, Places, Geocoding, and Routes');
+    expect(
+      clipboardText,
+      'Map Tiles API, Places API (New), Geocoding API, and Routes API',
+    );
+    await tester.scrollUntilVisible(
+      find.byKey(const ValueKey('google-api-key-guide')),
+      180,
+      scrollable: find
+          .descendant(
+            of: find.byKey(const ValueKey('google-maps-setup-list')),
+            matching: find.byType(Scrollable),
+          )
+          .first,
+    );
+    await tester.tap(find.byKey(const ValueKey('google-api-key-guide')));
+    await tester.pumpAndSettle();
+    expect(find.text('Enable the four APIs'), findsOneWidget);
+    expect(find.text('Restrict it to this Android app'), findsOneWidget);
+    expect(find.text('Restrict the key to Mappy APIs'), findsOneWidget);
+    expect(find.text('Copy, save, and validate'), findsOneWidget);
+    expect(
+      find.byKey(const ValueKey('open-google-cloud-console')),
+      findsOneWidget,
+    );
+    expect(
+      find.bySemanticsLabel(
+        'Google Cloud Application restrictions screen with Android apps highlighted',
+      ),
+      findsOneWidget,
+    );
+    expect(
+      find.bySemanticsLabel(
+        'Google Cloud API restrictions dropdown with four APIs highlighted',
+      ),
+      findsOneWidget,
+    );
+    expect(
+      find.bySemanticsLabel(
+        'Google Cloud Select a project dialog with New project circled',
+      ),
+      findsOneWidget,
+    );
+    expect(
+      find.bySemanticsLabel(
+        'Google Cloud New Project screen with project name and Create highlighted',
+      ),
+      findsOneWidget,
+    );
+    expect(
+      find.bySemanticsLabel(
+        'Google Cloud navigation with APIs and Services then Enabled APIs and services highlighted',
+      ),
+      findsOneWidget,
+    );
+    expect(
+      find.bySemanticsLabel(
+        'Google Cloud navigation with APIs and Services then Credentials highlighted',
+      ),
+      findsOneWidget,
+    );
+    expect(
+      find.bySemanticsLabel(
+        'Google Cloud Credentials screen with Create credentials and API key highlighted',
+      ),
+      findsOneWidget,
+    );
+    expect(
+      find.bySemanticsLabel(
+        'Google Cloud credentials list showing a completed Mappy API key',
+      ),
+      findsOneWidget,
+    );
   });
 
   testWidgets('watch readiness lives under Settings', (tester) async {

@@ -25,3 +25,11 @@ flutter:
   uses-material-design: true
   assets:
     - icon/icon_1024_1024.png
+    - assets/google_cloud_setup/api-restrictions.png
+    - assets/google_cloud_setup/android-app-restriction.png
+    - assets/google_cloud_setup/apis-services-enabled-apis.png
+    - assets/google_cloud_setup/create-api-key.png
+    - assets/google_cloud_setup/create-project.png
+    - assets/google_cloud_setup/credentials-navigation.png
+    - assets/google_cloud_setup/finished-key.png
+    - assets/google_cloud_setup/select-project-new-project.png
