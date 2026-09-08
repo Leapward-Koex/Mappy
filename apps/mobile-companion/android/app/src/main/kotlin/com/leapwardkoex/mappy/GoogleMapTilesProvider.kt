@@ -69,18 +69,21 @@ class GoogleMapTilesProvider(
     private val allowUnrestrictedDevelopmentKey: () -> Boolean = { false },
     private val sourceExecutor: ExecutorService = Executors.newFixedThreadPool(4) { task ->
         Thread(task, "mappy-source-tile").apply { isDaemon = true }
-    }
+    },
+    private val apiUsage: ApiUsageTracker? = null
 ) {
     constructor(
         context: Context,
         keyStore: ApiKeyStore,
-        allowUnrestrictedDevelopmentKey: () -> Boolean = { false }
+        allowUnrestrictedDevelopmentKey: () -> Boolean = { false },
+        apiUsage: ApiUsageTracker
     ) : this(
         keyStore = keyStore,
         identityProvider = RuntimeAndroidIdentityProvider(context),
         httpClient = UrlGoogleHttpClient(),
         binaryStringEncoder = AndroidBase64StringEncoder(),
-        allowUnrestrictedDevelopmentKey = allowUnrestrictedDevelopmentKey
+        allowUnrestrictedDevelopmentKey = allowUnrestrictedDevelopmentKey,
+        apiUsage = apiUsage
     )
 
     private val credentialLifecycleLock = Any()
@@ -204,10 +207,15 @@ class GoogleMapTilesProvider(
 
     private fun executeProviderRequest(
         request: GoogleHttpRequest,
+        product: ApiProduct,
+        units: Long = 1,
         cancellation: TileCancellationToken? = null
     ): GoogleHttpResponse {
         val generation = threadOperationGeneration.get()
             ?: throw ProviderOperationCancelledException()
+        ensureProviderOperationCurrent()
+        cancellation?.throwIfCancelled()
+        apiUsage?.reserve(product, units)
         return httpClient.execute(request, {
             generation != providerOperationGeneration.get()
         }, cancellation)
@@ -259,7 +267,41 @@ class GoogleMapTilesProvider(
             changed
         }
 
-    fun validateProviderSetup(): Map<String, Any?> {
+    fun validateProviderSetup(): Map<String, Any?> = try {
+        validateProviderSetupUnchecked()
+    } catch (blocked: ApiUsageBlockedException) {
+        keyStore.getStatus() + mapOf("validationDetail" to blocked.message, "usageBlocked" to true)
+    }
+
+    private inline fun usageGuard(action: () -> Map<String, Any?>): Map<String, Any?> = try {
+        action()
+    } catch (blocked: ApiUsageBlockedException) {
+        operationFailure(keyStore.getStatus(), blocked.message.orEmpty(), ERROR_ROUTE_PROVIDER) +
+            mapOf("usageBlockReason" to blocked.reason)
+    }
+
+    fun previewTile(latitude: Double, longitude: Double, zoom: Int): Map<String, Any?> =
+        usageGuard { previewTileUnchecked(latitude, longitude, zoom) }
+
+    fun geocodeDestination(addressText: String, language: String, region: String): Map<String, Any?> =
+        usageGuard { geocodeDestinationUnchecked(addressText, language, region) }
+
+    fun autocompleteDestination(input: String, originLatitude: Double?, originLongitude: Double?,
+        sessionToken: String?, language: String, region: String): Map<String, Any?> = usageGuard {
+        autocompleteDestinationUnchecked(input, originLatitude, originLongitude, sessionToken, language, region)
+    }
+
+    fun resolvePlace(placeId: String, sessionToken: String?, language: String, region: String): Map<String, Any?> =
+        usageGuard { resolvePlaceUnchecked(placeId, sessionToken, language, region) }
+
+    fun computeRoute(originLatitude: Double, originLongitude: Double, destinationAddress: String?,
+        destinationLatitude: Double?, destinationLongitude: Double?, travelMode: String,
+        language: String, region: String): Map<String, Any?> = usageGuard {
+        computeRouteUnchecked(originLatitude, originLongitude, destinationAddress, destinationLatitude,
+            destinationLongitude, travelMode, language, region)
+    }
+
+    private fun validateProviderSetupUnchecked(): Map<String, Any?> {
         val key = keyForProviderOperation()
         val identity = identityProvider.currentIdentity()
         return validateProviderSetupForOperation(key, identity)
@@ -309,7 +351,7 @@ class GoogleMapTilesProvider(
         )
     }
 
-    fun previewTile(latitude: Double, longitude: Double, zoom: Int): Map<String, Any?> {
+    private fun previewTileUnchecked(latitude: Double, longitude: Double, zoom: Int): Map<String, Any?> {
         val key = keyForProviderOperation()
         val identity = identityProvider.currentIdentity()
         if (key.isNullOrBlank()) {
@@ -418,6 +460,17 @@ class GoogleMapTilesProvider(
         worldY: Int,
         zoom: Int,
         cancellation: TileCancellationToken = TileCancellationToken()
+    ): WatchTilePreparation = try {
+        watchTilePreparationUnchecked(worldX, worldY, zoom, cancellation)
+    } catch (blocked: ApiUsageBlockedException) {
+        watchTileFailure(keyStore.getStatus(), blocked.message.orEmpty(), ERROR_TILE_PROVIDER, worldX, worldY, zoom)
+    }
+
+    private fun watchTilePreparationUnchecked(
+        worldX: Int,
+        worldY: Int,
+        zoom: Int,
+        cancellation: TileCancellationToken
     ): WatchTilePreparation {
         val started = System.nanoTime()
         cancellation.throwIfCancelled()
@@ -673,7 +726,7 @@ class GoogleMapTilesProvider(
 
     private fun elapsedMillis(started: Long): Double = (System.nanoTime() - started) / 1_000_000.0
 
-    fun geocodeDestination(addressText: String, language: String, region: String): Map<String, Any?> {
+    private fun geocodeDestinationUnchecked(addressText: String, language: String, region: String): Map<String, Any?> {
         val key = keyForProviderOperation()
         val identity = identityProvider.currentIdentity()
         val address = addressText.trim()
@@ -712,7 +765,7 @@ class GoogleMapTilesProvider(
         )
     }
 
-    fun autocompleteDestination(
+    private fun autocompleteDestinationUnchecked(
         input: String,
         originLatitude: Double?,
         originLongitude: Double?,
@@ -767,7 +820,7 @@ class GoogleMapTilesProvider(
         )
     }
 
-    fun resolvePlace(
+    private fun resolvePlaceUnchecked(
         placeId: String,
         sessionToken: String?,
         language: String,
@@ -820,7 +873,7 @@ class GoogleMapTilesProvider(
         )
     }
 
-    fun computeRoute(
+    private fun computeRouteUnchecked(
         originLatitude: Double,
         originLongitude: Double,
         destinationAddress: String?,
@@ -1257,7 +1310,9 @@ class GoogleMapTilesProvider(
                         mapOf("Content-Type" to "application/json; charset=utf-8"),
                     body = body
                 ),
-                cancellation
+                product = ApiProduct.MAP_TILES,
+                units = 0,
+                cancellation = cancellation
             )
             val httpStatus = response.httpStatus
             if (httpStatus in 200..299) {
@@ -1286,6 +1341,8 @@ class GoogleMapTilesProvider(
                     safeDetail = safeErrorDetail(response.bodyText, key)
                 )
             }
+        } catch (blocked: ApiUsageBlockedException) {
+            throw blocked
         } catch (cancelled: ProviderOperationCancelledException) {
             throw cancelled
         } catch (_: SocketTimeoutException) {
@@ -1310,7 +1367,8 @@ class GoogleMapTilesProvider(
                     headers = androidHeaders(identity.packageName, identity.certSha1),
                     expectsBinary = true
                 ),
-                cancellation
+                product = ApiProduct.MAP_TILES,
+                cancellation = cancellation
             )
             val httpStatus = response.httpStatus
             if (httpStatus in 200..299) {
@@ -1327,6 +1385,8 @@ class GoogleMapTilesProvider(
                     safeDetail = safeErrorDetail(response.bodyText, key, sessionToken)
                 )
             }
+        } catch (blocked: ApiUsageBlockedException) {
+            throw blocked
         } catch (cancelled: ProviderOperationCancelledException) {
             throw cancelled
         } catch (_: SocketTimeoutException) {
@@ -1397,7 +1457,8 @@ class GoogleMapTilesProvider(
                 GoogleHttpRequest(
                     url = "$GEOCODING_BASE_URL/geocode/json?$query",
                     headers = androidHeaders(identity.packageName, identity.certSha1)
-                )
+                ),
+                product = ApiProduct.GEOCODING
             )
             val httpStatus = response.httpStatus
             if (httpStatus !in 200..299) {
@@ -1448,6 +1509,8 @@ class GoogleMapTilesProvider(
                     placeId = first.optString("place_id").takeIf { it.isNotBlank() }
                 )
             )
+        } catch (blocked: ApiUsageBlockedException) {
+            throw blocked
         } catch (cancelled: ProviderOperationCancelledException) {
             throw cancelled
         } catch (_: SocketTimeoutException) {
@@ -1501,7 +1564,8 @@ class GoogleMapTilesProvider(
                             "X-Goog-FieldMask" to PLACES_AUTOCOMPLETE_FIELD_MASK
                         ),
                     body = body
-                )
+                ),
+                product = ApiProduct.AUTOCOMPLETE
             )
             val httpStatus = response.httpStatus
             if (httpStatus !in 200..299) {
@@ -1553,6 +1617,8 @@ class GoogleMapTilesProvider(
                 safeDetail = "Autocomplete succeeded.",
                 suggestions = suggestions.take(MAX_PLACE_SUGGESTIONS)
             )
+        } catch (blocked: ApiUsageBlockedException) {
+            throw blocked
         } catch (cancelled: ProviderOperationCancelledException) {
             throw cancelled
         } catch (_: SocketTimeoutException) {
@@ -1599,7 +1665,8 @@ class GoogleMapTilesProvider(
                             "X-Goog-Api-Key" to key,
                             "X-Goog-FieldMask" to PLACES_DETAILS_FIELD_MASK
                         )
-                )
+                ),
+                product = ApiProduct.PLACE_DETAILS
             )
             val httpStatus = response.httpStatus
             if (httpStatus !in 200..299) {
@@ -1634,6 +1701,8 @@ class GoogleMapTilesProvider(
                     label = label.ifBlank { formattedAddress.ifBlank { placeId } }
                 )
             )
+        } catch (blocked: ApiUsageBlockedException) {
+            throw blocked
         } catch (cancelled: ProviderOperationCancelledException) {
             throw cancelled
         } catch (_: SocketTimeoutException) {
@@ -1674,7 +1743,8 @@ class GoogleMapTilesProvider(
                             "X-Goog-FieldMask" to ROUTES_FIELD_MASK
                         ),
                     body = body
-                )
+                ),
+                product = ApiProduct.ROUTES
             )
             val httpStatus = response.httpStatus
             if (httpStatus !in 200..299) {
@@ -1707,6 +1777,8 @@ class GoogleMapTilesProvider(
                 safeDetail = "Route computed.",
                 route = route
             )
+        } catch (blocked: ApiUsageBlockedException) {
+            throw blocked
         } catch (cancelled: ProviderOperationCancelledException) {
             throw cancelled
         } catch (_: SocketTimeoutException) {

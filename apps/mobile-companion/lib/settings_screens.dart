@@ -1,8 +1,10 @@
 import 'dart:async';
+import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 import 'package:flutter/semantics.dart';
 import 'package:flutter/services.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 import 'battery_optimization_bridge.dart';
 import 'bridge_channel.dart';
@@ -10,6 +12,10 @@ import 'location_bridge.dart';
 import 'provider_bridge.dart';
 import 'watch_phone_worker.dart';
 import 'watch_protocol.dart';
+
+const googleCloudConsoleUri = 'https://console.cloud.google.com/';
+const googleMapsRequiredApisLabel =
+    'Map Tiles API, Places API (New), Geocoding API, and Routes API';
 
 final _googleApiKeyPattern = RegExp(r'^AIza[0-9A-Za-z_-]{16,}$');
 
@@ -152,7 +158,9 @@ class _GoogleMapsSetupScreenState extends State<GoogleMapsSetupScreen> {
     setState(() {
       _status = status;
       _busy = false;
-      _message = _providerReady(status)
+      _message = status.usageBlocked
+          ? status.validationDetail
+          : _providerReady(status)
           ? 'Google services are ready.'
           : _providerFixMessage(status);
     });
@@ -182,7 +190,9 @@ class _GoogleMapsSetupScreenState extends State<GoogleMapsSetupScreen> {
     setState(() {
       _status = status;
       _busy = false;
-      _message = _providerReady(status)
+      _message = status.usageBlocked
+          ? status.validationDetail
+          : _providerReady(status)
           ? 'Google services are ready.'
           : _providerFixMessage(status);
     });
@@ -228,12 +238,33 @@ class _GoogleMapsSetupScreenState extends State<GoogleMapsSetupScreen> {
     ).showSnackBar(SnackBar(content: Text('$label copied.')));
   }
 
+  Future<void> _openGoogleCloudConsole() async {
+    try {
+      final opened = await launchUrl(
+        Uri.parse(googleCloudConsoleUri),
+        mode: LaunchMode.externalApplication,
+      );
+      if (!opened && mounted) {
+        setState(() {
+          _message =
+              'Could not open Google Cloud. Visit console.cloud.google.com in a browser.';
+        });
+      }
+    } catch (_) {
+      if (!mounted) return;
+      setState(() {
+        _message =
+            'Could not open Google Cloud. Visit console.cloud.google.com in a browser.';
+      });
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final ready = _providerReady(_status);
     final packageName = _status.packageName ?? 'com.leapwardkoex.mappy';
     final sha = _status.certSha1;
-    const requiredApis = 'Map Tiles, Places, Geocoding, and Routes';
+    const requiredApis = googleMapsRequiredApisLabel;
     final theme = Theme.of(context);
     return Scaffold(
       appBar: AppBar(
@@ -252,101 +283,515 @@ class _GoogleMapsSetupScreenState extends State<GoogleMapsSetupScreen> {
             ),
         ],
       ),
-      body: ListView(
+      body: SingleChildScrollView(
+        key: const ValueKey('google-maps-setup-list'),
         padding: const EdgeInsets.fromLTRB(16, 8, 16, 32),
-        children: [
-          _ReadinessBanner(
-            ready: ready,
-            icon: ready ? Icons.check_circle_outline : Icons.key_off_outlined,
-            title: ready ? 'Google services ready' : 'Setup required',
-            detail: ready
-                ? 'Your key is stored securely and validated.'
-                : _providerFixMessage(_status),
-          ),
-          const SizedBox(height: 20),
-          Text('Google Cloud restrictions', style: theme.textTheme.titleMedium),
-          const SizedBox(height: 8),
-          ListTile(
-            contentPadding: EdgeInsets.zero,
-            leading: const Icon(Icons.android),
-            title: const Text('Android package'),
-            subtitle: Text(packageName),
-            trailing: IconButton(
-              tooltip: 'Copy package',
-              onPressed: () => _copy('Package', packageName),
-              icon: const Icon(Icons.copy_outlined),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            _ReadinessBanner(
+              ready: ready,
+              icon: ready ? Icons.check_circle_outline : Icons.key_off_outlined,
+              title: ready ? 'Google services ready' : 'Setup required',
+              detail: ready
+                  ? 'Your key is stored securely and validated.'
+                  : _providerFixMessage(_status),
             ),
-          ),
-          ListTile(
-            contentPadding: EdgeInsets.zero,
-            leading: const Icon(Icons.verified_user_outlined),
-            title: const Text('Signing SHA-1'),
-            subtitle: Text(sha ?? 'Waiting for Android'),
-            trailing: IconButton(
-              tooltip: 'Copy SHA-1',
-              onPressed: sha == null ? null : () => _copy('SHA-1', sha),
-              icon: const Icon(Icons.copy_outlined),
+            const SizedBox(height: 20),
+            Text(
+              'Google Cloud restrictions',
+              style: theme.textTheme.titleMedium,
             ),
-          ),
-          ListTile(
-            contentPadding: EdgeInsets.zero,
-            leading: const Icon(Icons.api_outlined),
-            title: const Text('Required APIs'),
-            subtitle: const Text(requiredApis),
-            trailing: IconButton(
-              tooltip: 'Copy required APIs',
-              onPressed: () => _copy('Required APIs', requiredApis),
-              icon: const Icon(Icons.copy_outlined),
-            ),
-          ),
-          const SizedBox(height: 12),
-          TextField(
-            key: const ValueKey('google-api-key-input'),
-            controller: _controller,
-            enabled: !_busy,
-            obscureText: true,
-            enableSuggestions: false,
-            enableIMEPersonalizedLearning: false,
-            autocorrect: false,
-            decoration: InputDecoration(
-              border: const OutlineInputBorder(),
-              labelText: _status.configured
-                  ? 'Replace API key'
-                  : 'Google API key',
-              helperText: _status.configured
-                  ? 'Stored key: ${_status.keyLabel}'
-                  : 'The full key is never displayed after saving.',
-            ),
-            onSubmitted: (_) => _saveAndValidate(),
-          ),
-          const SizedBox(height: 12),
-          FilledButton.icon(
-            key: const ValueKey('save-and-validate-key'),
-            onPressed: _busy ? null : _saveAndValidate,
-            icon: _busy
-                ? const SizedBox.square(
-                    dimension: 18,
-                    child: CircularProgressIndicator(strokeWidth: 2),
-                  )
-                : const Icon(Icons.verified_outlined),
-            label: Text(_busy ? 'Validating' : 'Save and validate'),
-          ),
-          if (_status.configured && !ready) ...[
             const SizedBox(height: 8),
-            OutlinedButton.icon(
-              onPressed: _busy ? null : _retry,
-              icon: const Icon(Icons.refresh),
-              label: const Text('Retry validation'),
+            ListTile(
+              contentPadding: EdgeInsets.zero,
+              leading: const Icon(Icons.android),
+              title: const Text('Android package'),
+              subtitle: Text(packageName),
+              trailing: IconButton(
+                tooltip: 'Copy package',
+                onPressed: () => _copy('Package', packageName),
+                icon: const Icon(Icons.copy_outlined),
+              ),
+            ),
+            ListTile(
+              contentPadding: EdgeInsets.zero,
+              leading: const Icon(Icons.verified_user_outlined),
+              title: const Text('Signing SHA-1'),
+              subtitle: Text(sha ?? 'Waiting for Android'),
+              trailing: IconButton(
+                tooltip: 'Copy SHA-1',
+                onPressed: sha == null ? null : () => _copy('SHA-1', sha),
+                icon: const Icon(Icons.copy_outlined),
+              ),
+            ),
+            ListTile(
+              contentPadding: EdgeInsets.zero,
+              leading: const Icon(Icons.api_outlined),
+              title: const Text('Required APIs'),
+              subtitle: const Text(requiredApis),
+              trailing: IconButton(
+                tooltip: 'Copy required APIs',
+                onPressed: () => _copy('Required APIs', requiredApis),
+                icon: const Icon(Icons.copy_outlined),
+              ),
+            ),
+            const SizedBox(height: 12),
+            TextField(
+              key: const ValueKey('google-api-key-input'),
+              controller: _controller,
+              enabled: !_busy,
+              obscureText: true,
+              enableSuggestions: false,
+              enableIMEPersonalizedLearning: false,
+              autocorrect: false,
+              decoration: InputDecoration(
+                border: const OutlineInputBorder(),
+                labelText: _status.configured
+                    ? 'Replace API key'
+                    : 'Google API key',
+                helperText: _status.configured
+                    ? 'Stored key: ${_status.keyLabel}'
+                    : 'The full key is never displayed after saving.',
+              ),
+              onSubmitted: (_) => _saveAndValidate(),
+            ),
+            const SizedBox(height: 12),
+            FilledButton.icon(
+              key: const ValueKey('save-and-validate-key'),
+              onPressed: _busy ? null : _saveAndValidate,
+              icon: _busy
+                  ? const SizedBox.square(
+                      dimension: 18,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    )
+                  : const Icon(Icons.verified_outlined),
+              label: Text(_busy ? 'Validating' : 'Save and validate'),
+            ),
+            if (_status.configured && !ready) ...[
+              const SizedBox(height: 8),
+              OutlinedButton.icon(
+                onPressed: _busy ? null : _retry,
+                icon: const Icon(Icons.refresh),
+                label: const Text('Retry validation'),
+              ),
+            ],
+            if (_message != null) ...[
+              const SizedBox(height: 12),
+              Text(_message!),
+            ],
+            const SizedBox(height: 24),
+            _GoogleApiKeyWalkthrough(
+              initiallyExpanded: false,
+              packageName: packageName,
+              sha1: sha,
+              onOpenGoogleCloud: _openGoogleCloudConsole,
             ),
           ],
-          if (_message != null) ...[
-            const SizedBox(height: 12),
-            Text(_message!),
-          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _GoogleApiKeyWalkthrough extends StatelessWidget {
+  const _GoogleApiKeyWalkthrough({
+    required this.initiallyExpanded,
+    required this.packageName,
+    required this.sha1,
+    required this.onOpenGoogleCloud,
+  });
+
+  final bool initiallyExpanded;
+  final String packageName;
+  final String? sha1;
+  final Future<void> Function() onOpenGoogleCloud;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Card(
+      clipBehavior: Clip.antiAlias,
+      child: ExpansionTile(
+        key: const ValueKey('google-api-key-guide'),
+        initiallyExpanded: initiallyExpanded,
+        leading: const Icon(Icons.menu_book_outlined),
+        title: const Text('Create a restricted Google API key'),
+        subtitle: const Text('Step-by-step Google Cloud setup'),
+        childrenPadding: const EdgeInsets.fromLTRB(16, 0, 16, 20),
+        children: [
+          Text(
+            'Mappy uses your own Google Maps Platform account. Google requires a billing account for these services; review the current pricing and billing terms in Google Cloud before continuing.',
+            style: theme.textTheme.bodyMedium,
+          ),
+          const SizedBox(height: 12),
+          Align(
+            alignment: AlignmentDirectional.centerStart,
+            child: OutlinedButton.icon(
+              key: const ValueKey('open-google-cloud-console'),
+              onPressed: () => unawaited(onOpenGoogleCloud()),
+              icon: const Icon(Icons.open_in_new),
+              label: const Text('Open Google Cloud Console'),
+            ),
+          ),
+          const SizedBox(height: 16),
+          const _GoogleCloudGuideStep(
+            number: 1,
+            title: 'Sign in',
+            detail:
+                'Sign in at the Google Cloud Console with the Google account that will own this key.',
+          ),
+          const _GoogleCloudGuideStep(
+            number: 2,
+            title: 'Create and select a project',
+            detail:
+                'Choose Select a project, then New project. On the next screen, name the project, choose Create, wait for creation to finish, and select the new project.',
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                _GoogleCloudGuideScreenshot(
+                  asset:
+                      'assets/google_cloud_setup/select-project-new-project.png',
+                  semanticLabel:
+                      'Google Cloud Select a project dialog with New project circled',
+                  aspectRatio: 1207 / 829,
+                  callouts: [
+                    _GoogleCloudScreenshotCallout(
+                      center: Offset(.78, .205),
+                      size: Size(.16, .065),
+                      arrowStart: Offset(.70, .33),
+                    ),
+                  ],
+                ),
+                SizedBox(height: 10),
+                _GoogleCloudGuideScreenshot(
+                  asset: 'assets/google_cloud_setup/create-project.png',
+                  semanticLabel:
+                      'Google Cloud New Project screen with project name and Create highlighted',
+                  aspectRatio: 1207 / 829,
+                  callouts: [
+                    _GoogleCloudScreenshotCallout(
+                      center: Offset(.245, .375),
+                      size: Size(.43, .085),
+                      arrowStart: Offset(.47, .28),
+                    ),
+                    _GoogleCloudScreenshotCallout(
+                      center: Offset(.062, .57),
+                      size: Size(.095, .055),
+                      arrowStart: Offset(.17, .64),
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          ),
+          const _GoogleCloudGuideStep(
+            number: 3,
+            title: 'Link billing',
+            detail:
+                'Open Billing and link a billing account to this project. Google may ask you to verify a payment method before Maps Platform APIs can be used. After activating the full billing account, set a low budget alert so unexpected usage does not become a surprise bill.',
+          ),
+          const _GoogleCloudGuideStep(
+            number: 4,
+            title: 'Enable the four APIs',
+            detail:
+                'Open the navigation menu, choose APIs & Services, then Enabled APIs & services. From Library, search for and enable Map Tiles API, Places API (New), Geocoding API, and Routes API.',
+            child: _GoogleCloudGuideScreenshot(
+              asset: 'assets/google_cloud_setup/apis-services-enabled-apis.png',
+              semanticLabel:
+                  'Google Cloud navigation with APIs and Services then Enabled APIs and services highlighted',
+              aspectRatio: 1207 / 829,
+              callouts: [
+                _GoogleCloudScreenshotCallout(
+                  center: Offset(.12, .585),
+                  size: Size(.21, .055),
+                  arrowStart: Offset(.30, .51),
+                ),
+                _GoogleCloudScreenshotCallout(
+                  center: Offset(.32, .596),
+                  size: Size(.15, .05),
+                  arrowStart: Offset(.46, .66),
+                ),
+              ],
+            ),
+          ),
+          const _GoogleCloudGuideStep(
+            number: 5,
+            title: 'Create the key',
+            detail:
+                'Open APIs & Services > Credentials. Select Create credentials, then API key. Leave service-account authentication off; it is not required for these Maps APIs.',
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                _GoogleCloudGuideScreenshot(
+                  asset: 'assets/google_cloud_setup/credentials-navigation.png',
+                  semanticLabel:
+                      'Google Cloud navigation with APIs and Services then Credentials highlighted',
+                  aspectRatio: 1207 / 829,
+                  callouts: [
+                    _GoogleCloudScreenshotCallout(
+                      center: Offset(.12, .585),
+                      size: Size(.21, .055),
+                      arrowStart: Offset(.30, .51),
+                    ),
+                    _GoogleCloudScreenshotCallout(
+                      center: Offset(.32, .675),
+                      size: Size(.15, .05),
+                      arrowStart: Offset(.47, .72),
+                    ),
+                  ],
+                ),
+                SizedBox(height: 10),
+                _GoogleCloudGuideScreenshot(
+                  asset: 'assets/google_cloud_setup/create-api-key.png',
+                  semanticLabel:
+                      'Google Cloud Credentials screen with Create credentials and API key highlighted',
+                  aspectRatio: 1207 / 829,
+                  callouts: [
+                    _GoogleCloudScreenshotCallout(
+                      center: Offset(.44, .152),
+                      size: Size(.16, .055),
+                      arrowStart: Offset(.58, .23),
+                    ),
+                    _GoogleCloudScreenshotCallout(
+                      center: Offset(.40, .202),
+                      size: Size(.08, .055),
+                      arrowStart: Offset(.49, .29),
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          ),
+          _GoogleCloudGuideStep(
+            number: 6,
+            title: 'Restrict it to this Android app',
+            detail:
+                'In the key editor, choose Android apps under Application restrictions. Use Add an item, then paste the package name and signing SHA-1 shown above.',
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text('Package name: $packageName'),
+                Text('Signing SHA-1: ${sha1 ?? 'Waiting for Android'}'),
+                const Text('Use the copy buttons above to copy these values.'),
+                const SizedBox(height: 10),
+                ClipRRect(
+                  borderRadius: BorderRadius.circular(8),
+                  child: Image.asset(
+                    'assets/google_cloud_setup/android-app-restriction.png',
+                    fit: BoxFit.contain,
+                    semanticLabel:
+                        'Google Cloud Application restrictions screen with Android apps highlighted',
+                  ),
+                ),
+              ],
+            ),
+          ),
+          _GoogleCloudGuideStep(
+            number: 7,
+            title: 'Restrict the key to Mappy APIs',
+            detail:
+                'Under API restrictions, select Restrict key and choose only Map Tiles API, Places API (New), Geocoding API, and Routes API. Then save the key.',
+            child: ClipRRect(
+              borderRadius: BorderRadius.circular(8),
+              child: Image.asset(
+                'assets/google_cloud_setup/api-restrictions.png',
+                fit: BoxFit.contain,
+                semanticLabel:
+                    'Google Cloud API restrictions dropdown with four APIs highlighted',
+              ),
+            ),
+          ),
+          _GoogleCloudGuideStep(
+            number: 8,
+            title: 'Copy, save, and validate',
+            detail:
+                'Copy the new key from Google Cloud, paste it below, and select Save and validate. Never share the full key; regenerate it in Google Cloud if it is exposed.',
+            child: ClipRRect(
+              borderRadius: BorderRadius.circular(8),
+              child: Image.asset(
+                'assets/google_cloud_setup/finished-key.png',
+                fit: BoxFit.contain,
+                semanticLabel:
+                    'Google Cloud credentials list showing a completed Mappy API key',
+              ),
+            ),
+          ),
         ],
       ),
     );
   }
+}
+
+class _GoogleCloudGuideStep extends StatelessWidget {
+  const _GoogleCloudGuideStep({
+    required this.number,
+    required this.title,
+    required this.detail,
+    this.child,
+  });
+
+  final int number;
+  final String title;
+  final String detail;
+  final Widget? child;
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = Theme.of(context).colorScheme;
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 16),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          DecoratedBox(
+            decoration: BoxDecoration(
+              color: colors.secondaryContainer,
+              shape: BoxShape.circle,
+            ),
+            child: SizedBox(
+              width: 28,
+              height: 28,
+              child: Center(
+                child: Text(
+                  '$number',
+                  style: Theme.of(context).textTheme.labelLarge?.copyWith(
+                    color: colors.onSecondaryContainer,
+                  ),
+                ),
+              ),
+            ),
+          ),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(title, style: Theme.of(context).textTheme.titleSmall),
+                const SizedBox(height: 4),
+                Text(detail),
+                if (child != null) ...[const SizedBox(height: 8), child!],
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _GoogleCloudGuideScreenshot extends StatelessWidget {
+  const _GoogleCloudGuideScreenshot({
+    required this.asset,
+    required this.semanticLabel,
+    required this.aspectRatio,
+    required this.callouts,
+  });
+
+  final String asset;
+  final String semanticLabel;
+  final double aspectRatio;
+  final List<_GoogleCloudScreenshotCallout> callouts;
+
+  @override
+  Widget build(BuildContext context) {
+    return Semantics(
+      image: true,
+      label: semanticLabel,
+      child: ClipRRect(
+        borderRadius: BorderRadius.circular(8),
+        child: AspectRatio(
+          aspectRatio: aspectRatio,
+          child: Stack(
+            fit: StackFit.expand,
+            children: [
+              Image.asset(asset, fit: BoxFit.fill, excludeFromSemantics: true),
+              IgnorePointer(
+                child: CustomPaint(
+                  painter: _GoogleCloudScreenshotCalloutPainter(callouts),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _GoogleCloudScreenshotCallout {
+  const _GoogleCloudScreenshotCallout({
+    required this.center,
+    required this.size,
+    required this.arrowStart,
+  });
+
+  final Offset center;
+  final Size size;
+  final Offset arrowStart;
+}
+
+class _GoogleCloudScreenshotCalloutPainter extends CustomPainter {
+  const _GoogleCloudScreenshotCalloutPainter(this.callouts);
+
+  final List<_GoogleCloudScreenshotCallout> callouts;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final strokeWidth = math.max(3.0, math.min(size.width, size.height) * .009);
+    final paint = Paint()
+      ..color = const Color(0xFFFFC107)
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = strokeWidth
+      ..strokeCap = StrokeCap.round
+      ..strokeJoin = StrokeJoin.round;
+
+    for (final callout in callouts) {
+      final center = Offset(
+        callout.center.dx * size.width,
+        callout.center.dy * size.height,
+      );
+      final ovalSize = Size(
+        callout.size.width * size.width,
+        callout.size.height * size.height,
+      );
+      canvas.drawOval(
+        Rect.fromCenter(
+          center: center,
+          width: ovalSize.width,
+          height: ovalSize.height,
+        ),
+        paint,
+      );
+
+      final start = Offset(
+        callout.arrowStart.dx * size.width,
+        callout.arrowStart.dy * size.height,
+      );
+      final delta = center - start;
+      final distance = delta.distance;
+      if (distance == 0) continue;
+      final direction = Offset(delta.dx / distance, delta.dy / distance);
+      final tip =
+          center -
+          direction * (math.min(ovalSize.width, ovalSize.height) * .35);
+      canvas.drawLine(start, tip, paint);
+
+      final angle = math.atan2(direction.dy, direction.dx);
+      final arrowLength = math.max(12.0, strokeWidth * 3.6);
+      for (final turn in [-.6, .6]) {
+        final wing = Offset(
+          tip.dx + math.cos(angle + math.pi + turn) * arrowLength,
+          tip.dy + math.sin(angle + math.pi + turn) * arrowLength,
+        );
+        canvas.drawLine(tip, wing, paint);
+      }
+    }
+  }
+
+  @override
+  bool shouldRepaint(_GoogleCloudScreenshotCalloutPainter oldDelegate) =>
+      oldDelegate.callouts != callouts;
 }
 
 class _ReadinessBanner extends StatelessWidget {
@@ -423,6 +868,7 @@ class SettingsHubScreen extends StatelessWidget {
     required this.onOpenSetupChecklist,
     required this.onOpenGoogleSetup,
     required this.onOpenPermissions,
+    this.onOpenApiUsage,
     required this.onOpenWatchConnection,
     required this.onOpenNavigationPreferences,
     required this.onOpenAppearancePreferences,
@@ -443,6 +889,7 @@ class SettingsHubScreen extends StatelessWidget {
   final VoidCallback onOpenSetupChecklist;
   final VoidCallback onOpenGoogleSetup;
   final VoidCallback onOpenPermissions;
+  final VoidCallback? onOpenApiUsage;
   final VoidCallback onOpenWatchConnection;
   final VoidCallback onOpenNavigationPreferences;
   final VoidCallback onOpenAppearancePreferences;
@@ -478,6 +925,14 @@ class SettingsHubScreen extends StatelessWidget {
           showWarning: readinessLoaded && providerNeedsAttention,
           onTap: onOpenGoogleSetup,
         ),
+        if (onOpenApiUsage != null)
+          _SettingsLinkTile(
+            key: const ValueKey('settings-api-usage'),
+            icon: Icons.data_usage,
+            title: 'API usage',
+            subtitle: 'Free allowances, rollover, and request controls',
+            onTap: onOpenApiUsage!,
+          ),
         _SettingsLinkTile(
           key: const ValueKey('settings-permissions'),
           icon: Icons.admin_panel_settings_outlined,

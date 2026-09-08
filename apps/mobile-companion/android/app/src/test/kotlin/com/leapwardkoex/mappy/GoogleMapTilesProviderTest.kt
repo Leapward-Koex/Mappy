@@ -19,6 +19,115 @@ import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 class GoogleMapTilesProviderTest {
+    private fun usageCount(tracker: ApiUsageTracker, product: ApiProduct): Long =
+        (tracker.snapshot()["products"] as List<*>).map { it as Map<*, *> }
+            .single { it["id"] == product.id }["used"] as Long
+
+    @Test
+    fun allProviderPathsCountMappedNetworkActionsIncludingValidation() {
+        val tracker = ApiUsageTracker(MemoryApiUsagePersistence())
+        val http = FakeGoogleHttpClient()
+        val provider = GoogleMapTilesProvider(FakeCredentialStore(), FakeIdentityProvider(), http,
+            FakeBinaryStringEncoder(), sourceTileDecoder = FixtureSourceTileDecoder(256), apiUsage = tracker)
+        try {
+            assertEquals("valid", provider.validateProviderSetup()["validationState"])
+            assertEquals(0L, usageCount(tracker, ApiProduct.MAP_TILES))
+            for (product in listOf(ApiProduct.GEOCODING, ApiProduct.AUTOCOMPLETE, ApiProduct.PLACE_DETAILS, ApiProduct.ROUTES)) {
+                assertEquals(2L, usageCount(tracker, product), "Both validation probes count for $product")
+            }
+            provider.geocodeDestination("Googleplex", "en", "US")
+            provider.autocompleteDestination("Google", null, null, "session", "en", "US")
+            provider.resolvePlace("test-place", "session", "en", "US")
+            provider.computeRoute(37.0, -122.0, null, 37.1, -122.1, "drive", "en", "US")
+            assertEquals(true, provider.previewTile(37.0, -122.0, 16)["ok"])
+            for (product in listOf(ApiProduct.GEOCODING, ApiProduct.AUTOCOMPLETE, ApiProduct.PLACE_DETAILS, ApiProduct.ROUTES)) {
+                assertEquals(3L, usageCount(tracker, product))
+            }
+            assertEquals(1L, usageCount(tracker, ApiProduct.MAP_TILES))
+            assertEquals(true, provider.watchTile(54, 63, 16)["ok"])
+            val tileCount = usageCount(tracker, ApiProduct.MAP_TILES)
+            val requests = http.requests.size
+            assertEquals(true, provider.watchTile(54, 63, 16)["ok"])
+            assertEquals(tileCount, usageCount(tracker, ApiProduct.MAP_TILES))
+            assertEquals(requests, http.requests.size)
+        } finally { provider.close() }
+    }
+
+    @Test
+    fun disabledAndCappedRequestsNeverReachHttpAndDoNotInvalidateTheKey() {
+        val tracker = ApiUsageTracker(MemoryApiUsagePersistence())
+        val http = FakeGoogleHttpClient()
+        val store = FakeCredentialStore()
+        val provider = GoogleMapTilesProvider(store, FakeIdentityProvider(), http,
+            FakeBinaryStringEncoder(), sourceTileDecoder = FixtureSourceTileDecoder(256), apiUsage = tracker)
+        try {
+            provider.validateProviderSetup()
+            tracker.update(mapOf("freeCaps" to mapOf("geocoding" to 3L)))
+            assertEquals(true, provider.geocodeDestination("Googleplex", "en", "US")["ok"])
+            val requestsAtCap = http.requests.size
+            val capped = provider.geocodeDestination("Googleplex", "en", "US")
+            assertEquals("api_limit_reached", capped["usageBlockReason"])
+            assertEquals(requestsAtCap, http.requests.size)
+            assertEquals("valid", store.getStatus()["validationState"])
+            tracker.update(mapOf("apiEnabled" to false, "mode" to "warn"))
+            val operations = listOf(
+                { provider.geocodeDestination("Googleplex", "en", "US") },
+                { provider.autocompleteDestination("Google", null, null, null, "en", "US") },
+                { provider.resolvePlace("test-place", null, "en", "US") },
+                { provider.computeRoute(37.0, -122.0, null, 37.1, -122.1, "drive", "en", "US") },
+                { provider.previewTile(37.0, -122.0, 16) },
+                { provider.watchTile(54, 63, 16) }
+            )
+            operations.forEach { operation ->
+                val result = operation()
+                assertEquals(false, result["ok"])
+                assertTrue((result["detail"] as String).contains("disabled"))
+            }
+            assertEquals(true, provider.validateProviderSetup()["usageBlocked"])
+            assertEquals(requestsAtCap, http.requests.size)
+            assertEquals("valid", store.getStatus()["validationState"])
+            tracker.update(mapOf("apiEnabled" to true))
+            assertEquals(true, provider.geocodeDestination("Googleplex", "en", "US")["ok"])
+            assertEquals(4L, usageCount(tracker, ApiProduct.GEOCODING))
+        } finally { provider.close() }
+    }
+
+    @Test
+    fun failedTileDispatchIsCountedBeforeTheHttpClientRuns() {
+        val store = FakeCredentialStore()
+        store.markValidationResult("valid", "Ready", 200, PACKAGE_NAME, CERT_SHA1)
+        val tracker = ApiUsageTracker(MemoryApiUsagePersistence())
+        val fake = FakeGoogleHttpClient()
+        val http = object : GoogleHttpClient {
+            override fun execute(request: GoogleHttpRequest): GoogleHttpResponse {
+                if (request.expectsBinary) {
+                    assertEquals(1L, usageCount(tracker, ApiProduct.MAP_TILES))
+                    throw IOException("Synthetic offline failure")
+                }
+                return fake.execute(request)
+            }
+        }
+        val provider = GoogleMapTilesProvider(store, FakeIdentityProvider(), http, apiUsage = tracker)
+        try {
+            assertEquals(false, provider.previewTile(37.0, -122.0, 16)["ok"])
+            assertEquals(1L, usageCount(tracker, ApiProduct.MAP_TILES))
+        } finally { provider.close() }
+    }
+
+    @Test
+    fun cancelledAndEmptyWorkDoesNotConsumeUsage() {
+        val tracker = ApiUsageTracker(MemoryApiUsagePersistence())
+        val provider = GoogleMapTilesProvider(FakeCredentialStore(), FakeIdentityProvider(), FakeGoogleHttpClient(), apiUsage = tracker)
+        try {
+            provider.geocodeDestination("", "en", "US")
+            provider.autocompleteDestination("", null, null, null, "en", "US")
+            provider.resolvePlace("", null, "en", "US")
+            val token = TileCancellationToken().also { it.cancel() }
+            assertTrue(runCatching { provider.watchTile(54, 63, 16, token) }.isFailure)
+            ApiProduct.entries.forEach { assertEquals(0L, usageCount(tracker, it)) }
+        } finally { provider.close() }
+    }
+
     @Test
     fun replacementDuringReadinessValidationCannotReauthorizeOuterKey() {
         val outerOperationPaused = CountDownLatch(1)

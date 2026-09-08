@@ -22,10 +22,14 @@ internal class MappyWatchRuntime private constructor(context: Context) {
     @Volatile private var pendingLaunchRequestId: Int? = null
 
     val apiKeyStore = ApiKeyStore(appContext)
+    val apiUsage = ApiUsageTracker(PreferencesApiUsagePersistence(appContext)) { warning ->
+        emitEvent(mapOf("event" to "apiUsageChanged", "detail" to warning))
+    }
     val mapTilesProvider = GoogleMapTilesProvider(
         appContext,
         apiKeyStore,
-        allowUnrestrictedDevelopmentKey = { isSeededDevelopmentApiKey() }
+        allowUnrestrictedDevelopmentKey = { isSeededDevelopmentApiKey() },
+        apiUsage = apiUsage
     )
 
     lateinit var bridge: WatchAppMessageBridge

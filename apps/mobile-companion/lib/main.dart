@@ -9,6 +9,8 @@ import 'package:flutter/services.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart' as gmaps;
 
 import 'about_screen.dart';
+import 'api_usage.dart';
+import 'api_usage_screen.dart';
 import 'battery_optimization_bridge.dart';
 import 'bridge_channel.dart';
 import 'first_run_setup_checklist.dart';
@@ -42,6 +44,7 @@ class MappyApp extends StatelessWidget {
     this.bridgeRepository,
     this.batteryOptimizationRepository,
     this.watchDispatcher,
+    this.apiUsageRepository = const NativeApiUsageRepository(),
     this.enableEmbeddedGoogleMap = false,
   });
 
@@ -50,6 +53,7 @@ class MappyApp extends StatelessWidget {
   final BridgeRepository? bridgeRepository;
   final BatteryOptimizationRepository? batteryOptimizationRepository;
   final WatchMessageDispatcher? watchDispatcher;
+  final ApiUsageRepository apiUsageRepository;
   final bool enableEmbeddedGoogleMap;
 
   @override
@@ -74,6 +78,7 @@ class MappyApp extends StatelessWidget {
             batteryOptimizationRepository ??
             const NativeBatteryOptimizationRepository(),
         watchDispatcher: watchDispatcher,
+        apiUsageRepository: apiUsageRepository,
         enableEmbeddedGoogleMap: enableEmbeddedGoogleMap,
       ),
     );
@@ -97,6 +102,7 @@ class CompanionHome extends StatefulWidget {
     required this.bridgeRepository,
     required this.batteryOptimizationRepository,
     this.watchDispatcher,
+    this.apiUsageRepository = const NativeApiUsageRepository(),
     this.enableEmbeddedGoogleMap = false,
     super.key,
   });
@@ -106,6 +112,7 @@ class CompanionHome extends StatefulWidget {
   final BridgeRepository bridgeRepository;
   final BatteryOptimizationRepository batteryOptimizationRepository;
   final WatchMessageDispatcher? watchDispatcher;
+  final ApiUsageRepository apiUsageRepository;
   final bool enableEmbeddedGoogleMap;
 
   @override
@@ -154,11 +161,14 @@ class _CompanionHomeState extends State<CompanionHome>
   final List<String> _diagnosticEvents = [];
   late final WatchMessageDispatcher _navigationDispatcher;
   StreamSubscription<BridgeEvent>? _bridgeSubscription;
+  late final ApiUsageController _apiUsage;
 
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    _apiUsage = ApiUsageController(widget.apiUsageRepository);
+    unawaited(_apiUsage.refresh());
     _navigationDispatcher =
         widget.watchDispatcher ??
         NativeWatchMessageDispatcher(
@@ -179,6 +189,7 @@ class _CompanionHomeState extends State<CompanionHome>
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    _apiUsage.dispose();
     unawaited(_bridgeSubscription?.cancel());
     super.dispose();
   }
@@ -188,6 +199,7 @@ class _CompanionHomeState extends State<CompanionHome>
     if (state != AppLifecycleState.resumed) {
       return;
     }
+    unawaited(_apiUsage.refresh());
     unawaited(_refreshLocation(timeout: _startupLocationTimeout));
     unawaited(_refreshActiveRoute());
   }
@@ -346,6 +358,21 @@ class _CompanionHomeState extends State<CompanionHome>
 
   void _handleBridgeEvent(BridgeEvent event) {
     if (!mounted) return;
+    if (event.type == 'apiUsageChanged') {
+      unawaited(_apiUsage.refresh());
+      if (event.detail != null) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(event.detail!),
+            action: SnackBarAction(
+              label: 'API usage',
+              onPressed: _openApiUsage,
+            ),
+          ),
+        );
+      }
+      return;
+    }
     if (event.type == 'displaySettingsChanged') {
       unawaited(_loadDisplaySettings());
     }
@@ -1402,6 +1429,8 @@ class _CompanionHomeState extends State<CompanionHome>
 
   void _openAbout() => _pushPage(const AboutScreen());
 
+  void _openApiUsage() => _pushPage(ApiUsageScreen(controller: _apiUsage));
+
   void _dismissShareStatus() {
     setState(() => _shareStatus = null);
     _maybeShowFirstRunSetupChecklist();
@@ -1427,103 +1456,115 @@ class _CompanionHomeState extends State<CompanionHome>
 
     return Scaffold(
       appBar: AppBar(title: Text(title)),
-      body: SafeArea(
-        child: IndexedStack(
-          index: tabs.indexOf(_selectedTab),
-          children: [
-            TickerMode(
-              enabled: _selectedTab == CompanionTab.navigate,
-              child: NavigateScreen(
-                key: const PageStorageKey('navigate-tab'),
-                providerStatus: _providerStatus,
-                location: _location,
-                routeResult: _routeResult,
-                shareStatus: _shareStatus,
-                activeRoute: _activeRoute,
-                setupChecklistChecking: setupChecklistChecking,
-                showSetupChecklist: _showFirstRunSetupChecklist,
-                setupChecklistSnapshot: _setupChecklistSnapshot,
-                savedLocations: _savedLocations,
-                locationReady: _locationAccessStatus.isReady,
-                backgroundReadinessWarning:
-                    !_bridgeStatus
-                        .notificationPermissionState
-                        .allowsWatchNotification ||
-                    _batteryOptimizationState !=
-                        BatteryOptimizationState.disabled,
-                isComputingRoute: _isComputingRoute,
-                providerRepository: widget.providerRepository,
-                enableEmbeddedGoogleMap: widget.enableEmbeddedGoogleMap,
-                defaultTravelMode: _travelModeForWatch(
-                  _displaySettings.travelMode,
+      body: ApiUsageScope(
+        controller: _apiUsage,
+        child: SafeArea(
+          child: Column(
+            children: [
+              ApiUsageNotice(controller: _apiUsage, onOpen: _openApiUsage),
+              Expanded(
+                child: IndexedStack(
+                  index: tabs.indexOf(_selectedTab),
+                  children: [
+                    TickerMode(
+                      enabled: _selectedTab == CompanionTab.navigate,
+                      child: NavigateScreen(
+                        key: const PageStorageKey('navigate-tab'),
+                        providerStatus: _providerStatus,
+                        location: _location,
+                        routeResult: _routeResult,
+                        shareStatus: _shareStatus,
+                        activeRoute: _activeRoute,
+                        setupChecklistChecking: setupChecklistChecking,
+                        showSetupChecklist: _showFirstRunSetupChecklist,
+                        setupChecklistSnapshot: _setupChecklistSnapshot,
+                        savedLocations: _savedLocations,
+                        locationReady: _locationAccessStatus.isReady,
+                        backgroundReadinessWarning:
+                            !_bridgeStatus
+                                .notificationPermissionState
+                                .allowsWatchNotification ||
+                            _batteryOptimizationState !=
+                                BatteryOptimizationState.disabled,
+                        isComputingRoute: _isComputingRoute,
+                        providerRepository: widget.providerRepository,
+                        enableEmbeddedGoogleMap: widget.enableEmbeddedGoogleMap,
+                        defaultTravelMode: _travelModeForWatch(
+                          _displaySettings.travelMode,
+                        ),
+                        onNavigateNow: _navigateNowRoute,
+                        onRerouteActiveRoute: _rerouteActiveRoute,
+                        onClearActiveRoute: _clearActiveRoute,
+                        onOpenSetup: () {
+                          unawaited(_openGoogleSetup());
+                        },
+                        onOpenPermissions: () {
+                          unawaited(_openPermissions());
+                        },
+                        onDismissShareStatus: _dismissShareStatus,
+                        onOpenChecklistGoogleSetup: () {
+                          unawaited(_openGoogleSetup());
+                        },
+                        onOpenChecklistPermissions: (focus) {
+                          unawaited(_openPermissions(focus: focus));
+                        },
+                        onFinishSetupChecklist: _closeFirstRunSetupChecklist,
+                      ),
+                    ),
+                    TickerMode(
+                      enabled: _selectedTab == CompanionTab.savedLocations,
+                      child: SavedLocationsScreen(
+                        key: const PageStorageKey('saved-tab'),
+                        providerRepository: widget.providerRepository,
+                        providerStatus: _providerStatus,
+                        location: _location,
+                        destinations: _savedLocations,
+                        defaultTravelMode: _displaySettings.travelMode,
+                        isLoading: _isLoadingSavedLocations,
+                        isSaving: _isSavingSavedLocation,
+                        detail: _savedLocationsDetail,
+                        onSave: _saveSavedLocation,
+                        onClear: _clearSavedLocation,
+                        onOpenSetup: _openGoogleSetup,
+                      ),
+                    ),
+                    TickerMode(
+                      enabled: _selectedTab == CompanionTab.settings,
+                      child: SettingsHubScreen(
+                        key: const PageStorageKey('settings-tab'),
+                        providerStatus: _providerStatus,
+                        setupChecklistSummary: _setupChecklistSummary,
+                        setupChecklistNeedsAttention:
+                            _readinessLoaded &&
+                            _setupChecklistSnapshot.needsAttention,
+                        permissionsSummary: _permissionsNeedAttention
+                            ? 'Needs attention'
+                            : 'Ready',
+                        watchSummary: _bridgeStatus.watchDetailLabel,
+                        readinessLoaded: _readinessLoaded,
+                        providerNeedsAttention: _providerNeedsAttention,
+                        permissionsNeedAttention: _permissionsNeedAttention,
+                        onOpenSetupChecklist: _openSetupChecklist,
+                        onOpenGoogleSetup: () {
+                          unawaited(_openGoogleSetup());
+                        },
+                        onOpenApiUsage: _openApiUsage,
+                        onOpenPermissions: () {
+                          unawaited(_openPermissions());
+                        },
+                        onOpenWatchConnection: _openWatchConnection,
+                        onOpenNavigationPreferences: _openNavigationPreferences,
+                        onOpenAppearancePreferences: _openAppearancePreferences,
+                        onOpenWatchMapPreferences: _openWatchMapPreferences,
+                        onOpenDiagnostics: _openDiagnostics,
+                        onOpenAbout: _openAbout,
+                      ),
+                    ),
+                  ],
                 ),
-                onNavigateNow: _navigateNowRoute,
-                onRerouteActiveRoute: _rerouteActiveRoute,
-                onClearActiveRoute: _clearActiveRoute,
-                onOpenSetup: () {
-                  unawaited(_openGoogleSetup());
-                },
-                onOpenPermissions: () {
-                  unawaited(_openPermissions());
-                },
-                onDismissShareStatus: _dismissShareStatus,
-                onOpenChecklistGoogleSetup: () {
-                  unawaited(_openGoogleSetup());
-                },
-                onOpenChecklistPermissions: (focus) {
-                  unawaited(_openPermissions(focus: focus));
-                },
-                onFinishSetupChecklist: _closeFirstRunSetupChecklist,
               ),
-            ),
-            TickerMode(
-              enabled: _selectedTab == CompanionTab.savedLocations,
-              child: SavedLocationsScreen(
-                key: const PageStorageKey('saved-tab'),
-                providerRepository: widget.providerRepository,
-                providerStatus: _providerStatus,
-                location: _location,
-                destinations: _savedLocations,
-                defaultTravelMode: _displaySettings.travelMode,
-                isLoading: _isLoadingSavedLocations,
-                isSaving: _isSavingSavedLocation,
-                detail: _savedLocationsDetail,
-                onSave: _saveSavedLocation,
-                onClear: _clearSavedLocation,
-                onOpenSetup: _openGoogleSetup,
-              ),
-            ),
-            TickerMode(
-              enabled: _selectedTab == CompanionTab.settings,
-              child: SettingsHubScreen(
-                key: const PageStorageKey('settings-tab'),
-                providerStatus: _providerStatus,
-                setupChecklistSummary: _setupChecklistSummary,
-                setupChecklistNeedsAttention:
-                    _readinessLoaded && _setupChecklistSnapshot.needsAttention,
-                permissionsSummary: _permissionsNeedAttention
-                    ? 'Needs attention'
-                    : 'Ready',
-                watchSummary: _bridgeStatus.watchDetailLabel,
-                readinessLoaded: _readinessLoaded,
-                providerNeedsAttention: _providerNeedsAttention,
-                permissionsNeedAttention: _permissionsNeedAttention,
-                onOpenSetupChecklist: _openSetupChecklist,
-                onOpenGoogleSetup: () {
-                  unawaited(_openGoogleSetup());
-                },
-                onOpenPermissions: () {
-                  unawaited(_openPermissions());
-                },
-                onOpenWatchConnection: _openWatchConnection,
-                onOpenNavigationPreferences: _openNavigationPreferences,
-                onOpenAppearancePreferences: _openAppearancePreferences,
-                onOpenWatchMapPreferences: _openWatchMapPreferences,
-                onOpenDiagnostics: _openDiagnostics,
-                onOpenAbout: _openAbout,
-              ),
-            ),
-          ],
+            ],
+          ),
         ),
       ),
       bottomNavigationBar: NavigationBar(
@@ -3011,6 +3052,13 @@ class _DestinationMapPanel extends StatelessWidget {
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final routePoints = routeResult?.fullRoutePoints ?? const <RoutePoint>[];
+    final apiUsage = ApiUsageScope.maybeOf(context);
+    final fallback = _StaticDestinationMapPreview(
+      destination: destination,
+      location: location,
+      routePoints: routePoints,
+      onTap: () => onTap(initialTarget),
+    );
     final mapChild = enableGoogleMap
         ? gmaps.GoogleMap(
             initialCameraPosition: gmaps.CameraPosition(
@@ -3034,12 +3082,14 @@ class _DestinationMapPanel extends StatelessWidget {
               ),
             },
           )
-        : _StaticDestinationMapPreview(
-            destination: destination,
-            location: location,
-            routePoints: routePoints,
-            onTap: () => onTap(initialTarget),
-          );
+        : fallback;
+    final guardedMap = enableGoogleMap && apiUsage != null
+        ? ApiUsageMapGate(
+            controller: apiUsage,
+            map: mapChild,
+            fallback: fallback,
+          )
+        : fallback;
 
     return Semantics(
       label: 'Destination map preview',
@@ -3055,7 +3105,7 @@ class _DestinationMapPanel extends StatelessWidget {
             ),
             child: Stack(
               children: [
-                Positioned.fill(child: mapChild),
+                Positioned.fill(child: guardedMap),
                 if (destination != null)
                   Positioned(
                     left: 10,
