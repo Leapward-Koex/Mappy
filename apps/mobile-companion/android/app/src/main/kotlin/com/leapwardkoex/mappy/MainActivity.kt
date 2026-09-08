@@ -213,6 +213,26 @@ class MainActivity : FlutterActivity() {
             PROVIDER_CHANNEL
         ).setMethodCallHandler { call, result ->
             when (call.method) {
+                "getApiUsage", "setApiUsageSettings" -> {
+                    try {
+                        val tracker = watchRuntime.apiUsage
+                        val snapshot = when (call.method) {
+                            "setApiUsageSettings" -> {
+                                val values = call.arguments as? Map<*, *>
+                                    ?: throw IllegalArgumentException("API usage settings are required.")
+                                tracker.update(values).also {
+                                    if (it["apiEnabled"] == false) mapTilesProvider.clearProviderSessions()
+                                }
+                            }
+                            else -> tracker.snapshot()
+                        }
+                        result.success(snapshot)
+                    } catch (blocked: ApiUsageBlockedException) {
+                        result.error(blocked.reason, blocked.message, null)
+                    } catch (invalid: IllegalArgumentException) {
+                        result.error("invalid_api_usage_settings", invalid.message, null)
+                    }
+                }
                 "storeApiKey" -> {
                     val apiKey = call.argument<String>("apiKey")
                     if (apiKey == null) {

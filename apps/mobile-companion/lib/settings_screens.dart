@@ -158,7 +158,9 @@ class _GoogleMapsSetupScreenState extends State<GoogleMapsSetupScreen> {
     setState(() {
       _status = status;
       _busy = false;
-      _message = _providerReady(status)
+      _message = status.usageBlocked
+          ? status.validationDetail
+          : _providerReady(status)
           ? 'Google services are ready.'
           : _providerFixMessage(status);
     });
@@ -188,7 +190,9 @@ class _GoogleMapsSetupScreenState extends State<GoogleMapsSetupScreen> {
     setState(() {
       _status = status;
       _busy = false;
-      _message = _providerReady(status)
+      _message = status.usageBlocked
+          ? status.validationDetail
+          : _providerReady(status)
           ? 'Google services are ready.'
           : _providerFixMessage(status);
     });
@@ -864,6 +868,7 @@ class SettingsHubScreen extends StatelessWidget {
     required this.onOpenSetupChecklist,
     required this.onOpenGoogleSetup,
     required this.onOpenPermissions,
+    this.onOpenApiUsage,
     required this.onOpenWatchConnection,
     required this.onOpenNavigationPreferences,
     required this.onOpenAppearancePreferences,
@@ -884,6 +889,7 @@ class SettingsHubScreen extends StatelessWidget {
   final VoidCallback onOpenSetupChecklist;
   final VoidCallback onOpenGoogleSetup;
   final VoidCallback onOpenPermissions;
+  final VoidCallback? onOpenApiUsage;
   final VoidCallback onOpenWatchConnection;
   final VoidCallback onOpenNavigationPreferences;
   final VoidCallback onOpenAppearancePreferences;
@@ -919,6 +925,14 @@ class SettingsHubScreen extends StatelessWidget {
           showWarning: readinessLoaded && providerNeedsAttention,
           onTap: onOpenGoogleSetup,
         ),
+        if (onOpenApiUsage != null)
+          _SettingsLinkTile(
+            key: const ValueKey('settings-api-usage'),
+            icon: Icons.data_usage,
+            title: 'API usage',
+            subtitle: 'Free allowances, rollover, and request controls',
+            onTap: onOpenApiUsage!,
+          ),
         _SettingsLinkTile(
           key: const ValueKey('settings-permissions'),
           icon: Icons.admin_panel_settings_outlined,

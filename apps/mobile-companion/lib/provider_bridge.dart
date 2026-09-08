@@ -144,6 +144,7 @@ class ProviderStatus {
     this.validationUpdatedAt,
     this.packageName,
     this.certSha1,
+    this.usageBlocked = false,
   });
 
   const ProviderStatus.notConfigured()
@@ -156,7 +157,8 @@ class ProviderStatus {
       updatedAt = null,
       validationUpdatedAt = null,
       packageName = null,
-      certSha1 = null;
+      certSha1 = null,
+      usageBlocked = false;
 
   final bool configured;
   final ProviderValidationState validationState;
@@ -168,6 +170,7 @@ class ProviderStatus {
   final DateTime? validationUpdatedAt;
   final String? packageName;
   final String? certSha1;
+  final bool usageBlocked;
 
   String get keyLabel {
     if (!configured) {
@@ -197,6 +200,7 @@ class ProviderStatus {
       validationUpdatedAt: _dateFromMillis(data['validationUpdatedAtMillis']),
       packageName: data['packageName'] as String?,
       certSha1: data['certSha1'] as String?,
+      usageBlocked: data['usageBlocked'] == true,
     );
   }
 
