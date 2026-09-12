@@ -133,6 +133,7 @@ class _CompanionHomeState extends State<CompanionHome>
   bool _initialActiveRouteSyncComplete = false;
   LocationSnapshot? _location;
   int _locationSyncEpoch = 0;
+  Future<void>? _searchLocationRefresh;
   MapTileSettings _mapTileSettings = MapTileSettings.defaults;
   WatchDisplaySettings _displaySettings = WatchDisplaySettings.defaults;
   List<WatchDestinationConfig> _savedLocations = const [];
@@ -691,6 +692,30 @@ class _CompanionHomeState extends State<CompanionHome>
     setState(() {
       _location = location;
     });
+  }
+
+  Future<void> _refreshSearchLocation() {
+    final location = _location;
+    final age = location == null
+        ? null
+        : DateTime.now().difference(location.timestamp);
+    final locationIsRecent =
+        location?.isFresh == true &&
+        age != null &&
+        age >= Duration.zero &&
+        age <= const Duration(minutes: 1);
+    if (locationIsRecent ||
+        !_locationAccessStatus.servicesEnabled ||
+        !_locationAccessStatus.foregroundGranted) {
+      return Future<void>.value();
+    }
+    // Coalesce keystrokes into one GPS request without holding up autocomplete.
+    return _searchLocationRefresh ??=
+        _refreshGpsFix(timeout: const Duration(seconds: 8))
+            .onError((Object error, StackTrace stack) {
+              // Search can still return suggestions when a GPS fix is unavailable.
+            })
+            .whenComplete(() => _searchLocationRefresh = null);
   }
 
   Future<LocationAccessStatus> _requestLocationPermission() async {
@@ -1492,6 +1517,7 @@ class _CompanionHomeState extends State<CompanionHome>
                         defaultTravelMode: _travelModeForWatch(
                           _displaySettings.travelMode,
                         ),
+                        onRefreshSearchLocation: _refreshSearchLocation,
                         onNavigateNow: _navigateNowRoute,
                         onRerouteActiveRoute: _rerouteActiveRoute,
                         onClearActiveRoute: _clearActiveRoute,
@@ -1741,6 +1767,7 @@ class NavigateScreen extends StatelessWidget {
     required this.providerRepository,
     required this.enableEmbeddedGoogleMap,
     required this.defaultTravelMode,
+    required this.onRefreshSearchLocation,
     required this.onNavigateNow,
     required this.onRerouteActiveRoute,
     required this.onClearActiveRoute,
@@ -1775,6 +1802,7 @@ class NavigateScreen extends StatelessWidget {
     required TravelMode travelMode,
   })
   onNavigateNow;
+  final Future<void> Function() onRefreshSearchLocation;
   final Future<String> Function() onRerouteActiveRoute;
   final Future<String> Function() onClearActiveRoute;
   final VoidCallback onOpenSetup;
@@ -1793,11 +1821,11 @@ class NavigateScreen extends StatelessWidget {
     final showShareProgress =
         share != null && !shareFailed && !share.isActiveRoute;
     final showShareFailure = share != null && shareFailed;
+    Widget? content;
     if (activeRoute == null && share == null && setupChecklistChecking) {
-      return const Center(child: _CompactCheckingSetup());
-    }
-    if (activeRoute == null && share == null && showSetupChecklist) {
-      return FirstRunSetupChecklist(
+      content = const Center(child: _CompactCheckingSetup());
+    } else if (activeRoute == null && share == null && showSetupChecklist) {
+      content = FirstRunSetupChecklist(
         snapshot: setupChecklistSnapshot,
         onOpenGoogleSetup: onOpenChecklistGoogleSetup,
         onOpenPermissions: onOpenChecklistPermissions,
@@ -1805,81 +1833,74 @@ class NavigateScreen extends StatelessWidget {
         onDismiss: onFinishSetupChecklist,
       );
     }
-    return ListView(
-      padding: const EdgeInsets.fromLTRB(16, 8, 16, 24),
-      children: [
-        if (showShareProgress) ...[
-          _CompactNotice(
-            icon: Icons.ios_share_outlined,
-            title: share.title,
-            detail: share.subtitle,
-            busy: true,
-          ),
-          const SizedBox(height: 12),
-        ],
-        if (showShareFailure) ...[
-          _CompactNotice(
-            icon: share.state == 'queuedUnconfirmed'
-                ? Icons.watch_later_outlined
-                : Icons.error_outline,
-            title: share.title,
-            detail: share.subtitle,
-            onDismiss: onDismissShareStatus,
-          ),
-          const SizedBox(height: 12),
-        ],
-        if (activeRoute != null)
-          _ActiveRouteSummaryCard(
-            activeRoute: activeRoute!,
-            routeResult: routeResult,
-            busy: isComputingRoute,
-            canReroute:
-                providerReady &&
-                (activeRoute!.originPolicy ==
-                        WatchRouteOriginPolicy.explicitPlace ||
-                    locationReady),
-            onReroute: onRerouteActiveRoute,
-            onEndNavigation: onClearActiveRoute,
-          )
-        else if (!providerReady)
-          _RequiredSetupCard(onOpenSetup: onOpenSetup)
-        else ...[
-          if (!locationReady) ...[
-            _CompactNotice(
-              icon: Icons.location_off_outlined,
-              title: 'Location setup required',
-              detail:
-                  'Turn on location and allow Mappy to use it in the background before starting navigation.',
-              actionLabel: 'Permissions',
-              onAction: onOpenPermissions,
-            ),
-            const SizedBox(height: 12),
-          ] else if (backgroundReadinessWarning) ...[
-            _CompactNotice(
-              icon: Icons.warning_amber_outlined,
-              title: 'Background reliability needs attention',
-              detail:
-                  'Notifications or unrestricted battery usage still need setup.',
-              actionLabel: 'Permissions',
-              onAction: onOpenPermissions,
-            ),
-            const SizedBox(height: 12),
-          ],
-          RouteProbePanel(
-            location: location,
-            providerRepository: providerRepository,
-            providerStatus: providerStatus,
-            routeResult: routeResult,
-            isComputingRoute: isComputingRoute,
-            enableEmbeddedGoogleMap: enableEmbeddedGoogleMap,
-            defaultTravelMode: defaultTravelMode,
-            canStartNavigation: locationReady,
-            savedLocations: savedLocations,
-            onNavigateNow: onNavigateNow,
-          ),
-          const SizedBox(height: 16),
-        ],
-      ],
+
+    final notices = <Widget>[
+      if (showShareProgress)
+        _CompactNotice(
+          icon: Icons.ios_share_outlined,
+          title: share.title,
+          detail: share.subtitle,
+          busy: true,
+        ),
+      if (showShareFailure)
+        _CompactNotice(
+          icon: share.state == 'queuedUnconfirmed'
+              ? Icons.watch_later_outlined
+              : Icons.error_outline,
+          title: share.title,
+          detail: share.subtitle,
+          onDismiss: onDismissShareStatus,
+        ),
+      if (activeRoute != null)
+        _ActiveRouteSummaryCard(
+          activeRoute: activeRoute!,
+          routeResult: routeResult,
+          busy: isComputingRoute,
+          canReroute:
+              providerReady &&
+              (activeRoute!.originPolicy ==
+                      WatchRouteOriginPolicy.explicitPlace ||
+                  locationReady),
+          onReroute: onRerouteActiveRoute,
+          onEndNavigation: onClearActiveRoute,
+        )
+      else if (!providerReady)
+        _RequiredSetupCard(onOpenSetup: onOpenSetup)
+      else if (!locationReady)
+        _CompactNotice(
+          icon: Icons.location_off_outlined,
+          title: 'Location setup required',
+          detail:
+              'Turn on location and allow Mappy to use it in the background before starting navigation.',
+          actionLabel: 'Permissions',
+          onAction: onOpenPermissions,
+        )
+      else if (backgroundReadinessWarning)
+        _CompactNotice(
+          icon: Icons.warning_amber_outlined,
+          title: 'Background reliability needs attention',
+          detail:
+              'Notifications or unrestricted battery usage still need setup.',
+          actionLabel: 'Permissions',
+          onAction: onOpenPermissions,
+        ),
+    ];
+
+    return RouteProbePanel(
+      location: location,
+      providerRepository: providerRepository,
+      providerStatus: providerStatus,
+      routeResult: routeResult,
+      activeRoute: activeRoute,
+      isComputingRoute: isComputingRoute,
+      enableEmbeddedGoogleMap: enableEmbeddedGoogleMap,
+      defaultTravelMode: defaultTravelMode,
+      canStartNavigation: locationReady,
+      savedLocations: savedLocations,
+      notices: notices,
+      content: content,
+      onRefreshSearchLocation: onRefreshSearchLocation,
+      onNavigateNow: onNavigateNow,
     );
   }
 }
@@ -2122,6 +2143,10 @@ class RouteProbePanel extends StatefulWidget {
     required this.canStartNavigation,
     required this.savedLocations,
     required this.onNavigateNow,
+    this.onRefreshSearchLocation,
+    this.activeRoute,
+    this.notices = const [],
+    this.content,
     super.key,
   });
 
@@ -2134,6 +2159,10 @@ class RouteProbePanel extends StatefulWidget {
   final TravelMode defaultTravelMode;
   final bool canStartNavigation;
   final List<WatchDestinationConfig> savedLocations;
+  final Future<void> Function()? onRefreshSearchLocation;
+  final WatchActiveRoute? activeRoute;
+  final List<Widget> notices;
+  final Widget? content;
   final Future<String> Function({
     required WatchRouteOriginPolicy originPolicy,
     WatchRouteEndpoint? origin,
@@ -2186,6 +2215,38 @@ class _RouteProbePanelState extends State<RouteProbePanel> {
         widget.defaultTravelMode != oldWidget.defaultTravelMode) {
       _travelMode = widget.defaultTravelMode;
     }
+    final activeDestination = widget.activeRoute?.destination;
+    if (activeDestination != null &&
+        (oldWidget.activeRoute?.requestId != widget.activeRoute?.requestId ||
+            oldWidget.activeRoute?.updatedAtMillis !=
+                widget.activeRoute?.updatedAtMillis)) {
+      unawaited(_moveDestinationMapTo(activeDestination));
+    } else if (oldWidget.activeRoute != null && widget.activeRoute == null) {
+      _destination.cancelSearch();
+      _updatingText = true;
+      _destination.controller.clear();
+      _updatingText = false;
+      _destination.selectedSuggestion = null;
+      _destination.resolvedEndpoint = null;
+      _destination.suggestions = const [];
+      _destination.searching = false;
+      _destination.resolvingSelection = false;
+      _destination.detail = null;
+      _destination.attribution = null;
+      _localMessage = null;
+      _sentDestinationLabel = null;
+    }
+    final location = widget.location;
+    if (location != null &&
+        !_sameLocation(oldWidget.location, location) &&
+        !_resolving &&
+        !widget.isComputingRoute &&
+        widget.activeRoute == null) {
+      _refreshAutocompleteBias(_destination, location);
+      if (_originPolicy == WatchRouteOriginPolicy.explicitPlace) {
+        _refreshAutocompleteBias(_origin, location);
+      }
+    }
     if (_shouldAutoCenterMapOnLocation(oldWidget.location, widget.location)) {
       unawaited(_moveDestinationMapToLocation(widget.location!));
     }
@@ -2206,7 +2267,7 @@ class _RouteProbePanelState extends State<RouteProbePanel> {
     draft.selectedSuggestion = null;
     draft.resolvedEndpoint = null;
     draft.resolvingSelection = false;
-    draft.debounce?.cancel();
+    draft.cancelSearch();
     final input = draft.controller.text.trim();
     if (input.length < 3) {
       setState(() {
@@ -2226,14 +2287,38 @@ class _RouteProbePanelState extends State<RouteProbePanel> {
       _localMessage = null;
       _sentDestinationLabel = null;
     });
+    unawaited(widget.onRefreshSearchLocation?.call());
     draft.debounce = Timer(
       const Duration(milliseconds: 350),
       () => _searchPlaces(draft, input),
     );
   }
 
+  void _refreshAutocompleteBias(
+    _NavigatePlaceDraft draft,
+    LocationSnapshot location,
+  ) {
+    final input = draft.controller.text.trim();
+    if (input.length < 3 ||
+        draft.selectedSuggestion != null ||
+        draft.resolvedEndpoint != null ||
+        draft.debounce?.isActive == true ||
+        draft.searchInput != input ||
+        _sameLocation(draft.searchLocation, location)) {
+      return;
+    }
+    // The pending debounce already uses the newest location. Only repeat a
+    // query that was actually dispatched with an older (or missing) bias.
+    draft.searching = true;
+    draft.detail = null;
+    unawaited(_searchPlaces(draft, input));
+  }
+
   Future<void> _searchPlaces(_NavigatePlaceDraft draft, String input) async {
     final biasLocation = widget.location;
+    final revision = ++draft.searchRevision;
+    draft.searchInput = input;
+    draft.searchLocation = biasLocation;
     PlaceAutocompleteResult result;
     try {
       result = await widget.providerRepository.searchPlaces(
@@ -2251,7 +2336,12 @@ class _RouteProbePanelState extends State<RouteProbePanel> {
       );
     }
 
-    if (!mounted || draft.controller.text.trim() != input) {
+    if (!mounted ||
+        revision != draft.searchRevision ||
+        draft.controller.text.trim() != input ||
+        draft.selectedSuggestion != null ||
+        draft.resolvedEndpoint != null ||
+        widget.activeRoute != null) {
       return;
     }
     setState(() {
@@ -2268,6 +2358,7 @@ class _RouteProbePanelState extends State<RouteProbePanel> {
     _NavigatePlaceDraft draft,
     PlaceAutocompleteSuggestion suggestion,
   ) {
+    draft.cancelSearch();
     _updatingText = true;
     draft.controller.text = suggestion.displayText;
     draft.controller.selection = TextSelection.collapsed(
@@ -2465,6 +2556,8 @@ class _RouteProbePanelState extends State<RouteProbePanel> {
       });
       return;
     }
+    _origin.cancelSearch();
+    _destination.cancelSearch();
     setState(() {
       _resolving = true;
       _localMessage = null;
@@ -2512,7 +2605,10 @@ class _RouteProbePanelState extends State<RouteProbePanel> {
     unawaited(
       _moveDestinationMapCamera(
         _destinationMapInitialTarget(),
-        zoom: _destination.resolvedEndpoint == null ? 14.25 : 15.5,
+        zoom:
+            widget.activeRoute == null && _destination.resolvedEndpoint == null
+            ? 14.25
+            : 15.5,
         animated: false,
       ),
     );
@@ -2527,6 +2623,11 @@ class _RouteProbePanelState extends State<RouteProbePanel> {
   }
 
   void _selectDestinationFromMap(gmaps.LatLng target) {
+    if (_resolving || widget.isComputingRoute || widget.activeRoute != null) {
+      return;
+    }
+    FocusManager.instance.primaryFocus?.unfocus();
+    _destination.cancelSearch();
     final endpoint = WatchRouteEndpoint(
       label: 'Dropped Pin',
       address: _coordinateText(target.latitude, target.longitude),
@@ -2542,6 +2643,7 @@ class _RouteProbePanelState extends State<RouteProbePanel> {
     setState(() {
       _destination.selectedSuggestion = null;
       _destination.resolvedEndpoint = endpoint;
+      _destination.searching = false;
       _destination.resolvingSelection = false;
       _destination.suggestions = const [];
       _destination.attribution = null;
@@ -2601,6 +2703,7 @@ class _RouteProbePanelState extends State<RouteProbePanel> {
     LocationSnapshot? next,
   ) {
     if (next == null ||
+        widget.activeRoute != null ||
         _destination.resolvedEndpoint != null ||
         _routeHasDestination(widget.routeResult)) {
       return false;
@@ -2620,7 +2723,8 @@ class _RouteProbePanelState extends State<RouteProbePanel> {
   }
 
   gmaps.LatLng _destinationMapInitialTarget() {
-    final endpoint = _destination.resolvedEndpoint;
+    final endpoint =
+        widget.activeRoute?.destination ?? _destination.resolvedEndpoint;
     if (endpoint != null) {
       return gmaps.LatLng(endpoint.latitude, endpoint.longitude);
     }
@@ -2737,6 +2841,7 @@ class _RouteProbePanelState extends State<RouteProbePanel> {
       longitude: selected.longitude,
       placeId: selected.placeId,
     );
+    _destination.cancelSearch();
     _updatingText = true;
     _destination.controller.text = selected.address;
     _destination.controller.selection = TextSelection.collapsed(
@@ -2765,7 +2870,12 @@ class _RouteProbePanelState extends State<RouteProbePanel> {
     final theme = Theme.of(context);
     final busy = _resolving || widget.isComputingRoute;
     final providerReady = _providerReady(widget.providerStatus);
-    final canNavigate = providerReady && widget.canStartNavigation && !busy;
+    final canNavigate =
+        providerReady &&
+        widget.canStartNavigation &&
+        _destination.controller.text.trim().isNotEmpty &&
+        !busy &&
+        !_destination.resolvingSelection;
     final warning = _travelMode == TravelMode.drive
         ? widget.routeResult?.routeWarning
         : 'Walk and bike routes may miss safe pedestrian or bicycling path detail.';
@@ -2792,7 +2902,7 @@ class _RouteProbePanelState extends State<RouteProbePanel> {
       label: Text(_travelMode.label),
     );
 
-    return DecoratedBox(
+    final routeForm = DecoratedBox(
       decoration: BoxDecoration(
         color: theme.colorScheme.surface,
         border: Border.all(color: theme.colorScheme.outlineVariant),
@@ -2826,7 +2936,7 @@ class _RouteProbePanelState extends State<RouteProbePanel> {
             LayoutBuilder(
               builder: (context, constraints) {
                 final useColumn =
-                    constraints.maxWidth < 360 ||
+                    constraints.maxWidth < 300 ||
                     MediaQuery.textScalerOf(context).scale(14) > 18;
                 if (useColumn) {
                   return Column(
@@ -2850,21 +2960,6 @@ class _RouteProbePanelState extends State<RouteProbePanel> {
             if (_originPolicy == WatchRouteOriginPolicy.explicitPlace) ...[
               const SizedBox(height: 10),
               _placeField(context, _origin, labelText: 'Origin'),
-            ],
-            if (_destination.resolvedEndpoint != null) ...[
-              const SizedBox(height: 10),
-              _DestinationMapPanel(
-                key: const ValueKey('status-navigate-destination-map'),
-                enableGoogleMap: widget.enableEmbeddedGoogleMap,
-                initialTarget: mapTarget,
-                destination: _destination.resolvedEndpoint,
-                location: widget.location,
-                routeResult: widget.routeResult,
-                onMapCreated: _onDestinationMapCreated,
-                onCameraMove: _onDestinationMapCameraMove,
-                onTap: _selectDestinationFromMap,
-                onUseCenter: _selectDestinationMapCenter,
-              ),
             ],
             if (warning != null) ...[
               const SizedBox(height: 10),
@@ -2919,6 +3014,55 @@ class _RouteProbePanelState extends State<RouteProbePanel> {
         ),
       ),
     );
+    return Column(
+      children: [
+        Expanded(
+          flex: widget.content == null ? 6 : 4,
+          child: _DestinationMapPanel(
+            key: const ValueKey('status-navigate-destination-map'),
+            enableGoogleMap: widget.enableEmbeddedGoogleMap,
+            initialTarget: mapTarget,
+            destination:
+                widget.activeRoute?.destination ??
+                _destination.resolvedEndpoint,
+            location: widget.location,
+            routeResult: widget.routeResult,
+            selectionEnabled: !busy && widget.activeRoute == null,
+            showDestinationBadge: widget.activeRoute == null,
+            onMapCreated: _onDestinationMapCreated,
+            onCameraMove: _onDestinationMapCameraMove,
+            onTap: _selectDestinationFromMap,
+            onUseCenter: _selectDestinationMapCenter,
+            onRecenter: widget.location == null
+                ? null
+                : () => _moveDestinationMapToLocation(widget.location!),
+          ),
+        ),
+        Expanded(
+          flex: widget.content == null ? 5 : 7,
+          child:
+              widget.content ??
+              SingleChildScrollView(
+                key: ValueKey(
+                  widget.activeRoute == null
+                      ? 'navigate-controls'
+                      : 'active-route-controls',
+                ),
+                padding: const EdgeInsets.fromLTRB(16, 12, 16, 24),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    for (final notice in widget.notices) ...[
+                      notice,
+                      const SizedBox(height: 12),
+                    ],
+                    if (widget.activeRoute == null && providerReady) routeForm,
+                  ],
+                ),
+              ),
+        ),
+      ],
+    );
   }
 
   Widget _placeField(
@@ -2939,6 +3083,7 @@ class _RouteProbePanelState extends State<RouteProbePanel> {
           decoration: InputDecoration(
             border: const OutlineInputBorder(),
             labelText: labelText,
+            hintText: showSavedButton ? 'Search or tap the map' : null,
             prefixIcon: const Icon(Icons.search),
             suffixIcon: draft.searching || draft.resolvingSelection
                 ? const Padding(
@@ -2962,7 +3107,12 @@ class _RouteProbePanelState extends State<RouteProbePanel> {
               : TextInputAction.next,
           onSubmitted: draft.role == PlaceSearchRole.destination
               ? (_) {
-                  if (widget.canStartNavigation && !busy) _navigateNow();
+                  if (_providerReady(widget.providerStatus) &&
+                      widget.canStartNavigation &&
+                      !busy &&
+                      !draft.resolvingSelection) {
+                    _navigateNow();
+                  }
                 }
               : null,
         ),
@@ -3031,10 +3181,13 @@ class _DestinationMapPanel extends StatelessWidget {
     required this.destination,
     required this.location,
     required this.routeResult,
+    required this.selectionEnabled,
+    required this.showDestinationBadge,
     required this.onMapCreated,
     required this.onCameraMove,
     required this.onTap,
     required this.onUseCenter,
+    required this.onRecenter,
     super.key,
   });
 
@@ -3043,27 +3196,41 @@ class _DestinationMapPanel extends StatelessWidget {
   final WatchRouteEndpoint? destination;
   final LocationSnapshot? location;
   final RouteResult? routeResult;
+  final bool selectionEnabled;
+  final bool showDestinationBadge;
   final ValueChanged<gmaps.GoogleMapController> onMapCreated;
   final ValueChanged<gmaps.CameraPosition> onCameraMove;
   final ValueChanged<gmaps.LatLng> onTap;
   final VoidCallback onUseCenter;
+  final VoidCallback? onRecenter;
 
   @override
   Widget build(BuildContext context) {
+    final apiUsage = ApiUsageScope.maybeOf(context);
+    if (apiUsage == null) return _buildMap(context, null);
+    return ListenableBuilder(
+      listenable: apiUsage,
+      builder: (context, _) => _buildMap(context, apiUsage),
+    );
+  }
+
+  Widget _buildMap(BuildContext context, ApiUsageController? apiUsage) {
     final theme = Theme.of(context);
     final routePoints = routeResult?.fullRoutePoints ?? const <RoutePoint>[];
-    final apiUsage = ApiUsageScope.maybeOf(context);
+    final mapAvailable =
+        !enableGoogleMap || apiUsage == null || apiUsage.apiEnabled;
+    final canSelect = selectionEnabled && mapAvailable;
     final fallback = _StaticDestinationMapPreview(
       destination: destination,
       location: location,
       routePoints: routePoints,
-      onTap: () => onTap(initialTarget),
+      onTap: !enableGoogleMap && canSelect ? () => onTap(initialTarget) : null,
     );
     final mapChild = enableGoogleMap
         ? gmaps.GoogleMap(
             initialCameraPosition: gmaps.CameraPosition(
               target: initialTarget,
-              zoom: destination == null ? 13 : 15.5,
+              zoom: destination == null ? 14.25 : 15.5,
             ),
             markers: _markers(),
             polylines: _polylines(theme, routePoints),
@@ -3074,8 +3241,8 @@ class _DestinationMapPanel extends StatelessWidget {
             compassEnabled: false,
             onMapCreated: onMapCreated,
             onCameraMove: onCameraMove,
-            onTap: onTap,
-            onLongPress: onTap,
+            onTap: canSelect ? onTap : null,
+            onLongPress: canSelect ? onTap : null,
             gestureRecognizers: {
               Factory<OneSequenceGestureRecognizer>(
                 () => EagerGestureRecognizer(),
@@ -3089,43 +3256,74 @@ class _DestinationMapPanel extends StatelessWidget {
             map: mapChild,
             fallback: fallback,
           )
-        : fallback;
+        : mapChild;
 
     return Semantics(
-      label: 'Destination map preview',
-      button: false,
-      child: SizedBox(
-        height: 320,
-        child: ClipRRect(
-          borderRadius: BorderRadius.circular(8),
-          child: DecoratedBox(
-            decoration: BoxDecoration(
-              border: Border.all(color: theme.colorScheme.outlineVariant),
-              borderRadius: BorderRadius.circular(8),
-            ),
-            child: Stack(
-              children: [
-                Positioned.fill(child: guardedMap),
-                if (destination != null)
-                  Positioned(
-                    left: 10,
-                    top: 10,
-                    right: 10,
-                    child: _DestinationMapBadge(destination: destination!),
-                  ),
-                Positioned(
-                  right: 10,
-                  bottom: 10,
-                  child: FilledButton.tonalIcon(
-                    key: const ValueKey('status-map-use-center'),
-                    onPressed: onUseCenter,
-                    icon: const Icon(Icons.add_location_alt_outlined),
-                    label: const Text('Use Center'),
-                  ),
+      label: 'Destination map',
+      child: LayoutBuilder(
+        builder: (context, constraints) => Stack(
+          fit: StackFit.expand,
+          children: [
+            guardedMap,
+            if (constraints.maxHeight >= 180 &&
+                showDestinationBadge &&
+                mapAvailable)
+              Positioned(
+                left: 12,
+                top: 12,
+                right: 12,
+                child: IgnorePointer(
+                  child: destination != null
+                      ? _DestinationMapBadge(destination: destination!)
+                      : Card(
+                          margin: EdgeInsets.zero,
+                          child: Padding(
+                            padding: const EdgeInsets.all(12),
+                            child: Text(
+                              'Tap the map to choose a destination',
+                              textAlign: TextAlign.center,
+                              style: theme.textTheme.bodyMedium,
+                            ),
+                          ),
+                        ),
                 ),
-              ],
-            ),
-          ),
+              ),
+            if (mapAvailable)
+              Positioned(
+                left: 12,
+                right: 12,
+                bottom: 28,
+                child: Row(
+                  mainAxisAlignment: MainAxisAlignment.end,
+                  children: [
+                    if (onRecenter != null) ...[
+                      IconButton.filledTonal(
+                        key: const ValueKey('status-map-recenter'),
+                        tooltip: 'Show current location',
+                        onPressed: onRecenter,
+                        icon: const Icon(Icons.my_location),
+                      ),
+                      const SizedBox(width: 8),
+                    ],
+                    Expanded(
+                      child: Align(
+                        alignment: Alignment.centerRight,
+                        child: canSelect
+                            ? FilledButton.tonalIcon(
+                                key: const ValueKey('status-map-use-center'),
+                                onPressed: onUseCenter,
+                                icon: const Icon(
+                                  Icons.add_location_alt_outlined,
+                                ),
+                                label: const Text('Use Center'),
+                              )
+                            : const SizedBox.shrink(),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+          ],
         ),
       ),
     );
@@ -3213,13 +3411,6 @@ class _DestinationMapBadge extends StatelessWidget {
                 style: theme.textTheme.labelLarge,
               ),
             ),
-            const SizedBox(width: 8),
-            Text(
-              _coordinateText(destination.latitude, destination.longitude),
-              style: theme.textTheme.labelSmall?.copyWith(
-                color: theme.colorScheme.onSurfaceVariant,
-              ),
-            ),
           ],
         ),
       ),
@@ -3238,7 +3429,7 @@ class _StaticDestinationMapPreview extends StatelessWidget {
   final WatchRouteEndpoint? destination;
   final LocationSnapshot? location;
   final List<RoutePoint> routePoints;
-  final VoidCallback onTap;
+  final VoidCallback? onTap;
 
   @override
   Widget build(BuildContext context) {
@@ -3399,6 +3590,9 @@ class _NavigatePlaceDraft {
   final String emptyMessage;
   final TextEditingController controller = TextEditingController();
   Timer? debounce;
+  int searchRevision = 0;
+  String? searchInput;
+  LocationSnapshot? searchLocation;
   List<PlaceAutocompleteSuggestion> suggestions = const [];
   PlaceAutocompleteSuggestion? selectedSuggestion;
   WatchRouteEndpoint? resolvedEndpoint;
@@ -3408,8 +3602,16 @@ class _NavigatePlaceDraft {
   bool searching = false;
   bool resolvingSelection = false;
 
-  void dispose() {
+  void cancelSearch() {
     debounce?.cancel();
+    searchRevision++;
+    searchInput = null;
+    searchLocation = null;
+    searching = false;
+  }
+
+  void dispose() {
+    cancelSearch();
     controller.dispose();
   }
 }

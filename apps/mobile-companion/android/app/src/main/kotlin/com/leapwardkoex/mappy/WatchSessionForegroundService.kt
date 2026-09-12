@@ -14,7 +14,13 @@ import android.os.Looper
 
 class WatchSessionForegroundService : Service() {
     private val handler = Handler(Looper.getMainLooper())
-    private val stopRunnable = Runnable { stopNow() }
+    private val sessionRecovery = WatchSessionRecovery(
+        schedule = { runnable, delay -> handler.postDelayed(runnable, delay) },
+        cancel = handler::removeCallbacks,
+        isSessionActive = { MappyWatchSessionHub.isWatchAppActive(MappyWatchSessionHub.watchAppUuid) },
+        resumeGps = { WatchLocationStreamer.request(applicationContext) },
+        stopSession = ::stopNow
+    )
     private val idleRunnable = Runnable { stopAfterIdle() }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -24,20 +30,22 @@ class WatchSessionForegroundService : Service() {
         }
         when (intent?.action) {
             ACTION_STOP_AFTER_GRACE -> {
-                handler.removeCallbacks(stopRunnable)
-                handler.postDelayed(stopRunnable, STOP_GRACE_MILLIS)
+                sessionRecovery.stopAfter(STOP_GRACE_MILLIS)
             }
             ACTION_STOP_AFTER_DISCONNECT -> {
-                handler.removeCallbacks(stopRunnable)
-                handler.postDelayed(stopRunnable, DISCONNECT_GRACE_MILLIS)
+                sessionRecovery.stopAfter(DISCONNECT_GRACE_MILLIS)
             }
-            ACTION_NOTE_ACTIVITY -> scheduleIdleStop()
+            ACTION_NOTE_ACTIVITY -> {
+                sessionRecovery.resume()
+                scheduleIdleStop()
+            }
             else -> {
-                handler.removeCallbacks(stopRunnable)
+                sessionRecovery.cancelPendingStop()
                 try {
                     startForeground(NOTIFICATION_ID, buildNotification())
                     isActive = true
                     lastStartError = null
+                    sessionRecovery.resume()
                     scheduleIdleStop()
                 } catch (error: RuntimeException) {
                     isActive = false
@@ -52,7 +60,7 @@ class WatchSessionForegroundService : Service() {
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onDestroy() {
-        handler.removeCallbacks(stopRunnable)
+        sessionRecovery.cancelPendingStop()
         handler.removeCallbacks(idleRunnable)
         isActive = false
         if (!MappyWatchSessionHub.isWatchAppActive(MappyWatchSessionHub.watchAppUuid)) {
@@ -75,6 +83,8 @@ class WatchSessionForegroundService : Service() {
     }
 
     private fun stopNow() {
+        sessionRecovery.cancelPendingStop()
+        isActive = false
         WatchLocationStreamer.stop(applicationContext, sendError = false)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
             stopForeground(STOP_FOREGROUND_REMOVE)

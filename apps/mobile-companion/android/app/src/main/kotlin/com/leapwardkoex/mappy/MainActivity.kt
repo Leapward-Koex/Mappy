@@ -525,8 +525,8 @@ class MainActivity : FlutterActivity() {
         super.onResume()
         emitLocationStatusEvent()
         emitBridgeStatus()
-        if (isGpsStreamingRequested()) {
-            startGpsStreamingIfPossible()
+        if (isGpsStreamingRequested() || hasActiveWatchSession()) {
+            requestGpsStreaming()
         }
     }
 
@@ -766,16 +766,6 @@ class MainActivity : FlutterActivity() {
 
     private fun startGpsStreamingIfPossible() {
         if (isGpsStreamingRequested()) WatchLocationStreamer.request(applicationContext)
-    }
-
-    private fun restartGpsStreaming() {
-        mainHandler.post {
-            val shouldRestart = isGpsStreamingRequested()
-            stopGpsStreaming(sendError = false)
-            if (shouldRestart) {
-                startGpsStreamingIfPossible()
-            }
-        }
     }
 
     private fun stopGpsStreaming(
@@ -1429,14 +1419,8 @@ class MainActivity : FlutterActivity() {
 
     private fun handleWatchBridgeEvent(event: Map<String, Any?>) {
         if (event["event"] == "transportChanged") {
-            when (event["reason"] as? String) {
-                "connected",
-                "watchData" -> if (isGpsStreamingRequested()) {
-                    startGpsStreamingIfPossible()
-                }
-                "disconnected",
-                "stopped" -> stopGpsStreaming(sendError = false)
-            }
+            // GPS recovery and disconnect grace belong to the foreground service,
+            // which remains available when this Activity is detached.
             when (event["reason"] as? String) {
                 "connected" -> recordDiagnosticEntry(
                     source = "android_bridge",

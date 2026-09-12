@@ -62,6 +62,10 @@ void main() {
       expect(_navigationLabel('Settings'), findsOneWidget);
       expect(find.text('Status'), findsNothing);
       expect(find.text('Set up Mappy'), findsNothing);
+      expect(
+        find.byKey(const ValueKey('status-navigate-destination-map')),
+        findsOneWidget,
+      );
       expect(find.text('Set up Google Maps to navigate'), findsOneWidget);
       expect(
         find.byKey(const ValueKey('status-navigate-destination-search')),
@@ -1319,6 +1323,289 @@ void main() {
     expect(find.text('Set up Google Maps'), findsNothing);
   });
 
+  for (final firstResponseArrivesEarly in [true, false]) {
+    final order = firstResponseArrivesEarly ? 'before' : 'after';
+    testWidgets(
+      'late GPS refreshes autocomplete when original results arrive $order nearby results',
+      (tester) async {
+        final provider = ControlledAutocompleteProvider();
+        final location = DeferredSearchLocationRepository();
+        await _pumpReadyMappy(tester, provider: provider, location: location);
+        final field = find.byKey(
+          const ValueKey('status-navigate-destination-search'),
+        );
+
+        await tester.enterText(field, 'Cafe');
+        await tester.pump(const Duration(milliseconds: 400));
+        expect(location.requests, [
+          const Duration(milliseconds: 1200),
+          const Duration(seconds: 8),
+        ]);
+        expect(provider.requests, hasLength(1));
+        expect(provider.requests.first.latitude, isNull);
+        expect(provider.requests.first.longitude, isNull);
+        if (firstResponseArrivesEarly) {
+          provider.requests.first.complete('Distant cafe');
+          await tester.pumpAndSettle();
+          expect(find.text('Distant cafe'), findsOneWidget);
+        }
+
+        location.lateFix.complete(_freshLocation());
+        await tester.pump();
+        await tester.pump();
+        expect(provider.requests, hasLength(2));
+        final nearby = provider.requests.last;
+        expect(nearby.input, 'Cafe');
+        expect(nearby.latitude, 37.41973);
+        expect(nearby.longitude, -122.08278);
+        expect(nearby.sessionToken, provider.requests.first.sessionToken);
+        expect(nearby.role, PlaceSearchRole.destination);
+        nearby.complete('Nearby cafe');
+        await tester.pumpAndSettle();
+        if (!firstResponseArrivesEarly) {
+          provider.requests.first.complete('Distant cafe');
+          await tester.pumpAndSettle();
+        }
+        expect(find.text('Nearby cafe'), findsOneWidget);
+        expect(find.text('Distant cafe'), findsNothing);
+        expect(tester.widget<TextField>(field).controller!.text, 'Cafe');
+        expect(location.foregroundRequestCount, 0);
+        expect(provider.requests, hasLength(2));
+      },
+    );
+  }
+
+  testWidgets('GPS arriving during debounce uses one biased search', (
+    tester,
+  ) async {
+    final provider = ControlledAutocompleteProvider();
+    final location = DeferredSearchLocationRepository();
+    await _pumpReadyMappy(tester, provider: provider, location: location);
+
+    await tester.enterText(
+      find.byKey(const ValueKey('status-navigate-destination-search')),
+      'Cafe',
+    );
+    location.lateFix.complete(_freshLocation());
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+    expect(provider.requests, hasLength(1));
+    expect(provider.requests.single.latitude, 37.41973);
+    expect(provider.requests.single.longitude, -122.08278);
+    provider.requests.single.complete('Nearby cafe');
+    await tester.pumpAndSettle();
+    expect(find.text('Nearby cafe'), findsOneWidget);
+  });
+
+  for (final chooseMapPin in [false, true]) {
+    final selection = chooseMapPin ? 'a dropped pin' : 'cleared input';
+    testWidgets('late GPS and search responses respect $selection', (
+      tester,
+    ) async {
+      final provider = ControlledAutocompleteProvider();
+      final location = DeferredSearchLocationRepository();
+      await _pumpReadyMappy(tester, provider: provider, location: location);
+      final field = find.byKey(
+        const ValueKey('status-navigate-destination-search'),
+      );
+      await tester.enterText(field, 'Cafe');
+      await tester.pump(const Duration(milliseconds: 400));
+      if (chooseMapPin) {
+        await tester.tapAt(
+          tester.getCenter(
+            find.byKey(const ValueKey('status-navigate-destination-map')),
+          ),
+        );
+      } else {
+        await tester.enterText(field, '');
+      }
+      await tester.pump();
+      final selectedText = tester.widget<TextField>(field).controller!.text;
+
+      location.lateFix.complete(_freshLocation());
+      provider.requests.single.complete('Distant cafe');
+      await tester.pumpAndSettle();
+      expect(provider.requests, hasLength(1));
+      expect(find.text('Distant cafe'), findsNothing);
+      expect(tester.widget<TextField>(field).controller!.text, selectedText);
+      expect(find.byType(CircularProgressIndicator), findsNothing);
+      if (chooseMapPin) expect(find.text('Dropped Pin'), findsOneWidget);
+    });
+  }
+
+  testWidgets(
+    'missing GPS does not delay search and keystrokes share a location request',
+    (tester) async {
+      final provider = ControlledAutocompleteProvider();
+      final location = DeferredSearchLocationRepository();
+      await _pumpReadyMappy(tester, provider: provider, location: location);
+      final field = find.byKey(
+        const ValueKey('status-navigate-destination-search'),
+      );
+      await tester.enterText(field, 'Cafe');
+      await tester.enterText(field, 'Cafe near me');
+      await tester.pump(const Duration(milliseconds: 400));
+      expect(location.requests, hasLength(2));
+      expect(provider.requests.single.input, 'Cafe near me');
+      provider.requests.single.complete('Cafe result');
+      await tester.pumpAndSettle();
+      expect(find.text('Cafe result'), findsOneWidget);
+
+      location.lateFix.complete(null);
+      await tester.pumpAndSettle();
+      expect(find.text('Cafe result'), findsOneWidget);
+      expect(provider.requests, hasLength(1));
+      expect(tester.takeException(), isNull);
+    },
+  );
+
+  testWidgets('an old startup fix is refreshed during autocomplete', (
+    tester,
+  ) async {
+    final provider = ControlledAutocompleteProvider();
+    final location = DeferredSearchLocationRepository(
+      location: LocationSnapshot(
+        latitude: -36.85,
+        longitude: 174.76,
+        timestamp: DateTime.now().subtract(const Duration(minutes: 2)),
+        isFresh: true,
+      ),
+    );
+    await _pumpReadyMappy(tester, provider: provider, location: location);
+    await tester.enterText(
+      find.byKey(const ValueKey('status-navigate-destination-search')),
+      'Cafe',
+    );
+    await tester.pump(const Duration(milliseconds: 400));
+    expect(location.requests, hasLength(2));
+    expect(provider.requests.single.latitude, -36.85);
+    provider.requests.single.complete('Previous area');
+    await tester.pumpAndSettle();
+
+    location.lateFix.complete(_freshLocation());
+    await tester.pump();
+    await tester.pump();
+    expect(provider.requests.last.latitude, 37.41973);
+    provider.requests.last.complete('Current area');
+    await tester.pumpAndSettle();
+    expect(find.text('Current area'), findsOneWidget);
+    expect(find.text('Previous area'), findsNothing);
+  });
+  testWidgets('a map tap selects a destination before any search', (
+    tester,
+  ) async {
+    final provider = TestProviderRepository(status: _readyProvider);
+    final dispatcher = TestWatchDispatcher(providerStatus: _readyProvider);
+    await _pumpReadyMappy(tester, provider: provider, dispatcher: dispatcher);
+
+    final map = find.byKey(const ValueKey('status-navigate-destination-map'));
+    final destination = find.byKey(
+      const ValueKey('status-navigate-destination-search'),
+    );
+    final start = find.byKey(const ValueKey('status-navigate-now'));
+    final mapElement = tester.element(map);
+    expect(
+      tester.getBottomLeft(map).dy,
+      lessThan(tester.getTopLeft(destination).dy),
+    );
+    expect(tester.widget<FilledButton>(start).onPressed, isNull);
+    expect(find.text('Tap the map to choose a destination'), findsOneWidget);
+
+    await tester.tapAt(tester.getCenter(map));
+    await tester.pumpAndSettle();
+    expect(find.text('Dropped Pin'), findsOneWidget);
+    expect(
+      tester.widget<TextField>(destination).controller!.text,
+      '37.41973, -122.08278',
+    );
+    expect(tester.widget<FilledButton>(start).onPressed, isNotNull);
+    expect(provider.searchRequests, 0);
+
+    await _selectTab(tester, 'Saved');
+    await _selectTab(tester, 'Navigate');
+    expect(find.text('Dropped Pin'), findsOneWidget);
+    expect(tester.element(map), same(mapElement));
+
+    await tester.ensureVisible(start);
+    await tester.tap(start);
+    await tester.pumpAndSettle();
+    final request = dispatcher.lastNavigationRequest!;
+    expect(request.destination.label, 'Dropped Pin');
+    expect(request.destination.latitude, 37.41973);
+    expect(request.destination.longitude, -122.08278);
+    expect(request.destination.placeId, isNull);
+    expect(dispatcher.routeStarts, 1);
+    expect(tester.element(map), same(mapElement));
+
+    await tester.tapAt(tester.getCenter(map));
+    await tester.pumpAndSettle();
+    expect(find.text('Active navigation'), findsOneWidget);
+    expect(find.byKey(const ValueKey('status-map-use-center')), findsNothing);
+    expect(dispatcher.routeStarts, 1);
+
+    await tester.tap(find.byKey(const ValueKey('end-navigation')));
+    await tester.pumpAndSettle();
+    expect(tester.element(map), same(mapElement));
+    expect(tester.widget<TextField>(destination).controller!.text, isEmpty);
+    expect(tester.widget<FilledButton>(start).onPressed, isNull);
+    expect(find.text('Tap the map to choose a destination'), findsOneWidget);
+  });
+
+  testWidgets('a map tap cancels pending destination autocomplete', (
+    tester,
+  ) async {
+    final provider = _routingProvider();
+    await _pumpReadyMappy(tester, provider: provider);
+    final destination = find.byKey(
+      const ValueKey('status-navigate-destination-search'),
+    );
+    await tester.enterText(destination, 'Googleplex');
+    await tester.pump(const Duration(milliseconds: 100));
+    await tester.tapAt(
+      tester.getCenter(
+        find.byKey(const ValueKey('status-navigate-destination-map')),
+      ),
+    );
+    await tester.pumpAndSettle();
+    await tester.pump(const Duration(milliseconds: 500));
+
+    expect(provider.searchRequests, 0);
+    expect(
+      tester.widget<TextField>(destination).controller!.text,
+      '37.41973, -122.08278',
+    );
+    expect(find.byType(CircularProgressIndicator), findsNothing);
+    expect(find.widgetWithText(ListTile, 'Googleplex'), findsNothing);
+    expect(tester.testTextInput.isVisible, isFalse);
+  });
+
+  testWidgets(
+    'destination map stays visible while controls scroll and keyboard opens',
+    (tester) async {
+      await _pumpReadyMappy(
+        tester,
+        surfaceSize: const Size(320, 720),
+        textScaleFactor: 2,
+      );
+      final map = find.byKey(const ValueKey('status-navigate-destination-map'));
+      final originalBounds = tester.getRect(map);
+      await tester.tapAt(originalBounds.center);
+      await tester.pumpAndSettle();
+      await tester.ensureVisible(
+        find.byKey(const ValueKey('status-navigate-now')),
+      );
+      await tester.pumpAndSettle();
+      expect(tester.getRect(map), originalBounds);
+      expect(tester.takeException(), isNull);
+
+      tester.view.viewInsets = const FakeViewPadding(bottom: 260);
+      addTearDown(tester.view.resetViewInsets);
+      await tester.pumpAndSettle();
+      expect(tester.getRect(map).height, greaterThan(0));
+      expect(tester.getRect(map).top, originalBounds.top);
+      expect(tester.takeException(), isNull);
+    },
+  );
   testWidgets('Navigate starts, reroutes, and ends an active route', (
     tester,
   ) async {
@@ -2173,6 +2460,80 @@ class TestProviderRepository implements ProviderRepository {
 
   @override
   Future<ProviderStatus> validateProviderSetup() async => status;
+}
+
+class DeferredSearchLocationRepository extends TestLocationRepository {
+  DeferredSearchLocationRepository({super.location})
+    : super(accessStatus: _readyLocationAccess);
+
+  final requests = <Duration?>[];
+  final lateFix = Completer<LocationSnapshot?>();
+
+  @override
+  Future<LocationSnapshot?> getCurrentLocation({Duration? timeout}) {
+    requests.add(timeout);
+    return requests.length == 1 ? Future.value(location) : lateFix.future;
+  }
+}
+
+class PendingAutocompleteRequest {
+  PendingAutocompleteRequest({
+    required this.input,
+    required this.role,
+    required this.latitude,
+    required this.longitude,
+    required this.sessionToken,
+  });
+
+  final String input;
+  final PlaceSearchRole role;
+  final double? latitude;
+  final double? longitude;
+  final String? sessionToken;
+  final result = Completer<PlaceAutocompleteResult>();
+
+  void complete(String name) {
+    result.complete(
+      PlaceAutocompleteResult(
+        ok: true,
+        status: _readyProvider,
+        suggestions: [
+          PlaceAutocompleteSuggestion(
+            placeId: name,
+            primaryText: name,
+            secondaryText: '',
+            fullText: name,
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class ControlledAutocompleteProvider extends TestProviderRepository {
+  ControlledAutocompleteProvider() : super(status: _readyProvider);
+  final requests = <PendingAutocompleteRequest>[];
+
+  @override
+  Future<PlaceAutocompleteResult> searchPlaces({
+    required String input,
+    PlaceSearchRole role = PlaceSearchRole.destination,
+    double? originLatitude,
+    double? originLongitude,
+    String? sessionToken,
+    String language = 'en-US',
+    String region = 'US',
+  }) {
+    final request = PendingAutocompleteRequest(
+      input: input,
+      role: role,
+      latitude: originLatitude,
+      longitude: originLongitude,
+      sessionToken: sessionToken,
+    );
+    requests.add(request);
+    return request.result.future;
+  }
 }
 
 class DeferredFirstProviderRepository extends TestProviderRepository {
